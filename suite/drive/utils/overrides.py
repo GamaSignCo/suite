@@ -40,7 +40,8 @@ def filter_file(user=None):
     public files, DocShares, and readable attachments — folder-inherited access
     needs Drive's recursive path traversal, impractical in SQL, so it's left to
     `has_permission`."""
-    return file_permission_criterion(user)
+    criterion = file_permission_criterion(user)
+    return criterion.get_sql(quote_char="`") if criterion else ""
 
 
 def common_filters(func):

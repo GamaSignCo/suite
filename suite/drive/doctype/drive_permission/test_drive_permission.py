@@ -3,9 +3,11 @@
 
 from unittest.mock import patch
 
+import frappe
 from frappe.tests import IntegrationTestCase, UnitTestCase
 
 from suite.drive.doctype.drive_permission.drive_permission import DrivePermission
+from suite.drive.utils.overrides import filter_file
 
 # On IntegrationTestCase, the doctype test records and all
 # link-field test record dependencies are recursively loaded
@@ -36,6 +38,19 @@ class UnitTestDrivePermission(UnitTestCase):
         enqueue.assert_called_once()
         self.assertNotIn("now", enqueue.call_args.kwargs)
         self.assertTrue(enqueue.call_args.kwargs["enqueue_after_commit"])
+
+    def test_file_permission_query_uses_mariadb_identifier_quotes(self):
+        with (
+            patch.object(frappe, "get_roles", return_value=["Suite User"]),
+            patch("suite.drive.utils.overrides.get_principals", return_value=["user@example.com"]),
+            patch("suite.drive.utils.overrides.get_doctypes_with_read", return_value=[]),
+        ):
+            condition = filter_file("user@example.com")
+
+        self.assertIn("`tabDrive Permission`", condition)
+        self.assertIn("`tabDocShare`", condition)
+        self.assertNotIn('"tabDrive Permission"', condition)
+        self.assertNotIn('"tabDocShare"', condition)
 
 
 class IntegrationTestDrivePermission(IntegrationTestCase):
