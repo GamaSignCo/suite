@@ -1,11 +1,11 @@
 <template>
-	<Popover transition="default">
-		<template #target="{ togglePopover, isOpen }">
-			<slot v-bind="{ isOpen, togglePopover }">
+	<Popover bare>
+		<template #trigger="{ toggle, open }">
+			<slot v-bind="{ open, toggle }">
 				<span class="text-base"> {{ modelValue || '' }} </span>
 			</slot>
 		</template>
-		<template #body="{ togglePopover }">
+		<template #default="{ toggle }">
 			<div
 				v-if="reaction"
 				class="bg-surface-base flex items-center justify-center gap-2 rounded-full px-2 py-1 shadow-sm"
@@ -13,18 +13,18 @@
 				<div
 					v-for="r in reactionEmojis"
 					:key="r"
-					class="bg-surface-base size-5 cursor-pointer rounded-full text-3xl"
-					@click="() => (emoji = r) && togglePopover()"
+					class="bg-surface-base size-5 cursor-pointer rounded-full text-2xl"
+					@click="() => (emoji = r) && toggle()"
 				>
 					<button>
 						{{ r }}
 					</button>
 				</div>
-				<Button class="rounded-full" icon="plus" @click.stop="() => (reaction = false)" />
+				<Button class="rounded-full" icon="lucide-plus" @click.stop="() => (reaction = false)" />
 			</div>
-			<div v-else class="bg-surface-base my-3 max-w-max transform rounded-lg px-4 sm:px-0">
+			<div v-else class="bg-surface-base my-3 max-w-max transform rounded-6 px-4 sm:px-0">
 				<div
-					class="relative max-h-96 overflow-y-auto rounded-lg pb-3 shadow-2xl ring-1 ring-black ring-opacity-5"
+					class="relative max-h-96 overflow-y-auto rounded-6 pb-3 shadow-2xl ring-1 ring-black ring-opacity-5"
 				>
 					<div class="flex gap-2 px-3 pb-1 pt-3">
 						<div class="flex-1">
@@ -47,9 +47,9 @@
 							<button
 								v-for="_emoji in emojis"
 								:key="_emoji.description"
-								class="hover:bg-surface-gray-2 h-8 w-8 rounded-md p-1 text-4xl focus:outline-none focus:ring focus:ring-blue-200"
+								class="hover:bg-surface-gray-2 h-8 w-8 rounded-4 p-1 text-3xl focus:outline-none focus:ring focus:ring-blue-200"
 								:title="_emoji.description"
-								@click="() => (emoji = _emoji.emoji) && togglePopover()"
+								@click="() => (emoji = _emoji.emoji) && toggle()"
 							>
 								{{ _emoji.emoji }}
 							</button>

@@ -47,7 +47,7 @@ import { computed, ref } from 'vue'
 import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
 import { Mails, Plus } from 'lucide-vue-next'
 import { BottomSheet } from 'frappe-ui'
-import { Icon } from 'frappe-ui/icons'
+import { Icon } from 'frappe-ui/experimental'
 
 import FolderModal from '@/apps/mail/components/Modals/FolderModal.vue'
 
@@ -165,7 +165,7 @@ const go = (to: RouteLocationRaw) => {
 
 const rowClass = (active: boolean) =>
 	[
-		'flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-base text-ink-gray-8',
+		'flex w-full items-center gap-3 rounded-6 px-3 py-2.5 text-base text-ink-gray-8',
 		active ? 'bg-surface-gray-2 !font-semibold' : 'active:bg-surface-gray-1',
 	].join(' ')
 </script>

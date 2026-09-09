@@ -15,11 +15,9 @@
 		>
 			<FileUploader
 				:fileTypes="allowedImageFileTypes"
-				:uploadArgs="{
-					doctype: 'Presentation',
-					docname: presentationId,
-					private: true,
-				}"
+				doctype="Presentation"
+				:docname="presentationId"
+				private
 				@success="replaceTemplateImage"
 			>
 				<template #default="{ openFileSelector }">
@@ -73,7 +71,7 @@ const handleDoubleClick = (e) => {
 }
 
 const replaceButtonClasses =
-	'absolute inset-[calc(50%-16px)] flex size-8 cursor-pointer items-center justify-center rounded-lg bg-white'
+	'absolute inset-[calc(50%-16px)] flex size-8 cursor-pointer items-center justify-center rounded-6 bg-white'
 
 const showReplaceImageButton = computed(() => {
 	return (

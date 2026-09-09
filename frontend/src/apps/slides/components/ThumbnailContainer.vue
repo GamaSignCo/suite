@@ -61,7 +61,7 @@ const getThumbnailClasses = () => {
 		'cursor-pointer',
 		'border',
 		'border-outline-gray-1',
-		'rounded-md',
+		'rounded-6',
 		'transition-transform',
 		'duration-400',
 		'ease-in-out',

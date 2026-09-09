@@ -72,9 +72,13 @@ test.describe("Restricted meeting", { tag: "@meet-group-1" }, () => {
 		await expect(joinRequest).toHaveCount(0, {
 			timeout: lobbyTransitionTimeout,
 		});
+		await expect(
+			guest.page.getByText("Your join request was denied by the meeting host"),
+		).toBeVisible({ timeout: lobbyTransitionTimeout });
 
 		await guest.page.goto(appUrl(`/meet/${meetingId}`));
 		await expect(guest.page.getByRole("heading", { name: "Ready to join?" })).toBeVisible();
+		await guest.page.getByPlaceholder("John Doe").fill(guestName);
 		await guest.page.getByRole("button", { name: "Join Meeting" }).click();
 
 		await expect(

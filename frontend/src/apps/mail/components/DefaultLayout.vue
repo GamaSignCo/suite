@@ -74,13 +74,15 @@ const { events, selectedEvent } = useUpcomingEvents()
 provide('$dayjs', dayjs)
 
 // Full editing (participants, recurrence) lives in the calendar app's modal;
-// hand over via the deep link (?event=<id>&edit=1) so the modal is already
-// open on arrival. Clear the selection so the sidebar isn't still open when
-// the user comes back to mail.
+// hand over via its deep link (?edit=<id>) so the modal is already open on
+// arrival — the modal alone, not the detail sidebar the day route would open.
+// Clear the selection so the sidebar isn't still open when the user comes
+// back to mail.
 const openEventInCalendar = () => {
 	const target = eventDayRoute(selectedEvent.value, store.accountId)
 	selectedEvent.value = null
-	router.push({ ...target, query: { ...target.query, edit: '1' } })
+	const { event, recurrence, ...query } = target.query
+	router.push({ ...target, query: { ...query, edit: event, editRecurrence: recurrence } })
 }
 
 // The panel's "email participants" opens mail's own compose window (the

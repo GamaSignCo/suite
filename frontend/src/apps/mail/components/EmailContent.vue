@@ -1,7 +1,7 @@
 <template>
 	<div
 		v-if="showImagesBanner"
-		class="text-ink-gray-6 mb-3 flex flex-col gap-3 rounded border p-2.5 px-4 sm:flex-row sm:items-center"
+		class="text-ink-gray-6 mb-3 flex flex-col gap-3 rounded-4 border p-2.5 px-4 sm:flex-row sm:items-center"
 	>
 		<div class="flex min-w-0 flex-1 items-start gap-3">
 			<!-- Centered on the FIRST line, not on the block: the label wraps to two lines
@@ -485,17 +485,34 @@ const srcdoc = computed(() => {
 					}
 					return false;
 				};
+				// Same rule as useSwipeNav in the parent, and for the same reason: a gesture
+				// that has scrolled 24px vertically is a scroll and stays one, however it
+				// ends. Reading a message is mostly scrolling, so endpoint-only judgement
+				// paged the thread out from under the reader.
 				let swipeOrigin = null;
+				let swipeScrolling = false;
 				document.addEventListener('touchstart', (e) => {
+					swipeScrolling = false;
 					swipeOrigin = e.touches.length === 1 && !inHorizontalScroller(e.target)
 						? { x: e.touches[0].clientX, y: e.touches[0].clientY }
 						: null;
+				}, { passive: true });
+				document.addEventListener('touchmove', (e) => {
+					if (!swipeOrigin || swipeScrolling) return;
+					const touch = e.touches[0];
+					if (!touch) return;
+					const dy = touch.clientY - swipeOrigin.y;
+					if (Math.abs(dy) > 24 && Math.abs(dy) > Math.abs(touch.clientX - swipeOrigin.x))
+						swipeScrolling = true;
 				}, { passive: true });
 				document.addEventListener('touchend', (e) => {
 					if (!swipeOrigin) return;
 					const dx = e.changedTouches[0].clientX - swipeOrigin.x;
 					const dy = e.changedTouches[0].clientY - swipeOrigin.y;
+					const wasScrolling = swipeScrolling;
 					swipeOrigin = null;
+					swipeScrolling = false;
+					if (wasScrolling) return;
 					if (Math.abs(dx) < 64 || Math.abs(dx) < Math.abs(dy) * 2) return;
 					window.parent.postMessage({ type: 'swipe', direction: dx < 0 ? 'left' : 'right' }, '*');
 				}, { passive: true });

@@ -273,12 +273,6 @@ class TestMailScheduledSend(StalwartIntegrationTestCase):
         submission = self._get_submission(account, scheduled.submission_id)
         self.assertEqual(submission["undoStatus"], "canceled")
 
-        # The queue log mirrors the cancellation via cancelled_at; the row stays Submitted.
-        with self.set_user("Administrator"):
-            doc = frappe.get_doc("Mail Queue", scheduled.name)
-        self.assertEqual(doc.status, "Submitted")
-        self.assertTrue(doc.cancelled_at)
-
         # Back in Drafts only (mailboxIds replaced, not patched) with $draft restored.
         with self.set_user(self.sender.email):
             from suite.mail.jmap import get_mailbox_id_by_role
@@ -330,12 +324,6 @@ class TestMailScheduledSend(StalwartIntegrationTestCase):
         self.assertEqual(new_submission["undoStatus"], "pending")
         self.assertLessEqual(abs(_epoch(new_submission["sendAt"]) - _epoch(new_send_at)), 5)
 
-        # The queue log follows the replacement submission.
-        with self.set_user("Administrator"):
-            doc = frappe.get_doc("Mail Queue", scheduled.name)
-        self.assertEqual(doc.submission_id, result["id"])
-        self.assertLessEqual(abs(_epoch(to_utc_z(doc.send_at)) - _epoch(new_send_at)), 5)
-
     def test_send_now_delivers(self):
         scheduled = self._schedule(minutes=60 * 24)
         account = self.personal_account(self.sender)
@@ -343,11 +331,6 @@ class TestMailScheduledSend(StalwartIntegrationTestCase):
         with self.set_user(self.sender.email):
             result = send_scheduled_mail_now(account, scheduled.submission_id)
         self.assertTrue(result["id"])
-
-        with self.set_user("Administrator"):
-            doc = frappe.get_doc("Mail Queue", scheduled.name)
-        self.assertEqual(doc.submission_id, result["id"])
-        self.assertFalse(doc.send_at)
 
         def find_thread():
             threads = self.get_inbox_threads(self.recipient)
@@ -429,10 +412,8 @@ class TestMailScheduledSend(StalwartIntegrationTestCase):
                 send_at=get_datetime_str(add_to_date(now(), minutes=60)),
             )
 
-    def test_undo_send_holds_and_cancels(self):
-        # The composer's default Send: the server computes a short hold so the sender
-        # can cancel from the undo toast; Undo is just cancel_scheduled_mail.
-        from suite.mail.api.mail import UNDO_SEND_HOLD_SECONDS
+    def _undo_send(self) -> tuple[dict, float]:
+        """Sends a plain (undo-send) mail from the class sender; returns the result and its remaining hold in seconds."""
 
         result = self.send_mail(self.sender, self.recipient.email, undo_send=True)
         self.assertEqual(result["status"], "Submitted", result.get("error"))
@@ -440,8 +421,20 @@ class TestMailScheduledSend(StalwartIntegrationTestCase):
         self.assertTrue(result["send_at"])
 
         hold = time_diff_in_seconds(frappe.db.get_value("Mail Queue", result["name"], "send_at"), now())
+        return result, hold
+
+    def test_undo_send_holds_and_cancels(self):
+        # The composer's default Send: the server computes a short hold so the sender
+        # can cancel from the undo toast; Undo is just cancel_scheduled_mail.
+        from suite.mail.api.mail import UNDO_SEND_GRACE_SECONDS
+        from suite.mail.utils.user import get_undo_send_period
+
+        result, hold = self._undo_send()
+        period = get_undo_send_period(self.sender.email)
         self.assertGreater(hold, 0)
-        self.assertLessEqual(hold, UNDO_SEND_HOLD_SECONDS + 5)
+        self.assertLessEqual(hold, period + UNDO_SEND_GRACE_SECONDS + 5)
+        # The composer times its Undo toast from the period the server applied.
+        self.assertEqual(result["undo_send_period"], period)
 
         account = self.personal_account(self.sender)
         with self.set_user(self.sender.email):
@@ -450,6 +443,23 @@ class TestMailScheduledSend(StalwartIntegrationTestCase):
 
         submission = self._get_submission(account, result["submission_id"])
         self.assertEqual(submission["undoStatus"], "canceled")
+
+    def test_undo_send_hold_follows_user_settings(self):
+        # The hold is the sender's own Undo Send period (User Settings) plus the grace, so a
+        # longer period keeps the message recallable for longer.
+        from suite.mail.api.mail import UNDO_SEND_GRACE_SECONDS
+        from suite.mail.utils.user import DEFAULT_UNDO_SEND_PERIOD
+
+        settings = frappe.db.get_value("User Settings", {"user": self.sender.email})
+        frappe.db.set_value("User Settings", settings, "undo_send_period", "30")
+        self.addCleanup(
+            frappe.db.set_value, "User Settings", settings, "undo_send_period", str(DEFAULT_UNDO_SEND_PERIOD)
+        )
+
+        result, hold = self._undo_send()
+        self.assertEqual(result["undo_send_period"], 30)
+        self.assertGreater(hold, DEFAULT_UNDO_SEND_PERIOD + UNDO_SEND_GRACE_SECONDS)
+        self.assertLessEqual(hold, 30 + UNDO_SEND_GRACE_SECONDS + 5)
 
     def test_submission_details(self):
         scheduled = self._schedule(minutes=120)

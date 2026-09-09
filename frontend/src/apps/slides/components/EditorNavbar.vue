@@ -10,11 +10,11 @@
 			</div>
 		</template>
 		<template #right-actions>
-			<Badge v-if="!inReadonlyMode && !isOnline" variant="subtle" theme="orange" size="md">
+			<Badge v-if="!inReadonlyMode && !isOnline" variant="subtle" theme="amber" size="md">
 				<LucideWifiOff class="mr-1 size-3.5 stroke-[1.5]" />
 				<span>Offline</span>
 			</Badge>
-			<Badge v-if="!inReadonlyMode && saveFailed && isOnline" variant="subtle" theme="orange" size="md">
+			<Badge v-if="!inReadonlyMode && saveFailed && isOnline" variant="subtle" theme="amber" size="md">
 				<LucideCloudOff class="mr-1 size-3.5 stroke-[1.5]" />
 				<span>Save failed. Keep this tab open.</span>
 			</Badge>

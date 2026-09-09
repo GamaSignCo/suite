@@ -6,13 +6,13 @@
 				v-for="stat in stats"
 				:key="stat.label"
 				:to="stat.to"
-				class="hover:bg-surface-gray-1 group flex flex-col gap-1 rounded-md border p-4 transition-colors"
+				class="hover:bg-surface-gray-1 group flex flex-col gap-1 rounded-4 border p-4 transition-colors"
 			>
 				<span class="text-ink-gray-5 flex items-center gap-1.5 text-sm">
 					<component :is="stat.icon" class="h-4 w-4" />
 					{{ stat.label }}
 				</span>
-				<span class="text-ink-gray-9 text-2xl font-semibold">{{ stat.value }}</span>
+				<span class="text-ink-gray-9 text-xl font-semibold">{{ stat.value }}</span>
 				<span class="text-xs" :class="stat.subTone === 'warning' && stat.sub ? 'text-ink-amber-6' : 'text-ink-gray-5'">
 					{{ stat.sub || ' ' }}
 				</span>
@@ -61,7 +61,7 @@
 						class="hover:bg-surface-gray-1 group flex items-center gap-3 border-b px-5 py-3 last:border-b-0"
 					>
 						<div
-							class="bg-surface-gray-2 text-ink-gray-6 flex h-8 w-8 shrink-0 items-center justify-center rounded-md"
+							class="bg-surface-gray-2 text-ink-gray-6 flex h-8 w-8 shrink-0 items-center justify-center rounded-4"
 						>
 							<component :is="action.icon" class="h-4 w-4" />
 						</div>
@@ -82,8 +82,10 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { useRouter } from 'vue-router'
-import { Badge, Button, FeatherIcon, createResource, usePageMeta } from 'frappe-ui'
+import { Badge, Button, createResource, usePageMeta } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
 
 import { fromNow } from '@/apps/mail/utils/datetime'
 import DashboardCard from '@/apps/mail/components/DashboardCard.vue'
@@ -119,7 +121,7 @@ type OverviewData = {
 	recent_logs: LogEntry[]
 }
 
-usePageMeta(() => ({ title: __('Overview') }))
+usePageMeta(() => appPageMeta(__('Overview'), 'Mail'))
 
 const router = useRouter()
 

@@ -21,6 +21,20 @@ export interface CaptureGap {
 	reason: string;
 }
 
+export interface CaptureInterruption {
+	id: string;
+	detected_at: string;
+	deadline: string;
+	omission_started_at: string;
+	reason: string;
+}
+
+export interface CaptureRecovery {
+	id: string;
+	capture_started_at: string;
+	recovered_at: string;
+}
+
 export interface CaptureArtifact {
 	file: string;
 	bytes: number;
@@ -28,8 +42,12 @@ export interface CaptureArtifact {
 	duration_ms: number;
 }
 
-export interface CaptureManifest {
-	version: 1;
+export interface CaptureEpoch {
+	epoch: number;
+	capture_started_at: string;
+}
+
+interface CaptureManifestBase {
 	revision: number;
 	job: string;
 	state: CaptureState;
@@ -40,6 +58,10 @@ export interface CaptureManifest {
 	reason?: string;
 }
 
+export type CaptureManifest =
+	| (CaptureManifestBase & { version: 1; capture_epochs?: CaptureEpoch[] })
+	| (CaptureManifestBase & { version: 2; capture_epochs: CaptureEpoch[] });
+
 export interface MediaProbe {
 	duration_ms: number;
 	video: { codec: 'h264'; width: 1920; height: 1080; fps: 30 };
@@ -47,5 +69,5 @@ export interface MediaProbe {
 }
 
 export interface MediaTools {
-	validate(path: string): Promise<MediaProbe>;
+	validate(path: string, timeoutMs?: number): Promise<MediaProbe>;
 }

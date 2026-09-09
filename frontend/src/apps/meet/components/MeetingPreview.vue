@@ -8,7 +8,7 @@
 			<!-- Video preview remains bounded so the camera-off state does not dominate. -->
 			<div class="flex min-w-0 flex-1 items-center justify-center lg:flex-[2]">
 				<div
-					class="relative aspect-video w-full overflow-hidden rounded-xl bg-black shadow-xl lg:aspect-[3/2]"
+					class="relative aspect-video w-full overflow-hidden rounded-7 bg-black shadow-xl lg:aspect-[3/2]"
 				>
 					<ParticipantTile
 						class="h-full w-full"
@@ -49,7 +49,7 @@
 						{{ props.meetingTitle }}
 					</p>
 
-					<h2 class="mb-7 text-4xl-semibold text-ink-gray-9">
+					<h2 class="mb-7 text-3xl-semibold text-ink-gray-9">
 						Ready to join?
 					</h2>
 
@@ -63,7 +63,14 @@
 						alignment="left"
 					/>
 
-					<form class="mt-7 space-y-3" @submit.prevent="handleJoin">
+					<div
+						v-if="terminalGuestSession"
+						class="mt-7 rounded-6 border border-outline-gray-2 bg-surface-gray-1 p-4"
+					>
+						<p class="text-sm text-ink-gray-7">You can’t join this meeting.</p>
+					</div>
+
+					<form v-else class="mt-7 space-y-3" @submit.prevent="handleJoin">
 						<FormControl
 							v-if="isGuest"
 							ref="guestNameInputRef"
@@ -97,15 +104,23 @@
 </template>
 
 <script setup lang="ts">
-import { Button, createResource, FormControl, toast } from "frappe-ui";
+import { Button, FormControl, toast, useCall } from "frappe-ui";
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import AvatarGroup from "../components/AvatarGroup.vue";
 import ParticipantTile from "../components/ParticipantTile.vue";
 import PreviewToolbar from "../components/PreviewToolbar.vue";
 import { useMeetingPreviewPresence } from "../composables/useMeetingPreviewPresence";
+import {
+	clearRetryableGuestSession,
+	readActiveGuestSession,
+	readGuestSession,
+	type StoredGuestSession,
+} from "../composables/useConnectionState";
 import { session } from "@/boot/session";
 import { getErrorMessage } from "../utils/error";
 import { getInitials } from "../utils/text";
+import type { JoinPayload } from "../types";
+import { submit } from "../utils/request";
 import type { Participant } from "../utils/media/ParticipantManager";
 interface VideoElement {
 	$el?:
@@ -134,30 +149,44 @@ const emit = defineEmits<{
 	"toggle-camera": [];
 	"join-from-preview": [switchHere: boolean];
 	"device-changed": [event: unknown];
-	"guest-join-complete": [data: { guestName: string; joinResult: unknown }];
+	"guest-join-complete": [data: { guestName: string; joinResult: JoinPayload }];
 }>();
 
 const guestName = ref("");
+const terminalGuestSession = ref<StoredGuestSession | null>(null);
 
 onMounted(() => {
-	const savedGuestName = localStorage.getItem("guest_name");
+	const guestSession = readGuestSession(props.meetingId);
+	const savedGuestName = guestSession?.guestName;
 	if (savedGuestName && !session.isLoggedIn) {
 		guestName.value = savedGuestName;
+	}
+	if (guestSession?.status === "rejected" || guestSession?.status === "expired") {
+		clearRetryableGuestSession(props.meetingId);
+	} else if (guestSession?.status === "banned") {
+		terminalGuestSession.value = guestSession;
 	}
 });
 const guestNameInputRef = ref<VideoElement | null>(null);
 
-const joinGuestAPI = createResource({
-	url: "suite.meet.api.meeting.join_meeting_as_guest",
-	makeParams: () => {
+const joinGuestAPI = useCall({
+	url: "/api/v2/method/suite.meet.api.meeting.join_meeting_as_guest",
+	method: "POST",
+	immediate: false,
+	params: () => {
+		const guestSession = readActiveGuestSession(props.meetingId);
 		return {
 			meeting_id: props.meetingId,
 			guest_name: guestName.value.trim(),
+			...(guestSession && {
+				guest_id: guestSession.guestId,
+				guest_session_token: guestSession.guestSessionToken,
+			}),
 		};
 	},
 });
 
-const isGuest = computed(() => !session.isLoggedIn && !props.guestAuthToken);
+const isGuest = computed(() => !session.isLoggedIn);
 
 const previewName = computed(() => {
 	if (isGuest.value && guestName.value.trim()) {
@@ -205,14 +234,20 @@ const handleJoin = async () => {
 	}
 
 	if (isGuest.value) {
+		const storedSession = readGuestSession(props.meetingId);
+		if (storedSession?.status === "rejected" || storedSession?.status === "expired") {
+			clearRetryableGuestSession(props.meetingId);
+		} else if (storedSession?.status === "banned") {
+			terminalGuestSession.value = storedSession;
+			toast.error("You can’t join this meeting.");
+			return;
+		}
 		if (!guestName.value.trim()) {
 			return;
 		}
 
 		try {
-			const result = await joinGuestAPI.submit();
-
-			localStorage.setItem("guest_name", guestName.value.trim());
+			const result = await submit<JoinPayload>(joinGuestAPI);
 
 			emit("guest-join-complete", {
 				guestName: guestName.value.trim(),

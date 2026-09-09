@@ -29,7 +29,7 @@
       <!-- Action bar (visible while selected) -->
       <div v-if="selectedId === chart.id" class="co-actions" @mousedown.stop>
         <button class="co-action" title="Edit chart" @click="$emit('edit', chart.id)">
-          <FeatherIcon name="edit-2" class="co-action-icon" />
+          <FeatherIcon name="pencil" class="co-action-icon" />
         </button>
         <button class="co-action" title="Refresh data" @click="$emit('refresh', chart.id)">
           <FeatherIcon name="refresh-cw" class="co-action-icon" />
@@ -51,7 +51,7 @@
 
 <script setup>
 import { computed, defineAsyncComponent, ref } from 'vue'
-import { FeatherIcon } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
 // Lazy-load ChartView so ECharts (~600 KB) only enters the bundle when a
 // sheet actually has charts. Vite produces a separate chunk for the
 // component and all its transitive `echarts/*` imports.

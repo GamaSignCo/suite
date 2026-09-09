@@ -35,25 +35,16 @@
 	</DashboardLayout>
 
 	<AddContactModal v-model="showAddContact" />
-	<Dialog v-model="showDeleteContacts" :options="DELETE_CONTACTS_OPTIONS" />
+	<Dialog v-model:open="showDeleteContacts" v-bind="DELETE_CONTACTS_OPTIONS" />
 </template>
 
 <script setup lang="ts">
 import { computed, ref, useTemplateRef, watch } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { useDebounceFn, watchDebounced } from '@vueuse/core'
 import {
-	Button,
-	Dialog,
-	FeatherIcon,
-	FormControl,
-	ListEmptyState,
-	ListHeader,
-	ListRows,
-	ListSelectBanner,
-	ListView,
-	createResource,
-	usePageMeta,
-} from 'frappe-ui'
+	Button, Dialog, FormControl, createResource, usePageMeta } from 'frappe-ui'
+import { Icon as FeatherIcon, ListEmptyState, ListHeader, ListRows, ListSelectBanner, ListView } from 'frappe-ui/experimental'
 
 import { extractNameFromEmail, raiseToast } from '@/apps/mail/utils'
 import { userStore } from '@/apps/mail/stores/user'
@@ -62,7 +53,7 @@ import AddContactModal from '@/apps/mail/components/Modals/AddContactModal.vue'
 
 const { accountId } = defineProps<{ accountId: string }>()
 
-usePageMeta(() => ({ title: __('Contacts') }))
+usePageMeta(() => appPageMeta(__('Contacts'), 'Mail'))
 
 const store = userStore()
 
@@ -149,7 +140,7 @@ const LIST_COLUMNS = [
 const DELETE_CONTACTS_OPTIONS = {
 	title: __('Delete Contacts'),
 	message: __('Are you sure you want to delete the selected contacts?'),
-	icon: { name: 'alert-triangle', appearance: 'warning' },
+	icon: { name: 'lucide-alert-triangle', theme: 'amber' },
 	actions: [{ label: __('Confirm'), variant: 'solid', onClick: deleteContacts.submit }],
 }
 </script>

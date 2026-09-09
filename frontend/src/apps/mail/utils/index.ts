@@ -69,7 +69,7 @@ export const raiseToast = (
 							? {
 									classes: {
 										cancelButton:
-											'!ml-auto mr-1 h-7 shrink-0 rounded bg-transparent !transition-colors',
+											'!ml-auto mr-1 h-7 shrink-0 rounded-4 bg-transparent !transition-colors',
 										actionButton: '!ml-0',
 									},
 								}
@@ -92,7 +92,7 @@ export const raisePromiseToast = (
 	success: string,
 	undoAction?: () => void,
 ) => {
-	toast.removeAll()
+	toast.dismiss()
 
 	const error = __('Action failed. Please try again later.')
 
@@ -117,7 +117,7 @@ export const raiseOptimisticToast = (
 	success: string,
 	undoAction?: () => void,
 ) => {
-	toast.removeAll()
+	toast.dismiss()
 	const id = toast.success(
 		success,
 		undoAction ? { action: { label: __('Undo'), onClick: () => undoAction() } } : undefined,
@@ -254,7 +254,7 @@ export const isEmail = (s: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s)
 // Mirrors the backend's DOMAIN_NAME_PATTERN: 1-63 char labels of letters/digits/hyphens (no leading or
 // trailing hyphen), joined by dots, at most 253 chars overall — so the Add button never enables a value
 // the API would reject.
-export const isDomain = (s: string) =>
+const isDomain = (s: string) =>
 	/^@(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(?:\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))+$/.test(s)
 
 // A screened value: either a full email address or a whole domain (@example.com).
@@ -425,6 +425,21 @@ export const getIcon = (mailbox: MailboxData) => {
 	if (mailbox.role && mailbox.role in FOLDER_ICON_MAP) return FOLDER_ICON_MAP[mailbox.role]
 	return 'folder'
 }
+
+/**
+ * Whether a mailbox can be moved into. The "Move to" menu and the folders that
+ * take a dragged thread are the same question asked twice, so they ask it here:
+ * a thread cannot be moved to where it already is, and Sent, Drafts and the
+ * Screener hold mail that is defined by how it got there rather than by a folder
+ * anyone files into.
+ */
+export const canMoveToMailbox = (
+	mailboxId: string | undefined,
+	current: string | undefined,
+	mailboxIds: { sent?: string; drafts?: string; screener?: string },
+): boolean =>
+	!!mailboxId &&
+	![current, mailboxIds.sent, mailboxIds.drafts, mailboxIds.screener].includes(mailboxId)
 
 // The Screening folder is surfaced to users as the "Screener".
 export const getMailboxName = (mailbox: MailboxData) =>

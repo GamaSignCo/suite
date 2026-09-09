@@ -1,5 +1,5 @@
 <template>
-	<SettingsDialog v-model="show" v-model:tab="activeTab" size="5xl">
+	<SettingsDialog v-model:open="show" v-model:tab="activeTab" size="5xl">
 		<template #title>{{ __('Settings') }}</template>
 		<SettingsSidebar>
 			<SettingsNavGroup
@@ -36,6 +36,7 @@ import {
 	KeyRound,
 	Mailbox,
 	Palette,
+	PenLine,
 	TreePalm,
 	User,
 	Zap,
@@ -55,6 +56,7 @@ import AdvancedSettings from '@/apps/mail/components/Settings/AdvancedSettings.v
 import CredentialsSettings from '@/apps/mail/components/Settings/CredentialsSettings.vue'
 import AppearanceSettings from '@/apps/mail/components/Settings/AppearanceSettings.vue'
 import AutomationSettings from '@/apps/mail/components/Settings/AutomationSettings.vue'
+import ComposeSettings from '@/apps/mail/components/Settings/ComposeSettings.vue'
 import ExportSettings from '@/apps/mail/components/Settings/ExportSettings.vue'
 import FolderSettings from '@/apps/mail/components/Settings/FolderSettings.vue'
 import IdentitySettings from '@/apps/mail/components/Settings/IdentitySettings.vue'
@@ -139,6 +141,13 @@ const tabGroups = computed((): SettingsTabGroup[] => {
 					value: 'signatures',
 					icon: Feather,
 					component: markRaw(SignatureSettings),
+					condition: jmap,
+				},
+				{
+					label: __('Compose'),
+					value: 'compose',
+					icon: PenLine,
+					component: markRaw(ComposeSettings),
 					condition: jmap,
 				},
 				{

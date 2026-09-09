@@ -3,19 +3,22 @@
 
 import base64
 import json
-from datetime import timedelta
+from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from uuid import uuid7
 
 import frappe
 from frappe import _
 from frappe.model.document import Document
 from frappe.utils import cint, today
+from frappe.utils.file_lock import LockTimeoutError
+from frappe.utils.synchronization import filelock
 
 from suite.mail.jmap import get_push_subscription_service
 from suite.mail.utils import generate_uuid_style_hash, log_mail_error
 from suite.mail.utils.dt import normalize_utc_z
 from suite.mail.utils.user import get_jmap_configured_users, is_jmap_configured
-from suite.utils import parse_filters
+from suite.utils import enqueue_job, parse_filters
 from suite.utils.dt import get_utc_now, parse_iso_datetime
 from suite.utils.user import is_system_manager
 
@@ -148,6 +151,115 @@ def bulk_delete(names: str | list[str]) -> None:
     frappe.msgprint(_("Push Subscriptions deleted successfully."), alert=True)
 
 
+def get_site_device_client_id(user: str) -> str:
+    """Returns this site's deterministic device client id for the user.
+
+    Deterministic so the site's own subscription on the mail server can be recognized
+    (and healed) without storing anything locally.
+    """
+
+    return generate_uuid_style_hash(f"frappe-{frappe.local.site.replace('.', '-')}-{user}")
+
+
+def ensure_push_subscription(user: str) -> None:
+    """Creates this site's push subscription for the user if the mail server holds none.
+
+    A subscription lost to a failed creation, an unrenewed expiry or a server-side delete
+    silently ends the user's webhooks — and with them both realtime events and mailbox-count
+    cache invalidation. The device client id is deterministic per site+user, so presence is
+    a plain lookup. A per-user lock serializes overlapping runs (login healing vs. the daily
+    renewal job) so they cannot both observe the subscription as missing and create it twice;
+    a run that cannot get the lock skips, since the holder is doing the same work.
+    """
+
+    if not frappe.utils.get_url().startswith("https://"):
+        return
+    if is_push_subscription_disabled(user):
+        return
+
+    try:
+        with filelock(f"ensure_push_subscription_{user}"):
+            service = get_push_subscription_service(user, ignore_permissions=True)
+            _heal_push_subscription(user, service, service.get())
+    except LockTimeoutError:
+        return
+
+
+def _heal_push_subscription(user: str, service, subscriptions: list[dict]) -> list[str]:
+    """Healing core over an already-fetched subscription list; call under the per-user lock.
+
+    Deletes this site's expired subscriptions and, when duplicates exist, every live one
+    but the longest-lived (deletion is best-effort: dead weight the server purges eventually
+    anyway, so a failure must not block the replacement). Creates a fresh subscription
+    unless a live one remains. Returns the ids it deleted so a caller reusing
+    ``subscriptions`` can drop them.
+
+    Subscriptions created before device ids were kept exclusive may wear the site id
+    over a custom URL. The server exposes nothing to tell them apart (url is never
+    returned on get, and Stalwart normalizes a null types filter to the full type
+    list), so pruning may remove such a legacy subscription once; recreating it
+    assigns a unique id, taking it permanently out of healing's reach.
+    """
+
+    device_client_id = get_site_device_client_id(user)
+    now = get_utc_now()
+
+    live = []
+    expired_ids = []
+    for subscription in subscriptions:
+        if subscription.get("deviceClientId") != device_client_id:
+            continue
+        expires = subscription.get("expires")
+        if not expires or parse_iso_datetime(expires, as_str=False) > now:
+            live.append(subscription)
+        else:
+            expired_ids.append(subscription["id"])
+
+    # Converge on one live subscription: a duplicate (say a manual creation landing next
+    # to a healing run's) would otherwise ride the daily renewal forever.
+    surplus_ids = []
+    if len(live) > 1:
+        live.sort(key=_subscription_longevity, reverse=True)
+        surplus_ids = [subscription["id"] for subscription in live[1:]]
+
+    if delete_ids := expired_ids + surplus_ids:
+        with suppress(Exception):
+            service.delete(delete_ids)
+
+    if not live:
+        _create_push_subscription(user, ignore_permissions=True)
+
+    return delete_ids
+
+
+def _subscription_longevity(subscription: dict) -> datetime:
+    """Sort key: when the subscription dies; no expiry means never."""
+
+    expires = subscription.get("expires")
+    return parse_iso_datetime(expires, as_str=False) if expires else datetime.max.replace(tzinfo=UTC)
+
+
+def on_login(login_manager) -> None:
+    """Login hook: heal the user's push subscription in the background.
+
+    Enqueued so the JMAP round trips never sit in the login path, and deduplicated
+    per user so a burst of logins queues one job.
+    """
+
+    user = login_manager.user
+    if user in ("Guest", "Administrator") or not is_jmap_configured(user):
+        return
+
+    enqueue_job(
+        ensure_push_subscription,
+        user=user,
+        queue="short",
+        job_id=f"ensure_push_subscription:{user}",
+        deduplicate=True,
+        enqueue_after_commit=True,
+    )
+
+
 @frappe.whitelist()
 def add_push_subscription(
     user: str,
@@ -173,6 +285,15 @@ def _add_push_subscription(
     parameters onto a whitelisted function's named arguments, so exposing it would let any caller
     turn off the ownership check and register an attacker-controlled callback URL against another
     user's account.
+
+    Serialized under the same per-user lock healing uses, so a manual creation cannot
+    interleave with a healing run's check-then-create. A default creation (no explicit
+    device client id, url or types) is idempotent: when a live site subscription already
+    exists, perhaps created by a healing run while this request waited on the lock, its
+    id is returned instead of creating a duplicate. A custom creation without an explicit
+    device client id gets a unique one, keeping the site's deterministic id exclusive to
+    the site subscription so healing never prunes a custom webhook as its duplicate;
+    explicitly claiming the site id for a custom creation is rejected.
     """
 
     if not ignore_permissions:
@@ -180,9 +301,55 @@ def _add_push_subscription(
 
     is_push_subscription_disabled(user, raise_exception=True)
 
-    device_client_id = device_client_id or generate_uuid_style_hash(
-        f"frappe-{frappe.local.site.replace('.', '-')}-{user}"
+    site_device_client_id = get_site_device_client_id(user)
+    is_site_default = (
+        not url and not types and (device_client_id or site_device_client_id) == site_device_client_id
     )
+
+    try:
+        # A healing run holds the lock for a couple of JMAP round trips; 10 seconds is
+        # generous. On timeout, surface a retryable message instead of the raw lock error
+        # (which advises deleting the lock file) after a 30 second modal hang.
+        with filelock(f"ensure_push_subscription_{user}", timeout=10):
+            # Healing may have created the site's subscription while this request waited
+            # on the lock, or one may simply already exist: the default creation is
+            # idempotent and returns the live subscription instead of adding a duplicate.
+            if is_site_default and (existing_id := _live_site_subscription_id(user, ignore_permissions)):
+                return existing_id
+
+            return _create_push_subscription(user, device_client_id, url, types, ignore_permissions)
+    except LockTimeoutError:
+        frappe.throw(
+            _(
+                "Push subscriptions for {0} are currently being updated. Please try again in a few moments."
+            ).format(frappe.bold(user)),
+            title=_("Push Subscription Creation Error"),
+        )
+
+
+def _create_push_subscription(
+    user: str,
+    device_client_id: str | None = None,
+    url: str | None = None,
+    types: list[str] | None = None,
+    ignore_permissions: bool = False,
+) -> str:
+    """Unlocked creation core for :func:`_add_push_subscription` and the healing path,
+    which already holds the per-user lock."""
+
+    site_device_client_id = get_site_device_client_id(user)
+    if not device_client_id:
+        # The deterministic site id marks the site's own subscription for healing; a custom
+        # creation must not wear it, or healing would prune one of the two as a duplicate.
+        device_client_id = site_device_client_id if not url and not types else str(uuid7())
+    elif device_client_id == site_device_client_id and (url or types):
+        frappe.throw(
+            _(
+                "The device client id {0} is reserved for this site's own subscription and cannot be"
+                " used with a custom URL or types. Leave it empty to have a unique id assigned."
+            ).format(frappe.bold(device_client_id)),
+            title=_("Push Subscription Creation Error"),
+        )
     if url:
         if not url.startswith("https://"):
             frappe.throw(_("The URL must start with 'https://'."))
@@ -217,6 +384,25 @@ def _add_push_subscription(
         frappe.throw(_(response["notCreated"][creation_id]["description"]), title=title)
     else:
         frappe.throw(_(response["description"]), title=title)
+
+
+def _live_site_subscription_id(user: str, ignore_permissions: bool = False) -> str | None:
+    """Returns the id of the longest-lived live subscription bearing this site's device
+    client id (the one healing's pruning would keep), or None when none is live."""
+
+    device_client_id = get_site_device_client_id(user)
+    now = get_utc_now()
+
+    live = []
+    for subscription in get_push_subscription_service(user, ignore_permissions=ignore_permissions).get():
+        if subscription.get("deviceClientId") != device_client_id:
+            continue
+        expires = subscription.get("expires")
+        if not expires or parse_iso_datetime(expires, as_str=False) > now:
+            live.append(subscription)
+
+    if live:
+        return max(live, key=_subscription_longevity)["id"]
 
 
 @frappe.whitelist()
@@ -281,16 +467,21 @@ def renew_push_subscription(user: str, id: str) -> None:
 def renew_expiring_push_subscriptions() -> None:
     """Renews soon-to-expire push subscriptions for all JMAP configured users.
 
-    Scheduled to run daily. A subscription is renewed when its expiry is within
-    ``RENEW_THRESHOLD_DAYS`` of the run; subscriptions without an expiry or expiring
-    later are left untouched. Users who disabled push subscriptions in their User
-    Settings are skipped.
+    Scheduled to run daily. A subscription is renewed when its expiry is still ahead
+    but within ``RENEW_THRESHOLD_DAYS`` of the run; subscriptions without an expiry or
+    expiring later are left untouched, and already-expired ones are skipped (renewal
+    cannot revive them, and the server purges them). Users who disabled push
+    subscriptions in their User
+    Settings are skipped. Users missing this site's subscription on the mail server get
+    one created (self-healing — see ensure_push_subscription); healing and the expiry
+    scan share a single fetch, and subscriptions healing deleted are not renewed.
     """
 
     if not frappe.utils.get_url().startswith("https://"):
         return
 
-    cutoff = get_utc_now() + timedelta(days=RENEW_THRESHOLD_DAYS)
+    now = get_utc_now()
+    cutoff = now + timedelta(days=RENEW_THRESHOLD_DAYS)
 
     for user in get_jmap_configured_users():
         if is_push_subscription_disabled(user):
@@ -299,10 +490,16 @@ def renew_expiring_push_subscriptions() -> None:
         try:
             service = get_push_subscription_service(user, ignore_permissions=True)
 
+            with filelock(f"ensure_push_subscription_{user}"):
+                subscriptions = service.get()
+                deleted_ids = _heal_push_subscription(user, service, subscriptions)
+
             expiring_ids = []
-            for subscription in service.get():
+            for subscription in subscriptions:
+                if subscription["id"] in deleted_ids:
+                    continue
                 expires = subscription.get("expires")
-                if expires and parse_iso_datetime(expires, as_str=False) <= cutoff:
+                if expires and now < parse_iso_datetime(expires, as_str=False) <= cutoff:
                     expiring_ids.append(subscription["id"])
 
             if not expiring_ids:
@@ -315,6 +512,10 @@ def renew_expiring_push_subscriptions() -> None:
                     _("Push Subscription Renewal Failed"),
                     _("Failed to renew push subscriptions for user {0}:<br>{1}").format(user, errors),
                 )
+        except LockTimeoutError:
+            # Another process is healing this user right now; today's renewal scan can
+            # wait for tomorrow's run, the threshold leaves days of headroom.
+            continue
         except Exception as e:
             log_mail_error(
                 _("Push Subscription Renewal Failed"),
@@ -329,16 +530,42 @@ def delete_push_subscriptions(user: str, ids: list[str]) -> None:
     has_permission_for_user(user, raise_exception=True)
 
     service = get_push_subscription_service(user)
-    response = service.delete(ids)
+    _raise_for_not_destroyed(service.delete(ids))
 
-    if response.get("notDestroyed"):
-        error_messages = []
-        for id, error in response["notDestroyed"].items():
-            error_messages.append(f"{id}: {error['description']}")
-        frappe.throw(
-            _("Push Subscription Deletion Error(s):<br>{0}").format("<br>".join(error_messages)),
-            title=_("Push Subscription Deletion Error"),
-        )
+
+def delete_site_push_subscriptions(user: str) -> None:
+    """Deletes every subscription on the mail server that wears this site's device client id.
+
+    Used when the user is disabled: the subscriptions would otherwise keep webhooks flowing
+    for an account the site no longer serves, and the server only purges them at expiry.
+    Custom subscriptions carry their own device client id and are left alone. Login healing
+    recreates the site's subscription once the user is enabled again. The user is already
+    disabled when this runs, so the connection is opened with that allowed explicitly.
+    """
+
+    device_client_id = get_site_device_client_id(user)
+    service = get_push_subscription_service(user, ignore_permissions=True, allow_disabled=True)
+
+    ids = [
+        subscription["id"]
+        for subscription in service.get()
+        if subscription.get("deviceClientId") == device_client_id
+    ]
+    if ids:
+        _raise_for_not_destroyed(service.delete(ids))
+
+
+def _raise_for_not_destroyed(response: dict) -> None:
+    """Surfaces the server's per-id errors from a delete response, if any."""
+
+    if not (not_destroyed := response.get("notDestroyed")):
+        return
+
+    error_messages = [f"{id}: {error['description']}" for id, error in not_destroyed.items()]
+    frappe.throw(
+        _("Push Subscription Deletion Error(s):<br>{0}").format("<br>".join(error_messages)),
+        title=_("Push Subscription Deletion Error"),
+    )
 
 
 @frappe.whitelist()

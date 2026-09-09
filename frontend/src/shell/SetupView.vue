@@ -30,7 +30,7 @@
         <div :key="step">
           <div class="flex flex-col gap-8">
             <div class="flex flex-col gap-2">
-              <h1 class="text-4xl-semibold text-ink-gray-9">{{ current.title }}</h1>
+              <h1 class="text-3xl-semibold text-ink-gray-9">{{ current.title }}</h1>
               <p class="text-base text-ink-gray-6">{{ current.subtitle }}</p>
             </div>
 
@@ -61,7 +61,7 @@
               <InviteStep v-else-if="step === 'invite'" ref="inviteStep" @sent="onInvitesSent" />
 
               <div v-else class="flex justify-center">
-                <div class="flex w-full items-center gap-3 rounded-lg bg-surface-gray-2 p-4">
+                <div class="flex w-full items-center gap-3 rounded-6 bg-surface-gray-2 p-4">
                   <component
                     :is="inviteSummary ? LucideMail : LucideUser"
                     class="size-7 shrink-0 stroke-[1.5] text-ink-gray-5"

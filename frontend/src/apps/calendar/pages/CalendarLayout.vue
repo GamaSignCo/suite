@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, provide, watchEffect } from 'vue'
-import { FrappeUIProvider, createResource } from 'frappe-ui'
+import { onMounted, onUnmounted, provide } from 'vue'
+import { FrappeUIProvider } from 'frappe-ui'
 
-import { raiseToast, shouldIgnoreKeypress } from '@/apps/calendar/utils'
+import { shouldIgnoreKeypress } from '@/apps/calendar/utils'
 import dayjs from '@/apps/calendar/utils/dayjs'
 import { useTheme } from '@/apps/calendar/utils/composables'
 import { userStore } from '@/apps/calendar/stores/user'
@@ -14,18 +14,15 @@ import { initSocket } from '@/apps/calendar/socket'
  * The suite shell already provides the top-level chrome, so this layout only:
  *   - provides the calendar-local `$user` (mail/calendar userResource), `$dayjs`
  *     and `$socket` injections that calendar components depend on,
- *   - applies the user's color scheme to <html data-theme>,
  *   - ports the Cmd/Ctrl+Shift+L theme-cycle shortcut,
  *   - wraps children in FrappeUIProvider and renders the nested <router-view>.
  */
 const { userResource } = userStore()
-const { dataTheme } = useTheme()
+const { cycleTheme } = useTheme()
 
 provide('$user', userResource)
 provide('$dayjs', dayjs)
 provide('$socket', initSocket())
-
-watchEffect(() => document.documentElement.setAttribute('data-theme', dataTheme.value))
 
 // Mark <body> while calendar is mounted so the `.icon` helper below (see <style>) can
 // reach frappe-ui Dropdowns/Dialogs, which teleport to <body> — outside the calendar tree.
@@ -47,40 +44,6 @@ const handleKeyDown = (e: KeyboardEvent) => {
 		return cycleTheme()
 	}
 }
-
-const COLOR_SCHEME_CYCLE = ['System Default', 'Light Mode', 'Dark Mode'] as const
-
-const cycleTheme = () => {
-	const current = userResource.data?.color_scheme
-	if (!current) return
-
-	const idx = COLOR_SCHEME_CYCLE.indexOf(current)
-	const next = COLOR_SCHEME_CYCLE[(idx + 1) % COLOR_SCHEME_CYCLE.length]
-
-	// Optimistic: flip the theme and confirm at once, before the server round-trip resolves.
-	userResource.data.color_scheme = next
-	raiseToast(__('Color scheme updated to {0}.', [next]))
-
-	updateColorScheme.submit(next, {
-		onError: () => {
-			userResource.data.color_scheme = current
-			raiseToast(__('Failed to update color scheme. Please try again later.'), 'error')
-		},
-	})
-}
-
-const updateColorScheme = createResource({
-	url: 'frappe.client.set_value',
-	makeParams: (color_scheme) => ({
-		doctype: 'User Settings',
-		name: userResource.data.user_settings,
-		fieldname: { color_scheme },
-	}),
-	onSuccess: () => {
-		// Reconcile the optimistic value against server truth (sets the same value; harmless).
-		userResource.reload()
-	},
-})
 </script>
 
 <template>

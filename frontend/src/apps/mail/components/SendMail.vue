@@ -10,19 +10,19 @@
 	     row whose first half is `flex-1` — so it lands flush against ours, and the three read as
 	     8px, 8px, nothing. One row, one gap.
 
-	     `show-close-button` is a prop, not an option: Dialog resolves every other key as
-	     `props.x ?? options.x` but this one only reads the prop, so in `:options` it is dropped
-	     and the built-in close comes back. -->
+	     The title is passed as a prop as well as drawn in the slot: the slot is what renders, and
+	     the prop is what the overlay labels itself with (`data-dialog`). -->
 	<Dialog
 		v-if="state === 'modal'"
-		v-model="show"
+		v-model:open="show"
+		:title="__('Compose Mail')"
+		size="5xl"
 		:show-close-button="false"
 		:dismissible="false"
-		:options="{ title: __('Compose Mail'), size: '5xl' }"
 	>
 		<template #title="{ close }">
 			<div class="flex items-center gap-2">
-				<h3 class="text-ink-gray-8 text-2xl-semibold min-w-0 flex-1 truncate leading-6">
+				<h3 class="text-ink-gray-8 text-xl-semibold min-w-0 flex-1 truncate leading-6">
 					{{ __('Compose Mail') }}
 				</h3>
 				<Button
@@ -51,7 +51,7 @@
 				</Button>
 			</div>
 		</template>
-		<template #body-content>
+		<template #default>
 			<div ref="host" class="flex min-h-0 flex-1 flex-col" />
 		</template>
 	</Dialog>

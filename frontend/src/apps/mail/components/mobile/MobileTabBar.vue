@@ -20,7 +20,7 @@
 		@click="openCompose"
 	>
 		<template #icon>
-			<FeatherIcon name="edit" class="h-6 w-6" />
+			<FeatherIcon name="square-pen" class="h-6 w-6" />
 		</template>
 	</Button>
 
@@ -88,8 +88,9 @@
 <script setup lang="ts">
 import { computed, inject, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Avatar, Button, FeatherIcon } from 'frappe-ui'
-import { Icon } from 'frappe-ui/icons'
+import { Avatar, Button } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
+import { Icon } from 'frappe-ui/experimental'
 
 import { getIcon, getMailboxName } from '@/apps/mail/utils'
 import { useFolderSheet, useKeyboardOpen, useMobileSelection } from '@/apps/mail/utils/composables'

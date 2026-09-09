@@ -1,5 +1,5 @@
 <template>
-	<div class="overflow-y-auto rounded border text-sm sm:max-h-96 sm:w-96 sm:border-0">
+	<div class="overflow-y-auto rounded-4 border text-sm sm:max-h-96 sm:w-96 sm:border-0">
 		<div class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 px-4 py-3">
 			<template v-for="field in fields" :key="field.label">
 				<!-- Label and value share one paragraph style, so their first-line boxes —

@@ -4,6 +4,7 @@
 		<div v-if="user?.doc" class="flex flex-col gap-6">
 			<FileUploader
 				file-types="image/png,image/jpeg,image/jpg"
+				:private="false"
 				:validate-file="validateAvatarFile"
 				@success="onAvatarUploaded"
 			>
@@ -13,7 +14,7 @@
 							<Dropdown
 								v-if="user.doc.user_image"
 								:options="avatarMenuOptions(openFileSelector)"
-								placement="right"
+								align="end"
 							>
 								<button
 									type="button"
@@ -46,7 +47,7 @@
 							</button>
 						</div>
 						<div class="flex min-w-0 flex-col gap-1">
-							<div class="text-2xl-semibold text-ink-gray-8 truncate">
+							<div class="text-xl-semibold text-ink-gray-8 truncate">
 								{{ displayName }}
 							</div>
 							<p class="text-base text-ink-gray-6 truncate">
@@ -90,8 +91,8 @@
 		</div>
 	</AppSettingsBody>
 
-	<Dialog v-model="showPasswordDialog" :options="passwordDialogOptions">
-		<template #body-content>
+	<Dialog v-model:open="showPasswordDialog" v-bind="passwordDialogOptions">
+		<template #default>
 			<form class="space-y-4" @submit.prevent>
 				<!-- Capture username here so Chrome doesn't fill profile last name -->
 				<input

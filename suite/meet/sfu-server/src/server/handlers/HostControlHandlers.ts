@@ -1,29 +1,31 @@
 import type { Socket } from 'socket.io';
 import { loggers } from '../../utils/logger';
 import type { HandlerDeps } from './Handler';
-import { findSocketsByParticipantId } from './utils';
+import { ensureParticipantOwner, findSocketsByParticipantId } from './utils';
 
 export function registerHostControlHandlers(deps: HandlerDeps) {
 	return (socket: Socket) => {
-		socket.on('host_control', async (data) => {
+		socket.on('host_control', async (data, callback) => {
+			const acknowledge =
+				typeof callback === 'function' ? callback : () => undefined;
+			const fail = (error: string) => {
+				socket.emit('sfu_error', {
+					error,
+					timestamp: new Date().toISOString(),
+				});
+				acknowledge({ success: false, error });
+			};
+
 			try {
 				deps.authManager.ensureFullAccess(socket);
+				const { roomId, participantId } = ensureParticipantOwner(
+					socket,
+					deps.registry,
+				);
 				const { action, targetParticipantId } = data;
-				const roomId = socket.roomId;
-
-				if (!roomId || !socket.participantId) {
-					socket.emit('sfu_error', {
-						error: 'Not in a room',
-						timestamp: new Date().toISOString(),
-					});
-					return;
-				}
 
 				if (!socket.isHost && !socket.isCohost) {
-					socket.emit('sfu_error', {
-						error: 'Only host or co-host can control participants',
-						timestamp: new Date().toISOString(),
-					});
+					fail('Only host or co-host can control participants');
 					loggers.socketHandler.warn(
 						'Non-host/co-host %s attempted host control in room %s',
 						socket.participantId,
@@ -32,28 +34,45 @@ export function registerHostControlHandlers(deps: HandlerDeps) {
 					return;
 				}
 
-				if (
-					!deps.mediasoup.participantExistsInRoom(roomId, targetParticipantId)
-				) {
-					socket.emit('sfu_error', {
-						error: 'Target participant not found',
-						timestamp: new Date().toISOString(),
-					});
-					return;
-				}
+				let targetSockets: Socket[];
+				if (action === 'ban_participant') {
+					if (
+						typeof targetParticipantId !== 'string' ||
+						!targetParticipantId.startsWith('guest_') ||
+						targetParticipantId.length === 'guest_'.length
+					) {
+						throw new Error('Only guests can be banned');
+					}
+					targetSockets = findSocketsByParticipantId(
+						deps.io,
+						roomId,
+						targetParticipantId,
+					);
+					if (targetSockets.some((targetSocket) => !targetSocket.isGuest)) {
+						throw new Error('Only guests can be banned');
+					}
+					deps.registry.revokeParticipant(roomId, targetParticipantId);
+					if (targetSockets.length === 0) {
+						acknowledge({ success: true });
+						return;
+					}
+				} else {
+					if (
+						!deps.mediasoup.participantExistsInRoom(roomId, targetParticipantId)
+					) {
+						fail('Target participant not found');
+						return;
+					}
 
-				const targetSockets = findSocketsByParticipantId(
-					deps.io,
-					roomId,
-					targetParticipantId,
-				);
-
-				if (targetSockets.length === 0) {
-					socket.emit('sfu_error', {
-						error: 'Target participant socket not found',
-						timestamp: new Date().toISOString(),
-					});
-					return;
+					targetSockets = findSocketsByParticipantId(
+						deps.io,
+						roomId,
+						targetParticipantId,
+					);
+					if (targetSockets.length === 0) {
+						fail('Target participant socket not found');
+						return;
+					}
 				}
 
 				switch (action) {
@@ -62,100 +81,128 @@ export function registerHostControlHandlers(deps: HandlerDeps) {
 							targetSocket.emit('host_control_update', {
 								action,
 								targetParticipantId,
-								hostId: socket.participantId,
+								hostId: participantId,
 								timestamp: new Date().toISOString(),
 							});
 						}
 						loggers.socketHandler.info(
 							'Host %s sent mute command to participant %s in room %s',
-							socket.participantId,
+							participantId,
 							targetParticipantId,
 							roomId,
 						);
 						break;
-					case 'kick_participant': {
+					case 'kick_participant':
+					case 'ban_participant': {
 						const targetSenderIds = targetSockets
 							.map((targetSocket) => targetSocket.senderId)
 							.filter((senderId): senderId is number => senderId !== undefined);
+						let participantDeparted = false;
+						for (const targetSocket of targetSockets) {
+							participantDeparted =
+								deps.registry.releaseParticipant(
+									targetSocket,
+									roomId,
+									targetParticipantId,
+								) || participantDeparted;
+						}
+						if (participantDeparted) {
+							deps.registry.emitParticipantEvent(
+								roomId,
+								'participant_left',
+								targetParticipantId,
+							);
+							if (deps.registry.hasRaisedHand(roomId, targetParticipantId)) {
+								deps.registry.clearRaisedHand(roomId, targetParticipantId);
+								deps.registry.emitRaisedHand(roomId, {
+									participantId: targetParticipantId,
+									raised: false,
+									timestamp: new Date().toISOString(),
+								});
+							}
+							deps.roomLifecycle.scheduleCleanupIfHumanEmpty(roomId);
+						}
 						for (const targetSocket of targetSockets) {
 							targetSocket.emit('host_control_update', {
 								action,
 								targetParticipantId,
-								hostId: socket.participantId,
+								hostId: participantId,
 								timestamp: new Date().toISOString(),
 							});
 						}
 
 						loggers.socketHandler.info(
-							'Host %s kicked participant %s (senderIds=%s) from room %s',
-							socket.participantId,
+							'Host %s removed participant %s (senderIds=%s) from room %s',
+							participantId,
 							targetParticipantId,
 							targetSenderIds.join(','),
 							roomId,
 						);
-						if (
-							targetSockets.some((targetSocket) => targetSocket.e2eeRequired) &&
-							targetSenderIds.length > 0
-						) {
-							await deps.e2eeEpochRelay.requestCommitForRemoval(
-								roomId,
-								targetSenderIds,
-								deps.e2eeEpochRelay.getCurrentEpochNumber(roomId),
-							);
-						}
-
 						setTimeout(() => {
 							for (const targetSocket of targetSockets) {
 								if (targetSocket.connected) targetSocket.disconnect(true);
 							}
 							loggers.socketHandler.info(
-								'Forcefully disconnected kicked participant %s',
+								'Forcefully disconnected removed participant %s',
 								targetParticipantId,
 							);
 						}, 1000);
+
+						if (
+							targetSockets.some((targetSocket) => targetSocket.e2eeRequired) &&
+							targetSenderIds.length > 0
+						) {
+							try {
+								void deps.e2eeEpochRelay
+									.requestCommitForRemoval(
+										roomId,
+										targetSenderIds,
+										deps.e2eeEpochRelay.getCurrentEpochNumber(roomId),
+									)
+									.catch((error: unknown) => {
+										logE2EERemovalFailure(targetParticipantId, error);
+									});
+							} catch (error) {
+								logE2EERemovalFailure(targetParticipantId, error);
+							}
+						}
 						break;
 					}
 					case 'lower_hand':
-						if (deps.registry.hasRaisedHand(roomId, targetParticipantId)) {
-							deps.registry.clearRaisedHand(roomId, targetParticipantId);
-							deps.registry.emitToFullAccessParticipants(
-								roomId,
-								'hand_raised',
-								{
-									participantId: targetParticipantId,
-									raised: false,
-									timestamp: new Date().toISOString(),
-								},
-							);
-							loggers.socketHandler.info(
-								'Host %s lowered hand of participant %s',
-								socket.participantId,
-								targetParticipantId,
-							);
-						} else {
-							socket.emit('sfu_error', {
-								error: 'Participant does not have a raised hand',
-								timestamp: new Date().toISOString(),
-							});
+						if (!deps.registry.hasRaisedHand(roomId, targetParticipantId)) {
+							fail('Participant does not have a raised hand');
+							return;
 						}
-						break;
-					default:
-						socket.emit('sfu_error', {
-							error: 'Invalid host control action',
+						deps.registry.clearRaisedHand(roomId, targetParticipantId);
+						deps.registry.emitRaisedHand(roomId, {
+							participantId: targetParticipantId,
+							raised: false,
 							timestamp: new Date().toISOString(),
 						});
+						loggers.socketHandler.info(
+							'Host %s lowered hand of participant %s',
+							participantId,
+							targetParticipantId,
+						);
 						break;
+					default:
+						fail('Invalid host control action');
+						return;
 				}
+				acknowledge({ success: true });
 			} catch (error) {
-				loggers.socketHandler.warn(
-					'host_control handling failed: %s',
-					(error as Error).message,
-				);
-				socket.emit('sfu_error', {
-					error: (error as Error).message,
-					timestamp: new Date().toISOString(),
-				});
+				const message = (error as Error).message;
+				loggers.socketHandler.warn('host_control handling failed: %s', message);
+				fail(message);
 			}
 		});
 	};
+}
+
+function logE2EERemovalFailure(participantId: string, error: unknown): void {
+	loggers.socketHandler.warn(
+		'E2EE removal signaling failed for participant %s: %s',
+		participantId,
+		(error as Error).message,
+	);
 }

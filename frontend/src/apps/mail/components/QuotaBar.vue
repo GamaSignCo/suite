@@ -1,59 +1,21 @@
 <template>
-	<div class="flex flex-col space-y-2 rounded p-2">
-		<div class="flex w-full">
-			<div class="flex items-center space-x-2">
-				<Cloud class="icon" />
-				<span v-if="!isCollapsed" class="text-sm"> {{ __('Storage') }} </span>
-			</div>
-		</div>
-		<div class="bg-surface-gray-4 h-1 w-auto rounded-full">
-			<div
-				class="h-1 rounded-full"
-				:class="
-					quota.data?.used_percentage > 80 ? 'bg-surface-red-8' : 'bg-surface-gray-10'
-				"
-				:style="{ width: `${quota.data?.used_percentage || 0}%`, maxWidth: '100%' }"
-			/>
-		</div>
-		<span v-if="!isCollapsed" class="text-ink-gray-5 line-clamp-1 text-xs">
-			{{ displayedQuota }}
-		</span>
-	</div>
+	<!-- In the sidebar only once storage is critical — the meter arrives already
+	     red. Until then the number lives in Settings → Account, where "how much
+	     do I have?" is a question rather than a nag. -->
+	<SidebarStorage
+		v-if="isCritical"
+		:used-percentage
+		:label
+		:limited="isLimited"
+		:collapsed="isCollapsed"
+	/>
 </template>
 
 <script setup lang="ts">
-import { computed, watch } from 'vue'
-import { Cloud } from 'lucide-vue-next'
-import { createResource } from 'frappe-ui'
-
-import { formatBytes } from '@/apps/mail/utils'
-import { userStore } from '@/apps/mail/stores/user'
+import SidebarStorage from '@/components/SidebarStorage.vue'
+import { useQuota } from '@/apps/mail/composables/useQuota'
 
 const { isCollapsed } = defineProps<{ isCollapsed: boolean }>()
 
-const store = userStore()
-
-const quota = createResource({
-	url: 'suite.mail.api.account.get_quota',
-	auto: true,
-	makeParams: () => ({ account: store.accountId }),
-	cache: ['quota', store.accountId],
-})
-
-watch(
-	() => store.accountId,
-	() => quota.reload(),
-)
-
-const displayedQuota = computed(() => {
-	if (!quota.data) return ''
-
-	if (quota.data.disk_quota <= 0)
-		return __('Unlimited ({0} used)', [formatBytes(quota.data.used_quota)])
-
-	return __('{0}% of {1} used', [
-		quota.data.used_percentage.toFixed(2),
-		formatBytes(quota.data.disk_quota),
-	])
-})
+const { isLimited, isCritical, usedPercentage, label } = useQuota()
 </script>

@@ -1,6 +1,6 @@
 <template>
-	<Dialog v-model="show" :options="addSignatureOptions">
-		<template #body-content>
+	<Dialog v-model:open="show" v-bind="addSignatureOptions">
+		<template #default>
 			<div class="space-y-4">
 				<FormControl
 					v-model="signature.doc.signature_name"
@@ -11,7 +11,7 @@
 				<div class="space-y-1.5">
 					<label class="text-ink-gray-5 block text-xs">{{ __('Signature Body') }}</label>
 					<TextEditor
-						editor-class="prose-sm min-h-[8rem] border rounded-b-lg border-t-0 p-2 max-w-none border-outline-gray-2"
+						editor-class="prose-sm min-h-[8rem] border rounded-b-6 border-t-0 p-2 max-w-none border-outline-gray-2"
 						:extensions="[CustomParagraphExtension]"
 						:fixed-menu="buttons"
 						:placeholder="__('Write your signature here')"
@@ -26,7 +26,8 @@
 
 <script setup lang="ts">
 import { computed, inject, reactive, watch } from 'vue'
-import { Dialog, FormControl, TextEditor, useNewDoc } from 'frappe-ui'
+import { Dialog, FormControl, useNewDoc } from 'frappe-ui'
+import { TextEditor } from 'frappe-ui/experimental'
 
 import { raiseToast } from '@/apps/mail/utils'
 import { useTextEditorButtons } from '@/apps/mail/utils/composables'

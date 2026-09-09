@@ -4,7 +4,7 @@
 			<div
 				v-for="layout in layouts"
 				:key="layout.idx"
-				class="aspect-video cursor-pointer overflow-hidden rounded-md border border-outline-gray-1 hover:border-outline-gray-2"
+				class="aspect-video cursor-pointer overflow-hidden rounded-6 border border-outline-gray-1 hover:border-outline-gray-2"
 				:style="getThumbnailCardStyles(layout.thumbnail)"
 				@click="insertSlideWithLayout(layout)"
 			>

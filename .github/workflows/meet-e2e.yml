@@ -108,12 +108,12 @@ jobs:
     permissions:
       contents: read
     outputs:
-      vouched: ${{ github.event_name != 'pull_request_target' || steps.vouch.outputs.vouched }}
+      trusted: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository || steps.vouch.outputs.vouched == 'true' }}
     steps:
-      - if: github.event_name == 'pull_request_target'
+      - if: github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - if: github.event_name == 'pull_request_target'
+      - if: github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository
         id: vouch
         uses: mitchellh/vouch/action/check-user@d66fa29a64600490892131ad87597c30c91fcac4 # v1.5.0
         with:
@@ -123,8 +123,8 @@ jobs:
 
   e2e:
     needs: author_check
-    if: needs.author_check.outputs.vouched == 'true'
-    runs-on: suite-e2e-meet
+    if: needs.author_check.outputs.trusted == 'true'
+    runs-on: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || 'suite-e2e-meet' }}
     # Historical durations keep each self-contained group near the same runtime.
     strategy:
       fail-fast: false
@@ -157,6 +157,15 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository }}
+
+      - name: Clone Frappe
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: frappe/frappe
+          path: .frappe-source
+          persist-credentials: false
 
       - name: Setup Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -171,6 +180,13 @@ jobs:
       - name: Setup Yarn
         run: corepack enable && corepack prepare yarn@1.22.22 --activate
 
+      - name: Install GitHub-hosted dependencies
+        if: runner.environment == 'github-hosted'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mariadb-client
+          python -m pip install uv
+
       - name: Add to Hosts
         run: echo "127.0.0.1 meet.test" | sudo tee -a /etc/hosts
 
@@ -180,7 +196,7 @@ jobs:
           if [ "$(bench --version 2>/dev/null || true)" != "5.31.0" ]; then
             python -m pip install "frappe-bench==5.31.0"
           fi
-          bench init --skip-redis-config-generation --skip-assets --python "$(which python)" "$RUNNER_TEMP/frappe-bench"
+          bench init --frappe-path "$GITHUB_WORKSPACE/.frappe-source" --skip-redis-config-generation --skip-assets --python "$(which python)" "$RUNNER_TEMP/frappe-bench"
 
       - name: Install Suite
         working-directory: ${{ runner.temp }}/frappe-bench
@@ -232,6 +248,11 @@ jobs:
           yarn install --frozen-lockfile --non-interactive
           google-chrome --version
 
+      - name: Install Playwright system dependencies
+        if: runner.environment == 'github-hosted'
+        working-directory: ${{ github.workspace }}/e2e
+        run: yarn playwright install-deps chromium
+
       - name: Start Frappe Server
         id: start-frappe
         working-directory: ${{ runner.temp }}/frappe-bench
@@ -253,11 +274,12 @@ jobs:
           timeout 30 bash -c 'until curl -s http://localhost:3000/health > /dev/null 2>&1; do sleep 2; done'
           echo "SFU server is ready"
         env:
+          NODE_ENV: development
           PORT: 3000
           HOST: 0.0.0.0
           JWT_SECRET: e2e-test-secret-key-12345
-          WEBRTC_LISTEN_IP: 127.0.0.1
-          WEBRTC_ANNOUNCED_IP: 127.0.0.1
+          WEBRTC_LISTEN_IP: 0.0.0.0
+          WEBRTC_ANNOUNCED_IP: ""
           MEDIASOUP_NUM_WORKERS: 1
           SOCKET_PING_INTERVAL: 1000
           SOCKET_PING_TIMEOUT: 3000

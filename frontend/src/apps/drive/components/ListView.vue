@@ -73,16 +73,16 @@
           <ListCell />
           <ListCell>
             <div class="h-[16px] w-[16px] shrink-0 mr-2">
-              <Skeleton class="h-[16px] w-[16px] rounded-sm" />
+              <Skeleton class="h-[16px] w-[16px] rounded-1" />
             </div>
-            <Skeleton class="h-3.5 w-40 rounded" />
+            <Skeleton class="h-3.5 w-40 rounded-4" />
           </ListCell>
           <ListCell class="hidden sm:flex">
             <Skeleton class="size-5 shrink-0 mr-2 rounded-full" />
-            <Skeleton class="h-3 w-16 rounded" />
+            <Skeleton class="h-3 w-16 rounded-4" />
           </ListCell>
-          <ListCell><Skeleton class="h-3 w-20 rounded" /></ListCell>
-          <ListCell class="hidden sm:flex"><Skeleton class="h-3 w-12 rounded" /></ListCell>
+          <ListCell><Skeleton class="h-3 w-20 rounded-4" /></ListCell>
+          <ListCell class="hidden sm:flex"><Skeleton class="h-3 w-12 rounded-4" /></ListCell>
           <ListCell />
         </ListRow>
       </template>
@@ -92,8 +92,8 @@
     :close="() => (rowEvent = false)" :action-items="dropdownActionItems(selectedRow)" :event="rowEvent" />
 </template>
 <script setup>
-import { List, ListHeader, ListHeaderCell, ListHeaderCellSort, ListGroup, ListRow, ListCell } from 'frappe-ui/list'
-import { Checkbox, Skeleton, onOutsideClickDirective as vOnOutsideClick } from 'frappe-ui'
+import { List, ListCell, ListGroup, ListHeader, ListHeaderCell, ListHeaderCellSort, ListRow } from 'frappe-ui/list'
+import { Checkbox, Skeleton, vOnOutsideClick } from 'frappe-ui'
 import { activeEntity, setActiveEntity } from '@/apps/drive/data/selection'
 import { computed, ref, watch } from 'vue'
 import ContextMenu from '@/apps/drive/components/ContextMenu.vue'

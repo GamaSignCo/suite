@@ -2,9 +2,11 @@
 	<component
 		:is="isMobile ? SearchMobileLayout : Dialog"
 		v-model="show"
-		:options="{ size: '2xl', paddingTop: '2%' }"
+		v-model:open="show"
+		v-bind="{ size: '2xl', paddingTop: '2%' }"
+		:bare="!isMobile"
 	>
-		<template #body>
+		<template #default>
 			<div class="bg-surface-base">
 				<div class="flex items-center border-b px-4 py-2">
 					<!-- Mobile trades the decorative magnifier for the way out: search is a
@@ -30,7 +32,7 @@
 					<input
 						ref="searchInput"
 						v-model="filter.text"
-						icon-left="search"
+						icon-left="lucide-search"
 						type="search"
 						class="placeholder-ink-gray-4 w-full border-none bg-transparent text-base focus:ring-0"
 						placeholder="Search"
@@ -55,7 +57,7 @@
 					<span
 						v-for="chip in activeFilters"
 						:key="chip.key"
-						class="bg-surface-gray-2 inline-flex items-center gap-1 rounded pl-2 pr-1"
+						class="bg-surface-gray-2 inline-flex items-center gap-1 rounded-4 pl-2 pr-1"
 						:class="[
 							isMobile ? 'h-8 text-sm' : 'h-7 text-xs',
 							{ 'hover:bg-surface-gray-3 cursor-pointer': isClickableChip(chip.key) },
@@ -64,7 +66,7 @@
 					>
 						<span class="max-w-40 truncate">{{ chip.label }}</span>
 						<button
-							class="text-ink-gray-5 hover:text-ink-gray-8 rounded p-1"
+							class="text-ink-gray-5 hover:text-ink-gray-8 rounded-4 p-1"
 							:aria-label="__('Remove filter')"
 							@click.stop="removeFilter(chip.key)"
 						>
@@ -178,7 +180,7 @@
 					<button
 						v-for="mb in folderMatches"
 						:key="mb.id"
-						class="hover:bg-surface-gray-1 flex w-full items-center gap-2 rounded p-2 text-left"
+						class="hover:bg-surface-gray-1 flex w-full items-center gap-2 rounded-4 p-2 text-left"
 						@click="applyFolder(mb)"
 					>
 						<Icon
@@ -191,7 +193,7 @@
 					<button
 						v-for="c in contactMatches"
 						:key="c.email"
-						class="hover:bg-surface-gray-1 flex w-full items-center gap-2 rounded p-2 text-left"
+						class="hover:bg-surface-gray-1 flex w-full items-center gap-2 rounded-4 p-2 text-left"
 						@click="applyContact(c)"
 					>
 						<Avatar :image="c.image" :label="c.name || c.email" size="lg" />
@@ -216,7 +218,7 @@
 					<div
 						v-for="(result, idx) in results.data[0]"
 						:key="idx"
-						class="hover:bg-surface-gray-1 group flex rounded p-2 hover:cursor-pointer"
+						class="hover:bg-surface-gray-1 group flex rounded-4 p-2 hover:cursor-pointer"
 						@click="openThread(result)"
 					>
 						<div class="mr-2 space-y-1 truncate">
@@ -233,7 +235,7 @@
 							<div
 								v-for="m in result.mailboxes"
 								:key="m.mailbox_id"
-								class="bg-surface-gray-2 group-hover:bg-surface-gray-3 mr-1.5 inline-flex rounded p-1 text-xs"
+								class="bg-surface-gray-2 group-hover:bg-surface-gray-3 mr-1.5 inline-flex rounded-4 p-1 text-xs"
 							>
 								{{ m.mailbox_name }}
 							</div>
@@ -281,7 +283,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { watchDebounced } from '@vueuse/core'
 import { ArrowLeft, Paperclip, Plus, Search, SlidersHorizontal, X } from 'lucide-vue-next'
 import { Avatar, Button, Dialog, FormControl, Switch, createResource } from 'frappe-ui'
-import { Icon } from 'frappe-ui/icons'
+import { Icon } from 'frappe-ui/experimental'
 
 import { FOLDER_ICON_COLOR_MAP, getAttachmentOptions, getReadStatusOptions } from '@/apps/mail/constants'
 import { getFormattedDate, getIcon } from '@/apps/mail/utils'

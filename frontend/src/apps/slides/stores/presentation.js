@@ -8,6 +8,7 @@ import { slides } from './slide'
 import { markClean, markDirty, getPresentationFromLocalDB } from './saving'
 import { normalizeZIndices } from '@/apps/slides/stores/element'
 import { normalizeColor } from '@/apps/slides/utils/color'
+import { appDocumentTitle } from '@/utils/documentTitle'
 import { v4 as uuid4 } from 'uuid'
 import { commandHistory } from './historyMeta'
 
@@ -42,16 +43,23 @@ const createPresentationResource = createResource({
 })
 
 const updatePresentationTitle = async (id, newTitle) => {
-	return call('suite.slides.doctype.presentation.presentation.update_title', {
+	const response = await call('suite.slides.doctype.presentation.presentation.update_title', {
 		name: id,
 		title: newTitle,
-	}).then((response) => {
-		if (!response) throw new Error('Failed to rename presentation')
-		// autosave stamps this onto the local copy, so a stale value would make the
-		// next load discard edits that had not synced yet
-		if (presentationDoc.value?.name === id) presentationDoc.value.modified = response.modified
-		return response.slug
 	})
+	if (!response) throw new Error('Failed to rename presentation')
+	await adoptServerVersion(id, response)
+	return response.slug
+}
+
+// adopting a stamp over a stale base would let the next save wipe rows saved elsewhere
+const adoptServerVersion = async (id, { modified, base_modified }) => {
+	if (presentationDoc.value?.name !== id) return
+	if (presentationDoc.value.modified === base_modified) {
+		presentationDoc.value.modified = modified
+	} else {
+		await reloadAfterConflict(id)
+	}
 }
 
 const getElementDimensions = async (el) => {
@@ -278,28 +286,47 @@ const getReadonlyPresentationResource = (name, url) => {
 	})
 }
 
+// rows are matched by client_id on the server, so name, parent and idx stay out
+const toSlideRow = (slide) => ({
+	client_id: slide.clientId,
+	background: slide.background,
+	elements: slide.corruptElements ?? JSON.stringify(slide.elements, null, 2),
+	transition: slide.transition,
+	transition_duration: slide.transitionDuration,
+	fade_unmatched_elements: slide.fadeUnmatchedElements,
+})
+
+const isSaveConflict = (error) => error?.exc_type === 'TimestampMismatchError'
+
 const savePresentationDoc = async (updatedSlides) => {
-	const newSlides = updatedSlides.map((slide) => {
-		const { thumbnail, corruptElements, ...slideData } = slide
-		return {
-			...slideData,
-			client_id: slide.clientId,
-			elements: corruptElements ?? JSON.stringify(slide.elements, null, 2),
-			transition_duration: slide.transitionDuration,
-			fade_unmatched_elements: slide.fadeUnmatchedElements,
-		}
+	const doc = presentationDoc.value
+	// the server refuses a snapshot built on an older version than it holds, which
+	// is what keeps a stale tab from wiping rows another editor saved since
+	const { modified } = await call('suite.slides.api.slides.save_slides', {
+		name: doc.name,
+		slides: updatedSlides.map(toSlideRow),
+		base_modified: doc.modified,
 	})
 
+	// the editor can move on mid-save; stamping then would mark another
+	// presentation with this save's version
+	if (presentationDoc.value === doc) doc.modified = modified
+
+	return modified
+}
+
+// another editor saved first: their version is the truth now, so take it in
+// place of the local snapshot rather than fight over whose rows survive
+const reloadAfterConflict = async (id) => {
+	if (presentationId.value !== id) return
+	toast.warning('This presentation was changed elsewhere. Showing the latest version.')
 	const resource = presentationResource.value
-	const doc = await resource.setValue.submit({
-		slides: newSlides,
-	})
-
-	// the editor can move on mid-save, and repointing presentationDoc at whatever
-	// the resource ref holds now would stamp this save onto another presentation
-	if (presentationResource.value === resource) presentationDoc.value = resource.doc
-
-	return doc?.modified
+	await resource.get.fetch()
+	// the fetch replaces resource.doc, and the next save reads its version from here
+	if (presentationResource.value !== resource) return
+	presentationDoc.value = resource.doc
+	// undo still holds the discarded content and would save it right back
+	commandHistory.clearHistory()
 }
 
 const presentationResource = ref(null)
@@ -383,9 +410,8 @@ const duplicatePresentation = async (presentation) => {
 }
 
 const pageTitle = () => {
-	const appTitle = router.currentRoute.value.meta.title || 'Frappe Slides'
 	const title = presentationDoc.value?.title
-	return title ? `${title} - ${appTitle}` : appTitle
+	return appDocumentTitle(title, 'Slides')
 }
 
 const resetEditorState = () => {
@@ -408,9 +434,11 @@ export {
 	presentationTheme,
 	inReadonlyMode,
 	updatePresentationTitle,
+	adoptServerVersion,
 	savePresentationDoc,
+	isSaveConflict,
+	reloadAfterConflict,
 	initPresentationDoc,
-	deletePresentation,
 	confirmDeletePresentation,
 	duplicatePresentation,
 	resetEditorState,

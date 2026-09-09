@@ -1,5 +1,5 @@
 import { ref, onMounted, onUnmounted } from 'vue'
-import { useShortcut } from 'frappe-ui'
+import { useKeyboardShortcut } from 'frappe-ui'
 
 import { useNavigationPanel } from '@/apps/slides/composables/useNavigationPanel'
 import { commandHistory } from '@/apps/slides/stores/historyMeta'
@@ -190,7 +190,7 @@ export const useShortcuts = (inReadonlyMode, inSlideShowMode) => {
 		resetFocus()
 	}
 
-	useShortcut([
+	const shortcuts = [
 		{
 			key: '?',
 			description: 'Show keyboard shortcuts',
@@ -253,7 +253,7 @@ export const useShortcuts = (inReadonlyMode, inSlideShowMode) => {
 			key: 'Enter',
 			description: 'Add slide below',
 			group: 'Insert',
-			condition: inEditMode,
+			condition: () => inEditMode() && !canStartTextEditing(),
 			handler: (e) => addEmptySlide(e),
 		},
 		{
@@ -515,5 +515,18 @@ export const useShortcuts = (inReadonlyMode, inSlideShowMode) => {
 				if (inSlideShow()) performNextStep()
 			},
 		},
-	])
+	]
+
+	useKeyboardShortcut(
+		shortcuts.map(({ key, ctrl, shift, condition, ...shortcut }) => ({
+			...shortcut,
+			combo:
+				key === '?'
+					? 'Shift+Slash'
+					: [ctrl && 'Mod', shift && 'Shift', key === ' ' ? 'Space' : key]
+							.filter(Boolean)
+							.join('+'),
+			enabled: condition,
+		})),
+	)
 }

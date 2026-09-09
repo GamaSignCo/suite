@@ -9,15 +9,15 @@
       <ListRow v-for="i in 10" :key="i" class="pointer-events-none">
         <ListCell />
         <ListCell>
-          <Skeleton class="h-[16px] w-[16px] shrink-0 mr-2 rounded-sm" />
-          <Skeleton class="h-3.5 rounded" :style="{ width: nameWidths[i % nameWidths.length] }" />
+          <Skeleton class="h-[16px] w-[16px] shrink-0 mr-2 rounded-1" />
+          <Skeleton class="h-3.5 rounded-4" :style="{ width: nameWidths[i % nameWidths.length] }" />
         </ListCell>
         <ListCell class="hidden sm:flex">
           <Skeleton class="size-5 shrink-0 mr-2 rounded-full" />
-          <Skeleton class="h-3 w-16 rounded" />
+          <Skeleton class="h-3 w-16 rounded-4" />
         </ListCell>
-        <ListCell><Skeleton class="h-3 w-20 rounded" /></ListCell>
-        <ListCell class="hidden sm:flex"><Skeleton class="h-3 w-12 rounded" /></ListCell>
+        <ListCell><Skeleton class="h-3 w-20 rounded-4" /></ListCell>
+        <ListCell class="hidden sm:flex"><Skeleton class="h-3 w-12 rounded-4" /></ListCell>
         <ListCell />
       </ListRow>
     </div>
@@ -25,7 +25,7 @@
 </template>
 
 <script setup>
-import { List, ListRow, ListCell } from 'frappe-ui/list'
+import { List, ListCell, ListRow } from 'frappe-ui/list'
 import { Skeleton } from 'frappe-ui'
 import { useListColumns } from '@/apps/drive/data/listColumns'
 

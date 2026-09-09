@@ -391,6 +391,11 @@ class FileManager:
         root now, and two teams could each trash a `readme.md`."""
         return Path(self.get_root_storage_key()) / TRASH_PREFIX / entity.name
 
+    def get_trash_path(self, entity):
+        """Where move_to_trash put (or will put) this entity's blob, relative
+        to the storage root."""
+        return self.__get_trash_path(entity)
+
     @_not_if_flat
     def rename(self, entity):
         if not entity.file_url or entity.mime_type == "frappe/slides":
@@ -463,6 +468,42 @@ class FileManager:
         except BaseException:
             frappe.throw("This file doesn't exist on disk.")
         return new_path
+
+    def copy_file(self, source, target):
+        """Duplicate a blob (files only — folders go through create_folder).
+        S3-to-S3 copies server-side; a local blob under an S3 config (framework
+        adoptions) uploads to the target's key."""
+        src_key = storage_key(source.file_url)
+        dst_key = storage_key(target.file_url)
+        if self.s3_enabled:
+            if stored_on_disk(source.file_url):
+                self.conn.upload_file(str(self.get_local_path(src_key)), self.bucket, dst_key)
+            else:
+                # managed copy: copy_object caps at 5GB, conn.copy does multipart
+                self.conn.copy(
+                    {"Bucket": self.bucket, "Key": src_key},
+                    self.bucket,
+                    dst_key,
+                )
+        else:
+            shutil.copy2(self.get_local_path(src_key), self.get_local_path(dst_key))
+        self._copy_thumbnail(source, target)
+
+    def _copy_thumbnail(self, source, target):
+        # cheap to carry over, saves a regeneration; best-effort only
+        src_thumb = str(self.get_thumbnail_path(source.name))
+        dst_thumb = str(self.get_thumbnail_path(target.name))
+        try:
+            if self.s3_enabled:
+                self.conn.copy_object(
+                    Bucket=self.bucket,
+                    CopySource={"Bucket": self.bucket, "Key": src_thumb},
+                    Key=dst_thumb,
+                )
+            else:
+                shutil.copy2(self.site_folder / src_thumb, self.site_folder / dst_thumb)
+        except (ClientError, FileNotFoundError, OSError):
+            pass
 
     def delete_file(self, entity):
         thumbnail_path = self.get_thumbnail_path(entity.name)

@@ -1,21 +1,21 @@
 <template>
   <div
-    class="text-ink-gray-8 flex flex-col items-start fixed bottom-0 right-0 m-5 w-96 z-1 rounded-2xl overflow-hidden shadow-2xl border border-outline-gray-1 bg-surface-base p-4"
+    class="text-ink-gray-8 flex flex-col items-start fixed bottom-0 right-0 m-5 w-96 z-1 rounded-8 overflow-hidden shadow-2xl border border-outline-gray-1 bg-surface-base p-4"
   >
     <div
       class="flex items-center justify-between w-full pr-1.5"
       :class="[collapsed ? 'cursor-pointer' : 'mb-4']"
       @click="collapsed = false"
     >
-      <div v-if="uploadsInProgress.length > 0" class=" truncate text-xl-medium">
+      <div v-if="uploadsInProgress.length > 0" class=" truncate text-lg-medium">
         Uploading {{ uploadsInProgress.length }}
         {{ uploadsInProgress.length == 1 ? 'file' : 'files' }}
       </div>
-      <div v-else-if="uploadsCompleted.length > 0" class=" truncate text-xl-medium">
+      <div v-else-if="uploadsCompleted.length > 0" class=" truncate text-lg-medium">
         {{ uploadsCompleted.length }}
         {{ uploadsCompleted.length == 1 ? 'file' : 'files' }} uploaded
       </div>
-      <div v-else-if="uploadsFailed.length > 0" class=" truncate text-xl-medium">
+      <div v-else-if="uploadsFailed.length > 0" class=" truncate text-lg-medium">
         {{ uploadsFailed.length }}
         {{ uploadsFailed.length == 1 ? 'upload' : 'uploads' }} failed
       </div>
@@ -28,7 +28,7 @@
       <div
         v-for="(upload, index) in currentTabGetter()"
         :key="upload.uuid"
-        class="cursor-pointer truncate hover:bg-surface-sidebar rounded px-1 group"
+        class="cursor-pointer truncate hover:bg-surface-sidebar rounded-4 px-1 group"
         @mouseover="hoverIndex = index"
         @mouseout="hoverIndex = null"
       >

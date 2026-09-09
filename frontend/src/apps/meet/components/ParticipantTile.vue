@@ -1,6 +1,6 @@
 <template>
 	<div
-		class="group relative rounded-md overflow-hidden min-h-0"
+		class="group relative rounded-4 overflow-hidden min-h-0"
 		:class="tileBackgroundClass"
 		:data-testid="`participant-tile-${participant.user_id}`"
 		:data-active-speaker="String(isActiveSpeaker)"
@@ -29,7 +29,7 @@
 			<lucide-monitor-up class="w-8 h-8 text-white mb-6" />
 			<div
 				v-if="showScreenShareCopy"
-				class="text-white text-xl-medium mb-1"
+				class="text-white text-lg-medium mb-1"
 			>
 				You are sharing your screen
 			</div>
@@ -74,12 +74,12 @@
 		<!-- Reaction -->
 		<div
 			v-if="showReaction && currentReaction"
-			class="absolute top-1 px-2 py-1 rounded-md text-3xl pointer-events-none animate-pop"
+			class="absolute top-1 px-2 py-1 rounded-4 text-2xl pointer-events-none animate-pop"
 			:class="{ 'left-2': !isHandRaised, 'left-10': isHandRaised }"
 			:aria-label="`Reaction ${currentReaction.emoji} from ${resolvedDisplayName}`"
 			role="img"
 		>
-			<span class="text-4xl">{{ currentReaction.emoji }}</span>
+			<span class="text-3xl">{{ currentReaction.emoji }}</span>
 		</div>
 
 		<!-- Raised Hand -->
@@ -150,6 +150,7 @@
 			v-if="canShowHostControls"
 			v-model="showKickDialog"
 			:participant-name="resolvedDisplayName || 'this participant'"
+			:can-ban="participant.is_guest === true"
 			@confirm="handleKick"
 		/>
 	</div>
@@ -337,7 +338,7 @@ const handleMute = () => {
 	hostControls?.muteParticipant(props.participant.user_id);
 };
 
-const handleKick = (ban) => {
+const handleKick = (ban: boolean) => {
 	hostControls?.kickParticipant(props.participant.user_id, ban);
 	showKickDialog.value = false;
 };

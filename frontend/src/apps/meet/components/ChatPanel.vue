@@ -70,6 +70,7 @@
 								<MeetAvatar
 									v-if="item.poll.createdBy !== userId"
 									size="lg"
+									:image="avatarByUser[item.poll.createdBy]"
 									:label="item.poll.createdByName || item.poll.createdBy"
 									class="mt-6 shrink-0"
 								/>
@@ -96,6 +97,7 @@
 							<MeetAvatar
 								v-if="!item.group.isOwn"
 								size="lg"
+								:image="avatarByUser[item.group.user_id]"
 								:label="item.group.user_name"
 								class="mt-6 shrink-0"
 							/>
@@ -160,12 +162,12 @@
 				<form class="relative shrink-0 p-3" @submit.prevent="handleSend">
 					<template v-if="canSendMessages">
 						<div
-							class="chat-composer relative flex cursor-text items-center gap-2 rounded-lg border border-outline-gray-2 bg-surface-gray-1 px-2.5 py-1.5 shadow-sm transition-[border-color,box-shadow] focus-within:border-outline-gray-3 focus-within:shadow-[0_0_0_1px_var(--outline-gray-3)]"
+							class="chat-composer relative flex cursor-text items-center gap-2 rounded-5 border border-outline-gray-2 bg-surface-base py-1.5 pe-2 transition-colors hover:border-outline-gray-3 hover:shadow-sm focus-within:border-outline-gray-4 focus-within:shadow-sm"
 							@click="focusInput"
 						>
 							<div
 								v-if="emojiMenuActive"
-								class="absolute bottom-full left-0 z-50 mb-1 max-h-[220px] min-w-[12rem] overflow-y-auto rounded-lg border border-outline-gray-2 bg-surface-elevation-2 p-1 shadow-lg"
+								class="absolute bottom-full left-0 z-50 mb-1 max-h-[220px] min-w-[12rem] overflow-y-auto rounded-6 border border-outline-gray-2 bg-surface-elevation-2 p-1 shadow-lg"
 								role="listbox"
 								aria-label="Emoji suggestions"
 								data-testid="chat-emoji-suggestions"
@@ -175,7 +177,7 @@
 									:key="item.name"
 									type="button"
 									role="option"
-									class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm"
+									class="flex w-full items-center gap-2 rounded-4 px-2 py-1.5 text-left text-sm"
 									:class="
 										index === emojiSelectedIndex
 											? 'bg-surface-gray-3'
@@ -200,7 +202,7 @@
 								v-model="draft"
 								rows="1"
 								placeholder="Type a message"
-								class="chat-composer-input min-w-0 flex-1 resize-none border-0 bg-transparent py-0 text-sm leading-5 text-ink-gray-8 tracking-[0.28px] shadow-none outline-none ring-0 placeholder:text-ink-gray-5 focus:border-0 focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0"
+								class="chat-composer-input min-h-7 min-w-0 flex-1 resize-none border-0 bg-transparent py-1.5 text-base text-ink-gray-8 shadow-none outline-none ring-0 placeholder-ink-gray-4 focus:border-0 focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0"
 								@input="onInput"
 								@keydown="onKeydown"
 							/>
@@ -208,7 +210,7 @@
 								type="submit"
 								variant="subtle"
 								theme="gray"
-								class="!h-7 !w-7 shrink-0 !rounded-md p-0"
+								size="sm"
 								label="Send message"
 							>
 								<template #icon>
@@ -217,7 +219,7 @@
 							</Button>
 						</div>
 					</template>
-					<div v-else class="m-2 rounded-lg border border-outline-gray-2 bg-surface-gray-2 py-3 text-center text-sm text-ink-gray-5">
+					<div v-else class="m-2 rounded-6 border border-outline-gray-2 bg-surface-gray-2 py-3 text-center text-sm text-ink-gray-5">
 						The host has restricted chat to hosts and co-hosts only.
 					</div>
 				</form>
@@ -271,6 +273,7 @@ const props = defineProps<{
 	open?: boolean;
 	userId?: string;
 	userName?: string;
+	avatarByUser?: Record<string, string | null | undefined>;
 	messages?: ChatMessage[];
 	isHost?: boolean;
 	isCohost?: boolean;
@@ -278,6 +281,8 @@ const props = defineProps<{
 	hostOnlyChat?: boolean;
 	pinnedMessage?: ChatMessage | null;
 }>();
+
+const avatarByUser = computed(() => props.avatarByUser || {});
 
 const pollStore = usePollStore();
 const pollService = inject(pollKey);
@@ -482,7 +487,7 @@ function autosize() {
 	const el = inputEl.value;
 	if (!el) return;
 	el.style.height = "auto";
-	el.style.height = `${Math.min(el.scrollHeight, 44)}px`;
+	el.style.height = `${Math.min(el.scrollHeight, 88)}px`;
 }
 
 async function scrollToBottom() {
@@ -497,9 +502,7 @@ watch([chatItems], scrollToBottom, { deep: true });
 
 <style scoped>
 .chat-composer-input {
-	min-height: 1.375rem;
-	max-height: 44px;
-	padding: 0;
+	max-height: 88px;
 	margin: 0;
 	overflow-y: auto;
 	caret-color: var(--ink-gray-8);

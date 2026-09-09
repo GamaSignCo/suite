@@ -13,12 +13,12 @@
 				top: `${reaction.position.y}px`,
 			}"
 		>
-			<div class="text-5xl mb-1 animate-bounce-in">
+			<div class="text-4xl mb-1 animate-bounce-in">
 				{{ reaction.emoji }}
 			</div>
 
 			<!-- NamePill component won't work here due to it's positioning -->
-			<div class="bg-black/70 text-white text-xs px-2 py-1 rounded-md whitespace-nowrap">
+			<div class="bg-black/70 text-white text-xs px-2 py-1 rounded-4 whitespace-nowrap">
 				{{ reaction.userName }}
 			</div>
 		</div>

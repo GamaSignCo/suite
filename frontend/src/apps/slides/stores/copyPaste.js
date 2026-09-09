@@ -15,7 +15,7 @@ import {
 import { inCropMode } from '@/apps/slides/stores/imageCrop'
 import { useTextEditor } from '@/apps/slides/composables/useTextEditor'
 
-import { getDocFromHTML } from '@/apps/slides/utils/helpers'
+import { getDocFromHTML, hasListMarkup, sanitizeSlideHTML } from '@/apps/slides/utils/helpers'
 import { remapElementIds } from '@/apps/slides/utils/connectors'
 import { v4 as uuid4 } from 'uuid'
 import { handleUploadedMedia } from '@/apps/slides/utils/mediaUploads'
@@ -53,6 +53,10 @@ const copyElements = (e) => {
 const handleCopy = (e) => {
 	if (isCopyTriggeredByButton.value) return
 
+	// let native copy work in text fields (e.g. hex input in color picker,
+	// text editing) instead of hijacking it with element/slide JSON
+	if (isInputElement(e.target)) return
+
 	e.preventDefault()
 	const isCopyingElements = activeElementIds.value.length > 0
 	if (isCopyingElements) {
@@ -82,9 +86,13 @@ const copyToClipboard = async (text) => {
 
 // Paste Handlers
 
-const handlePastedText = async (clipboardText) => {
+const handlePastedText = async (clipboardText, clipboardHTML = '') => {
 	await resetFocus()
-	addTextElement(clipboardText)
+	// a copied bullet block pasted onto the canvas has to arrive as a list,
+	// not as the plain lines its text/plain fallback holds. Clipboard markup
+	// is untrusted, so it is sanitized before measurement and persistence
+	const listHTML = hasListMarkup(clipboardHTML) ? sanitizeSlideHTML(clipboardHTML) : null
+	addTextElement(clipboardText, undefined, listHTML)
 }
 
 const handlePastedJSON = async ({ srcPresentation, srcSlide, elements }) => {
@@ -146,20 +154,22 @@ const handlePastedSlideJSON = async (slideJSON) => {
 	insertSlide(slideJSON, index)
 }
 
-const isInputElement = (el) => {
-	const activeElement = document.activeElement
+const isEditableTarget = (el) => {
 	return (
-		activeElement?.tagName == 'INPUT' ||
-		activeElement?.tagName == 'TEXTAREA' ||
-		activeElement?.isContentEditable
+		el?.tagName == 'INPUT' || el?.tagName == 'TEXTAREA' || el?.isContentEditable
 	)
 }
 
-const handleClipboardText = (clipboardText) => {
+const isInputElement = (target) => {
+	if (isEditableTarget(target)) return true
+	return isEditableTarget(document.activeElement)
+}
+
+const handleClipboardText = (clipboardText, clipboardHTML = '') => {
 	if (clipboardText?.trim().startsWith('<svg') && clipboardText?.trim().endsWith('</svg>')) {
 		handleSvgText(clipboardText)
 	} else if (clipboardText && !focusElementId.value) {
-		handlePastedText(clipboardText)
+		handlePastedText(clipboardText, clipboardHTML)
 	}
 }
 
@@ -219,7 +229,7 @@ const handlePaste = (e) => {
 	if (clipboardJSON) return handleClipboardJSON(clipboardJSON)
 
 	const clipboardText = e.clipboardData.getData('text/plain')
-	if (clipboardText) return handleClipboardText(clipboardText)
+	if (clipboardText) return handleClipboardText(clipboardText, clipboardTextHTML)
 
 	const clipboardItems = e.clipboardData.items
 	if (clipboardItems) return handleUploadedMedia(clipboardItems)

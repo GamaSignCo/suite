@@ -42,16 +42,8 @@
 </template>
 
 <script setup lang="ts">
-import {
-	Badge,
-	FeatherIcon,
-	ListHeader,
-	ListRow,
-	ListRowItem,
-	ListRows,
-	ListView,
-	Tooltip,
-} from 'frappe-ui'
+import { Badge, Tooltip } from 'frappe-ui'
+import { Icon as FeatherIcon, ListHeader, ListRow, ListRowItem, ListRows, ListView } from 'frappe-ui/experimental'
 
 import { copyToClipBoard } from '@/apps/mail/utils'
 
@@ -60,7 +52,7 @@ const { title, description, records } = defineProps<{
 	description: string
 	records: Record<string, string>[]
 	badgeLabel?: string
-	badgeTheme?: 'green' | 'red' | 'gray' | 'amber' | 'orange' | 'blue'
+	badgeTheme?: 'green' | 'red' | 'gray' | 'amber'  | 'blue'
 }>()
 
 const LIST_COLUMNS = [

@@ -7,7 +7,7 @@
 	>
 		<template #actions>
 			<Dropdown :options="dropdownOptions">
-				<Button icon="more-horizontal" class="text-ink-gray-5" />
+				<Button icon="lucide-more-horizontal" class="text-ink-gray-5" />
 			</Dropdown>
 		</template>
 		<template #default>
@@ -78,7 +78,7 @@
 			}
 		"
 	/>
-	<Dialog v-model="showDeleteAddressBook" :options="deleteAddressBookOptions" />
+	<Dialog v-model:open="showDeleteAddressBook" v-bind="deleteAddressBookOptions" />
 
 	<AddAddressBookContactsModal
 		v-if="addressBook?.originalDoc"
@@ -86,29 +86,18 @@
 		:current-contacts="contacts.data?.map((c) => c.id) || []"
 		@add="(selections) => addContacts.submit(selections)"
 	/>
-	<Dialog v-model="showRemoveContacts" :options="removeContactsOptions" />
+	<Dialog v-model:open="showRemoveContacts" v-bind="removeContactsOptions" />
 </template>
 
 <script setup lang="ts">
 import { computed, ref, useTemplateRef } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { useRouter } from 'vue-router'
 import { useDebounceFn, watchDebounced } from '@vueuse/core'
 import { Pin, Trash2 } from 'lucide-vue-next'
 import {
-	Button,
-	Dialog,
-	Dropdown,
-	FeatherIcon,
-	FormControl,
-	ListEmptyState,
-	ListHeader,
-	ListRows,
-	ListSelectBanner,
-	ListView,
-	createDocumentResource,
-	createResource,
-	usePageMeta,
-} from 'frappe-ui'
+	Button, Dialog, Dropdown, FormControl, createDocumentResource, createResource, usePageMeta } from 'frappe-ui'
+import { Icon as FeatherIcon, ListEmptyState, ListHeader, ListRows, ListSelectBanner, ListView } from 'frappe-ui/experimental'
 
 import { extractNameFromEmail, raiseToast } from '@/apps/mail/utils'
 import { userStore } from '@/apps/mail/stores/user'
@@ -195,7 +184,7 @@ const loadMoreContacts = useDebounceFn((e) => {
 
 const addressBookDisplay = computed(() => addressBook.doc?._name || addressBookName)
 
-usePageMeta(() => ({ title: addressBookDisplay.value }))
+usePageMeta(() => appPageMeta(addressBookDisplay.value, 'Mail'))
 
 const breadcrumbs = computed(() => [
 	{ label: __('Address Books'), route: '/mail/address-books' },
@@ -253,14 +242,14 @@ const removeContacts = createResource({
 const deleteAddressBookOptions = computed(() => ({
 	title: __('Delete Address Book'),
 	message: __('Are you sure you want to delete {0}?', [addressBook.doc?._name]),
-	icon: { name: 'alert-triangle', appearance: 'warning' },
+	icon: { name: 'lucide-alert-triangle', theme: 'amber' },
 	actions: [{ label: __('Confirm'), variant: 'solid', onClick: deleteAddressBook.submit }],
 }))
 
 const removeContactsOptions = computed(() => ({
 	title: __('Remove Contacts'),
 	message: __('Are you sure you want to remove the selected contacts?'),
-	icon: { name: 'alert-triangle', appearance: 'warning' },
+	icon: { name: 'lucide-alert-triangle', theme: 'amber' },
 	actions: [{ label: __('Confirm'), variant: 'solid', onClick: removeContacts.submit }],
 }))
 

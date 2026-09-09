@@ -20,7 +20,7 @@
 						<Button variant="ghost" :label="__('Copy')" @click="copyToClipBoard(data.details || '')" />
 					</template>
 					<pre
-						class="bg-surface-gray-2 max-h-[60vh] overflow-auto rounded p-4 text-xs whitespace-pre-wrap"
+						class="bg-surface-gray-2 max-h-[60vh] overflow-auto rounded-4 p-4 text-xs whitespace-pre-wrap"
 						>{{ data.details || '—' }}</pre
 					>
 				</DashboardCard>
@@ -30,6 +30,7 @@
 </template>
 <script setup lang="ts">
 import { computed } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { useRouter } from 'vue-router'
 import { Button, createResource, usePageMeta } from 'frappe-ui'
 
@@ -55,7 +56,7 @@ type LogData = {
 const { logId } = defineProps<{ logId: string }>()
 const router = useRouter()
 
-usePageMeta(() => ({ title: __('Log Entry') }))
+usePageMeta(() => appPageMeta(__('Log Entry'), 'Mail'))
 
 const log = createResource({
 	url: 'suite.mail.api.admin.get_log',

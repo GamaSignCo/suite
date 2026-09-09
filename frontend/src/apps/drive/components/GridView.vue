@@ -9,7 +9,7 @@
       :id="file.name"
       :key="file.name"
       :data-testid="`drive-entity-${file.name}`"
-      class="grid-item rounded-md group select-none entity cursor-pointer relative h-40 sm:h-[172px] border bg-surface-base [-webkit-touch-callout:none]"
+      class="grid-item rounded-6 group select-none entity cursor-pointer relative h-40 sm:h-[172px] border bg-surface-base [-webkit-touch-callout:none]"
       :class="[
         selections.has(file.name) || selectedRow?.name === file.name
           ? 'border-outline-gray-3 bg-surface-gray-2 shadow-sm'
@@ -77,7 +77,7 @@
   </div>
   <NoFilesSection v-else description="Nothing found - try something else?" />
   <div v-if="loadingMore" class="pointer-events-none px-3 pb-5 sm:px-5">
-    <Skeleton class="h-3 w-24 rounded" />
+    <Skeleton class="h-3 w-24 rounded-4" />
   </div>
   <ContextMenu
     v-if="rowEvent && selectedRow"
@@ -99,7 +99,7 @@ import { openEntity, isModKey } from '@/apps/drive/utils/files'
 import { useRoute } from 'vue-router'
 import { setActiveEntity, renamingEntity } from '@/apps/drive/data/selection'
 import { settings } from '@/apps/drive/resources/permissions'
-import { onOutsideClickDirective as vOnOutsideClick } from 'frappe-ui'
+import { vOnOutsideClick } from 'frappe-ui'
 
 const props = defineProps({
   folderContents: Object,
@@ -238,7 +238,7 @@ const onDragStart = (e, file) => {
   const ghost = document.createElement('div')
   ghost.textContent = `${count} items`
   ghost.className =
-    'fixed -top-full left-0 rounded-md bg-surface-gray-7 px-2.5 py-1.5 text-sm font-medium text-ink-white shadow-lg'
+    'fixed -top-full left-0 rounded-4 bg-surface-gray-7 px-2.5 py-1.5 text-sm font-medium text-ink-base shadow-lg'
   document.body.appendChild(ghost)
   e.dataTransfer.setDragImage(ghost, -8, -8)
   requestAnimationFrame(() => ghost.remove())

@@ -42,26 +42,15 @@
 		<DashboardListSkeleton v-else :columns="3" />
 		<DashboardPager :page="page" :page-length="PAGE_LENGTH" :total="total" @update:page="(p) => (page = p)" />
 	</DashboardLayout>
-	<Dialog v-model="showDelete" :options="deleteOptions" />
+	<Dialog v-model:open="showDelete" v-bind="deleteOptions" />
 </template>
 <script setup lang="ts">
 import { computed, ref, useTemplateRef, watch } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { watchDebounced } from '@vueuse/core'
 import {
-	Button,
-	Dialog,
-	FeatherIcon,
-	FormControl,
-	ListEmptyState,
-	ListHeader,
-	ListRow,
-	ListRowItem,
-	ListRows,
-	ListSelectBanner,
-	ListView,
-	createResource,
-	usePageMeta,
-} from 'frappe-ui'
+	Button, Dialog, FormControl, createResource, usePageMeta } from 'frappe-ui'
+import { Icon as FeatherIcon, ListEmptyState, ListHeader, ListRow, ListRowItem, ListRows, ListSelectBanner, ListView } from 'frappe-ui/experimental'
 
 import { raiseToast } from '@/apps/mail/utils'
 import { fromNow as formatFromNow } from '@/apps/mail/utils/datetime'
@@ -87,7 +76,7 @@ const title = computed(() => {
 	return `${dir} ${KIND_LABELS[kind] || kind} ${__('Reports')}`
 })
 
-usePageMeta(() => ({ title: title.value }))
+usePageMeta(() => appPageMeta(title.value, 'Mail'))
 
 const reports = createResource({
 	url: 'suite.mail.api.admin.get_reports',
@@ -155,7 +144,7 @@ const deleteReports = createResource({
 const deleteOptions = computed(() => ({
 	title: __('Delete Reports'),
 	message: __('Delete the selected reports? This cannot be undone.'),
-	icon: { name: 'alert-triangle', appearance: 'warning' },
+	icon: { name: 'lucide-alert-triangle', theme: 'amber' },
 	actions: [{ label: __('Confirm'), variant: 'solid', theme: 'red', onClick: deleteReports.submit }],
 }))
 </script>

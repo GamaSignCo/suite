@@ -1,6 +1,6 @@
 <template>
-	<Dialog v-model="show" :options="addSignatureOptions">
-		<template #body-content>
+	<Dialog v-model:open="show" v-bind="addSignatureOptions">
+		<template #default>
 			<FormControl
 				v-model="identity"
 				type="combobox"
@@ -18,7 +18,7 @@
 			<div class="mt-4 space-y-1.5">
 				<label class="text-ink-gray-5 block text-xs"> {{ __('Signature') }} </label>
 				<TextEditor
-					editor-class="prose-sm min-h-[8rem] border rounded p-2 max-w-none border-outline-gray-2"
+					editor-class="prose-sm min-h-[8rem] border rounded-4 p-2 max-w-none border-outline-gray-2"
 					:extensions="[CustomParagraphExtension]"
 					:placeholder="__('Write your signature here')"
 					:content="signature"
@@ -31,7 +31,8 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { Dialog, FormControl, TextEditor, createResource } from 'frappe-ui'
+import { Dialog, FormControl, createResource } from 'frappe-ui'
+import { TextEditor } from 'frappe-ui/experimental'
 
 import { raiseToast } from '@/apps/mail/utils'
 import { CustomParagraphExtension } from '@/apps/mail/utils/text-editor'

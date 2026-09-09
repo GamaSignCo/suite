@@ -432,13 +432,24 @@ def delete_presentation(name: str):
     return frappe.delete_doc("Presentation", name)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def update_title(name: str, title: str):
     presentation = frappe.get_doc("Presentation", name)
     presentation.check_permission("write")
+    base_modified = presentation.modified
     presentation.title = title
     presentation.save()
-    return {"slug": slug(title), "modified": presentation.modified}
+    return {"slug": slug(title), "modified": presentation.modified, "base_modified": base_modified}
+
+
+@frappe.whitelist(methods=["POST"])
+def update_theme(name: str, theme: str):
+    presentation = frappe.get_doc("Presentation", name)
+    presentation.check_permission("write")
+    base_modified = presentation.modified
+    presentation.theme = theme
+    presentation.save()
+    return {"modified": presentation.modified, "base_modified": base_modified}
 
 
 def get_attachment(presentation, file_url):

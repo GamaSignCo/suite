@@ -65,7 +65,8 @@
 
 <script setup>
 import { computed, onActivated, onDeactivated, ref, watch, provide } from 'vue'
-import { toast, useShortcut, usePageMeta } from 'frappe-ui'
+import { toast, useKeyboardShortcut, usePageMeta } from 'frappe-ui'
+import { appPageMeta } from '@/utils/documentTitle'
 
 import SlideElement from '@/apps/slides/components/SlideElement.vue'
 import SlideshowEndScreen from '@/apps/slides/components/SlideshowEndScreen.vue'
@@ -326,7 +327,7 @@ const updateWindowSize = () => {
 	windowHeight.value = window.innerHeight
 }
 
-usePageMeta(() => ({ title: pageTitle() }))
+usePageMeta(() => appPageMeta(pageTitle(), 'Slides'))
 
 onActivated(() => {
 	document.title = pageTitle()
@@ -374,15 +375,15 @@ watch(
 provide('inReadonlyMode', inReadonlyMode)
 provide('inSlideShowMode', inSlideShowMode)
 
-useShortcut([
-	{ key: 'ArrowRight', description: 'Next step', group: 'Slideshow', handler: performNextStep },
-	{ key: 'ArrowDown', description: 'Next step', group: 'Slideshow', handler: performNextStep },
-	{ key: ' ', description: 'Next step', group: 'Slideshow', handler: performNextStep },
-	{ key: 'PageDown', description: 'Next step', group: 'Slideshow', handler: performNextStep },
-	{ key: 'ArrowLeft', description: 'Previous step', group: 'Slideshow', handler: performPreviousStep },
-	{ key: 'ArrowUp', description: 'Previous step', group: 'Slideshow', handler: performPreviousStep },
-	{ key: 'PageUp', description: 'Previous step', group: 'Slideshow', handler: performPreviousStep },
-	{ key: 'F5', description: 'Restart', group: 'Slideshow', handler: () => changeSlideInSlideshow(0) },
+useKeyboardShortcut([
+	{ combo: 'ArrowRight', description: 'Next step', group: 'Slideshow', handler: performNextStep },
+	{ combo: 'ArrowDown', description: 'Next step', group: 'Slideshow', handler: performNextStep },
+	{ combo: 'Space', description: 'Next step', group: 'Slideshow', handler: performNextStep },
+	{ combo: 'PageDown', description: 'Next step', group: 'Slideshow', handler: performNextStep },
+	{ combo: 'ArrowLeft', description: 'Previous step', group: 'Slideshow', handler: performPreviousStep },
+	{ combo: 'ArrowUp', description: 'Previous step', group: 'Slideshow', handler: performPreviousStep },
+	{ combo: 'PageUp', description: 'Previous step', group: 'Slideshow', handler: performPreviousStep },
+	{ combo: 'F5', description: 'Restart', group: 'Slideshow', handler: () => changeSlideInSlideshow(0) },
 ])
 </script>
 

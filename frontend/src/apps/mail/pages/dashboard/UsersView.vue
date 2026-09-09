@@ -122,9 +122,9 @@
 		</ListSelectBanner>
 	</ListView>
 	<DashboardListSkeleton v-else :columns="5" />
-	<Dialog v-model="showEnableMembers" :options="ENABLE_MEMBERS_OPTIONS" />
-	<Dialog v-model="showDisableMembers" :options="DISABLE_MEMBERS_OPTIONS" />
-	<Dialog v-model="showDeleteMembers" :options="DELETE_MEMBERS_OPTIONS" />
+	<Dialog v-model:open="showEnableMembers" v-bind="ENABLE_MEMBERS_OPTIONS" />
+	<Dialog v-model:open="showDisableMembers" v-bind="DISABLE_MEMBERS_OPTIONS" />
+	<Dialog v-model:open="showDeleteMembers" v-bind="DELETE_MEMBERS_OPTIONS" />
 </template>
 
 <script setup lang="ts">
@@ -135,8 +135,12 @@ import {
 	Badge,
 	Button,
 	Dialog,
-	FeatherIcon,
 	FormControl,
+	Tooltip,
+	createResource,
+} from 'frappe-ui'
+import {
+	Icon as FeatherIcon,
 	ListEmptyState,
 	ListHeader,
 	ListRow,
@@ -144,9 +148,7 @@ import {
 	ListRows,
 	ListSelectBanner,
 	ListView,
-	Tooltip,
-	createResource,
-} from 'frappe-ui'
+} from 'frappe-ui/experimental'
 
 import { formatBytes, raiseToast } from '@/apps/mail/utils'
 import { fromNow } from '@/apps/mail/utils/datetime'

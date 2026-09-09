@@ -1,9 +1,9 @@
 <template>
 	<Popover side="top" align="center" :offset="12">
-		<template #trigger="{ isOpen }">
+		<template #trigger="{ open }">
 			<div>
 				<Tooltip text="Table" :hover-delay="0.7">
-					<div :class="triggerClass(isOpen)">
+					<div :class="triggerClass(open)">
 						<Table class="size-4 stroke-[1.5] text-ink-gray-7" />
 						<ChevronDown class="size-3 text-ink-gray-5" />
 					</div>
@@ -17,7 +17,7 @@
 						<div
 							v-for="col in maxColumns"
 							:key="col"
-							class="size-4 cursor-pointer rounded-sm border"
+							class="size-4 cursor-pointer rounded-1 border"
 							:class="
 								row <= hovered.rows && col <= hovered.columns
 									? 'border-outline-gray-3 bg-surface-gray-4'
@@ -53,7 +53,7 @@ const label = computed(() =>
 )
 
 const triggerClass = (isOpen) => [
-	'flex cursor-pointer items-center gap-1 rounded py-2 pl-2 pr-1 hover:bg-surface-gray-3',
+	'flex cursor-pointer items-center gap-1 rounded-4 py-2 pl-2 pr-1 hover:bg-surface-gray-3',
 	{ 'bg-surface-gray-3': isOpen },
 ]
 

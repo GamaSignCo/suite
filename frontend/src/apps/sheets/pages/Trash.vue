@@ -3,7 +3,7 @@
     <!-- Top bar — mirrors Home's chrome, minus search/view-toggle/New. -->
     <div class="home-topbar">
       <div class="home-brand">
-        <Button variant="ghost" size="sm" icon="arrow-left" tooltip="Back to sheets" @click="goHome()" />
+        <Button variant="ghost" size="sm" icon="lucide-arrow-left" tooltip="Back to sheets" @click="goHome()" />
         <span class="home-brand-name">Trash</span>
       </div>
       <div class="home-topbar-right">
@@ -47,8 +47,8 @@
     </div>
 
     <!-- Permanent delete confirm -->
-    <Dialog v-model="showPurgeDialog" :options="{ title: 'Delete forever?', size: 'sm' }">
-      <template #body-content>
+    <Dialog v-model:open="showPurgeDialog" title="Delete forever?" size="sm">
+      <template #default>
         <p class="home-confirm-text">
           "<strong>{{ purgeTarget?.title }}</strong>" and its full history will be
           <strong>permanently deleted</strong>. This can't be undone.
@@ -66,12 +66,16 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { Badge, Button, Dialog, Spinner, FeatherIcon, ListView, ListRowItem } from 'frappe-ui'
+import { Badge, Button, Dialog, Spinner } from 'frappe-ui'
+import { Icon as FeatherIcon, ListView, ListRowItem } from 'frappe-ui/experimental'
 import { useRouter } from 'vue-router'
 
 import { call } from '@/apps/sheets/utils/api.js'
+import { setupTheme } from '@/utils/setupTheme'
 
 const router = useRouter()
+
+setupTheme()
 
 const sheets  = ref([])
 const loading = ref(true)
@@ -159,23 +163,23 @@ async function doPurge() {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background: var(--surface-white);
+  background: var(--surface-base);
   font-family: InterVar, ui-sans-serif, system-ui, sans-serif;
   color: var(--ink-gray-9);
 }
 .home-topbar {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 0 32px;
+  gap: 8px;
+  padding: 0 12px;
   height: 48px;
-  background: var(--surface-white);
-  border-bottom: 1px solid var(--outline-gray-2);
+  background: var(--surface-elevation-1);
+  border-bottom: 1px solid var(--outline-elevation-1);
   flex-shrink: 0;
 }
 .home-brand { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .home-brand-name { font-size: 16px; font-weight: 600; letter-spacing: .01em; color: var(--ink-gray-9); }
-.home-topbar-right { display: flex; align-items: center; gap: 16px; margin-left: auto; }
+.home-topbar-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .home-trash-note { font-size: 12px; letter-spacing: .02em; color: var(--ink-gray-5); }
 .home-body {
   flex: 1;

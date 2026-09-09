@@ -4,16 +4,16 @@
       <ListCell />
       <ListCell>
         <div class="flex items-center" :style="indent(item.depth)">
-          <Skeleton class="h-[16px] w-[16px] shrink-0 mr-2 rounded-sm" />
-          <Skeleton class="h-3.5 w-40 rounded" />
+          <Skeleton class="h-[16px] w-[16px] shrink-0 mr-2 rounded-1" />
+          <Skeleton class="h-3.5 w-40 rounded-4" />
         </div>
       </ListCell>
       <ListCell>
         <Skeleton class="size-5 shrink-0 mr-2 rounded-full" />
-        <Skeleton class="h-3 w-16 rounded" />
+        <Skeleton class="h-3 w-16 rounded-4" />
       </ListCell>
-      <ListCell><Skeleton class="h-3 w-20 rounded" /></ListCell>
-      <ListCell><Skeleton class="h-3 w-12 rounded" /></ListCell>
+      <ListCell><Skeleton class="h-3 w-20 rounded-4" /></ListCell>
+      <ListCell><Skeleton class="h-3 w-12 rounded-4" /></ListCell>
       <ListCell />
     </ListRow>
     <ListRow v-else-if="item.placeholder" class="pointer-events-none">
@@ -45,7 +45,7 @@
         :data-testid="`drive-entity-${row.name}`"
         :data-selected="selections.has(row.name) || undefined"
         @contextmenu="(e) => !selections.size && contextMenu(e, row)"
-        @click="isModKey($event) ? props.toggleSelection(row, $event) : !selections.size && open(row)"
+        @click="onRowClick($event, row)"
         @dragstart="onDragStart($event, row)"
         @dragend="draggedItem = null"
         @dragover="
@@ -89,14 +89,14 @@
               <img
                 v-if="!loadedThumbnails.has(row.name)"
                 loading="lazy"
-                class="absolute inset-0 h-[16px] w-[16px] rounded-sm"
+                class="absolute inset-0 h-[16px] w-[16px] rounded-1"
                 :src="thumbnail(row).fallback"
                 :draggable="false"
               />
               <img
                 loading="lazy"
                 decoding="async"
-                class="absolute inset-0 h-[16px] w-[16px] object-cover rounded-sm"
+                class="absolute inset-0 h-[16px] w-[16px] object-cover rounded-1"
                 :class="loadedThumbnails.has(row.name) ? 'opacity-100' : 'opacity-0'"
                 :src="thumbnail(row).src"
                 :draggable="false"
@@ -162,7 +162,7 @@
   </template>
 </template>
 <script setup>
-import { ListRow, ListCell } from 'frappe-ui/list'
+import { ListCell, ListRow } from 'frappe-ui/list'
 import { Avatar, Button, Checkbox, Skeleton, Tooltip } from 'frappe-ui'
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
@@ -217,7 +217,7 @@ const onDragStart = (e, row) => {
   const ghost = document.createElement('div')
   ghost.textContent = `${count} items`
   ghost.className =
-    'fixed -top-full left-0 rounded-md bg-surface-gray-7 px-2.5 py-1.5 text-sm font-medium text-ink-white shadow-lg'
+    'fixed -top-full left-0 rounded-4 bg-surface-gray-7 px-2.5 py-1.5 text-sm font-medium text-ink-base shadow-lg'
   document.body.appendChild(ghost)
   e.dataTransfer.setDragImage(ghost, -8, -8)
   requestAnimationFrame(() => ghost.remove())
@@ -226,8 +226,8 @@ const onDragStart = (e, row) => {
 // Used as right-click doesn't trigger active in frappe-ui
 const selectedName = computed(() => activeEntity.value?.name)
 // Folders get a real `:to` route below — RouterLink handles the navigation
-// (and gives cmd/ctrl-click-to-open-in-new-tab, right-click-copy-link for
-// free) — so this only drives non-folder clicks. Suppressed during an active
+// (and gives right-click-copy-link and middle-click-new-tab for free) — so
+// this only drives non-folder clicks. Suppressed during an active
 // selection so clicking elsewhere in the row doesn't navigate away (matches
 // the existing !selections.size click guard).
 // `!renamingEntity`: the rename input sits inside the row's <button>, so a
@@ -239,6 +239,16 @@ const open = (row) =>
   openEntity(row)
 const routeFor = (row) =>
   row.is_folder && !props.selections.size ? folderRoute(row) : undefined
+// ⌘/Ctrl+click selects (file-manager convention, same as grid tiles).
+// preventDefault keeps folder rows — real links — from also opening a tab.
+const onRowClick = (e, row) => {
+  if (isModKey(e)) {
+    e.preventDefault()
+    props.toggleSelection(row, e)
+    return
+  }
+  if (!props.selections.size) open(row)
+}
 
 // Virtual nodes have no Drive children to fetch — expanding one would ask for
 // the contents of a File that doesn't exist.

@@ -1407,6 +1407,25 @@ def fetch_changes(user: str, account: str, email_state: str | None = None, ctx: 
     ctx["email_state"] = email_state
 
     if not current_state:
+        if not email_state:
+            # A manual or scheduled run carries no state, and storing None would leave the
+            # account re-"initializing" on every run with changes never fetched — seed from
+            # the server's actual Email state instead.
+            try:
+                email_state = EmailService(account, get_jmap_connection(user)).get_state()
+                ctx["email_state"] = email_state
+            except Exception:
+                logger.error("email-sync-state-init-failed")
+                log_mail_error(
+                    _("Failed to initialize email sync state"),
+                    frappe.get_traceback(with_context=True),
+                )
+                return
+
+        if not email_state:
+            logger.warning("email-sync-state-unavailable")
+            return
+
         logger.info("initializing-email-sync-state")
         return update_sync_state(account, type="email", state=email_state)
 

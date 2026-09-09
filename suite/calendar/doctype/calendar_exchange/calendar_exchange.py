@@ -1002,6 +1002,23 @@ def _build_recurrence_rule(rule: dict, time_zone: str | None = None, all_day: bo
     return recur or None
 
 
+def _participant_name(participants: dict | None, address: str) -> str | None:
+    """Display name of the participant matching the address, else the owner's (for ORGANIZER CN)."""
+
+    address = address.lower().removeprefix("mailto:")
+    owner_name = None
+    for participant in (participants or {}).values():
+        name = participant.get("name")
+        if not name:
+            continue
+        candidate = participant.get("calendarAddress") or participant.get("email") or ""
+        if candidate.lower().removeprefix("mailto:") == address:
+            return name
+        if not owner_name and "owner" in (participant.get("roles") or {}):
+            owner_name = name
+    return owner_name
+
+
 def _add_participants(component, participants: dict) -> None:
     """Adds ATTENDEE properties to a VEVENT from a JSCalendar participants map."""
 
@@ -1081,7 +1098,7 @@ def jscalendar_to_vevent(event: dict, categories: list[str] | None = None):
     Recurrence overrides are NOT applied here; :func:`_build_components` handles those by
     emitting the master event plus per-instance override components."""
 
-    from icalendar import Event, vText, vUri
+    from icalendar import Event, vCalAddress, vUri
 
     component = Event()
 
@@ -1090,7 +1107,19 @@ def jscalendar_to_vevent(event: dict, categories: list[str] | None = None):
 
     if title := event.get("title"):
         component.add("summary", title)
-    if description := event.get("description"):
+
+    meet_link = next(
+        (l.get("href") for l in (event.get("links") or {}).values() if is_conference_link(l.get("href"))),
+        None,
+    )
+
+    # Google appends a "Join with Google Meet: ..." line to DESCRIPTION so text-only clients
+    # (and forwarded plain-text copies) keep a joinable link; same idea for the Meet link.
+    description = event.get("description") or ""
+    if meet_link and meet_link not in description:
+        join_line = f"Join with {CONFERENCE_LABEL}: {meet_link}"
+        description = f"{description}\n\n{join_line}" if description else join_line
+    if description:
         component.add("description", description)
 
     time_zone = event.get("timeZone")
@@ -1103,10 +1132,14 @@ def jscalendar_to_vevent(event: dict, categories: list[str] | None = None):
 
     duration = _parse_duration(event.get("duration"), start)
     if duration is not None:
+        # DTEND over DURATION throughout: some clients (older Outlook/Exchange builds notably)
+        # mishandle DURATION in scheduling messages. All-day DTEND is DATE-valued and exclusive
+        # per RFC 5545.
         if event.get("showWithoutTime"):
-            # All-day events use a DATE-valued DTEND (exclusive) for broad client compatibility.
             if start:
                 component.add("dtend", (start + (duration or timedelta(days=1))).date())
+        elif start:
+            component.add("dtend", start + duration)
         else:
             component.add("duration", duration)
 
@@ -1118,9 +1151,17 @@ def jscalendar_to_vevent(event: dict, categories: list[str] | None = None):
         component.add("transp", FREE_BUSY_MAP[free_busy.lower()])
 
     if organizer := event.get("organizerCalendarAddress"):
-        component.add("organizer", vText(organizer))
+        address = vCalAddress(organizer)
+        # CN lets clients show "Invitation from <name>" instead of the bare address.
+        if name := _participant_name(event.get("participants"), organizer):
+            address.params["CN"] = name
+        component.add("organizer", address, encode=0)
 
     locations = [l.get("name") for l in (event.get("locations") or {}).values() if l.get("name")]
+    # Google-style "Remote; https://...": many clients only surface LOCATION (CONFERENCE and
+    # URL get buried), so the Meet link rides along unless the location text already has it.
+    if meet_link and not any(meet_link in name for name in locations):
+        locations.append(meet_link)
     if locations:
         component.add("location", "; ".join(locations))
 
@@ -1160,8 +1201,9 @@ def jscalendar_to_vevent(event: dict, categories: list[str] | None = None):
         component.add("last-modified", updated)
     component.add("dtstamp", updated or created or datetime.now(UTC))
 
-    if (sequence := event.get("sequence")) is not None:
-        component.add("sequence", cint(sequence))
+    # Always emitted: an explicit SEQUENCE:0 keeps clients that compare sequences across
+    # updates (Outlook notably) from misordering the first invite against later revisions.
+    component.add("sequence", cint(event.get("sequence")))
 
     _add_participants(component, event.get("participants"))
     _add_alarms(component, event.get("alerts"))

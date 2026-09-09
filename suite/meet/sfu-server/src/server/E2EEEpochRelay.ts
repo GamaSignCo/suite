@@ -15,7 +15,7 @@ import {
 	type PersistedE2eePendingCommitRequest,
 } from './E2eeCoordinatorPersistence';
 import type { E2eeRosterStore } from './E2eeRosterStore';
-import { checkSocketRateLimits } from './handlers/utils';
+import { checkSocketRateLimits, getRoomId } from './handlers/utils';
 
 type TypedSocket = Socket<
 	ClientToServerEvents,
@@ -134,6 +134,7 @@ export class E2EEEpochRelay {
 		const allowed = checkSocketRateLimits(
 			socket,
 			this.rateLimiter,
+			`e2ee-epoch:${getRoomId(socket)}`,
 			E2EE_EPOCH_USER_LIMIT,
 			E2EE_EPOCH_IP_LIMIT,
 			E2EE_EPOCH_RATE_WINDOW_MS,
@@ -148,18 +149,6 @@ export class E2EEEpochRelay {
 			});
 		}
 		return allowed;
-	}
-
-	requestKeyPackages(
-		roomId: string,
-		epochNumber: number,
-		reason: 'enable' | 'join' | 'reconnect',
-	): void {
-		this.emitToFullAccessParticipants(roomId, {
-			type: 'key-package-request',
-			epochNumber,
-			reason,
-		});
 	}
 
 	requestKeyPackageFromParticipant(
@@ -468,15 +457,6 @@ export class E2EEEpochRelay {
 			});
 			return;
 		}
-		await this.persistence.retainKeyPackage(roomId, {
-			type: 'key-package',
-			fromParticipantId,
-			fromSenderId,
-			epochNumber: payload.epochNumber,
-			keyPackage: payload.keyPackage,
-			consumed: false,
-			expiresAt: this.expiresAt(),
-		});
 		this.emitToFullAccessParticipants(roomId, {
 			type: 'key-package',
 			fromParticipantId,
@@ -959,11 +939,6 @@ export class E2EEEpochRelay {
 		await this.retainCommit(roomId, commit);
 		this.emitToFullAccessParticipants(roomId, commit);
 		if (hasMatchingPending) {
-			await this.persistence.markKeyPackagesConsumed(
-				roomId,
-				payload.previousEpochNumber,
-				this.parseJoiningSenderIds(payload.membershipDeltaId),
-			);
 			await this.clearPendingCommitRequest(roomId, payload.previousEpochNumber);
 		}
 	}
@@ -1297,16 +1272,6 @@ export class E2EEEpochRelay {
 
 	private expiresAt(): number {
 		return Date.now() + E2EE_COORDINATOR_TTL_MS;
-	}
-
-	private parseJoiningSenderIds(membershipDeltaId: string): number[] {
-		if (!membershipDeltaId.startsWith('add-')) return [];
-		const body = membershipDeltaId.slice('add-'.length).split('-to-')[0];
-		if (!body) return [];
-		return body
-			.split('-')
-			.map((id) => Number.parseInt(id, 10))
-			.filter((id) => this.isSenderId(id));
 	}
 
 	private hasContiguousRetainedEpochs(

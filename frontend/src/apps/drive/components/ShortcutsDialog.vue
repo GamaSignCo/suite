@@ -2,7 +2,7 @@
   <Dialog v-model:open="open" title="Keyboard Shortcuts" size="4xl">
     <div class="w-full grid grid-cols-2 gap-10 py-1">
       <div v-for="group in shortcutGroups" :key="group.title" class="border-b pb-4">
-        <h2 class="text-xl-semibold text-ink-gray-8 mb-4">
+        <h2 class="text-lg-semibold text-ink-gray-8 mb-4">
           {{ group.title }}
         </h2>
         <ul class="space-y-2">
@@ -12,7 +12,7 @@
             </div>
             <div class="flex space-x-1 w-[9rem] gap-1 justify-start">
               <span v-for="(key, kIndex) in shortcut[0]" :key="kIndex"
-                class="px-2 py-0.5 bg-surface-gray-2 border border-outline-gray-2 text-xs rounded-sm font-mono text-ink-gray-8 shadow-sm">
+                class="px-2 py-0.5 bg-surface-gray-2 border border-outline-gray-2 text-xs rounded-1 font-mono text-ink-gray-8 shadow-sm">
                 {{ key }}
               </span>
             </div>
@@ -72,6 +72,7 @@ const shortcutGroups = [
       [getLabel('s'), 'Share selected file(s)'],
       [getLabel('m'), 'Move selected file(s)'],
       [[metaKey.value, 'Delete'], 'Delete selected file(s)'],
+      [[findFilesKey.value, 'Enter'], 'Open selected file in new tab'],
       [getLabel('u'), 'Upload a file'],
       [getLabel('n'), 'Create a folder'],
     ],

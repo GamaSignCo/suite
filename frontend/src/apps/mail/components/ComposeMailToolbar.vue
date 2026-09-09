@@ -26,10 +26,10 @@
 				<TextEditorFixedMenu :buttons class="!bg-inherit" />
 				<EmojiPicker
 					v-if="!isMobile"
-					v-slot="{ togglePopover }"
+					v-slot="{ toggle }"
 					@update:model-value="emit('appendEmoji', $event)"
 				>
-					<Button variant="ghost" class="max-h-6 max-w-6" @click="togglePopover()">
+					<Button variant="ghost" class="max-h-6 max-w-6" @click="toggle()">
 						<template #icon>
 							<Laugh class="icon" />
 						</template>
@@ -70,10 +70,10 @@
 						class="!rounded-r-none"
 						@click="emit('sendMail')"
 					/>
-					<Dropdown :options="sendOptions" placement="top-end">
+					<Dropdown :options="sendOptions">
 						<Button
 							variant="solid"
-							:tooltip="__('Schedule send')"
+							:tooltip="__('Schedule send ({0}+Shift+Enter)', [modifier])"
 							:disabled="isRecipientsEmpty || isUploading"
 							class="!rounded-l-none"
 						>
@@ -90,7 +90,8 @@
 <script setup lang="ts">
 import { computed, useTemplateRef } from 'vue'
 import { CalendarClock, ChevronDown, Laugh, Paperclip, SendHorizontal, Trash2 } from 'lucide-vue-next'
-import { Button, Dropdown, TextEditorFixedMenu } from 'frappe-ui'
+import { Button, Dropdown } from 'frappe-ui'
+import { TextEditorFixedMenu } from 'frappe-ui/experimental'
 
 import { isMac } from '@/apps/mail/utils'
 import { useScreenSize, useTextEditorButtons } from '@/apps/mail/utils/composables'

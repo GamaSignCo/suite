@@ -50,6 +50,7 @@ import {
   isVirtual,
   isManaged,
   isAttachmentRef,
+  isModKey,
 } from '@/apps/drive/utils/files'
 import {
   toggleFav,
@@ -62,7 +63,7 @@ import { entitiesDownload } from '@/apps/drive/utils/download'
 import { ref, computed, watch, watchEffect, provide, inject, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { onKeyDown, useEventListener } from '@vueuse/core'
-import { request, useScrollContainer } from 'frappe-ui'
+import { frappeRequest, shellScrollContainer as scrollHost } from 'frappe-ui'
 import { useSessionStore, useCurrentUser } from '@/boot/session'
 import { activeEntity, startRename } from '@/apps/drive/data/selection'
 import { uploads } from '@/apps/drive/data/uploads'
@@ -89,6 +90,7 @@ import { getFileLink } from '@/apps/drive/ui/drive/js/utils'
 import LucideClock from '~icons/lucide/clock'
 import LucideDownload from '~icons/lucide/download'
 import LucideExternalLink from '~icons/lucide/external-link'
+import LucideSquareArrowOutUpRight from '~icons/lucide/square-arrow-out-up-right'
 import LucideEye from '~icons/lucide/eye'
 import LucideInfo from '~icons/lucide/info'
 import LucideLink2 from '~icons/lucide/link-2'
@@ -109,7 +111,6 @@ const props = defineProps({
   getEntities: Object,
 })
 const route = useRoute()
-const { el: scrollHost } = useScrollContainer()
 
 const listDialog = ref('')
 provide('listDialog', listDialog)
@@ -222,6 +223,12 @@ const isTyping = (e) =>
   e.target.tagName === 'INPUT' ||
   e.target.tagName === 'TEXTAREA'
 
+// Links keep their own confirm flow and virtual nodes have no standalone
+// page, so neither can be opened in a new tab. Shared by the context-menu
+// action and the mod+Enter shortcut.
+const canOpenInNewTab = (entity) =>
+  !isVirtual(entity) && entity.file_type !== 'Link'
+
 onKeyDown('a', (e) => {
   if (isTyping(e)) return
   if (e.metaKey || e.ctrlKey) {
@@ -236,6 +243,16 @@ onKeyDown('Backspace', (e) => {
 onKeyDown('m', (e) => {
   if (isTyping(e)) return
   if (e.ctrlKey) emitter.emit('move')
+})
+onKeyDown('Enter', (e) => {
+  if (isTyping(e)) return
+  if (document.querySelector('.dialog-content[data-state="open"]')) return
+  if (route.name === 'drive-Trash' || !isModKey(e)) return
+  if (selectedEntitities.value.length !== 1) return
+  const [entity] = selectedEntitities.value
+  if (!canOpenInNewTab(entity)) return
+  e.preventDefault()
+  openEntity(entity, true)
 })
 onKeyDown('Escape', (e) => {
   if (isTyping(e)) return
@@ -316,7 +333,7 @@ async function loadMore() {
   const next = pageStart.value
   try {
     const path = res.url.startsWith('/') ? res.url : `/api/method/${res.url}`
-    const resp = await request({
+    const resp = await frappeRequest({
       url: path,
       method: 'GET',
       params: {
@@ -328,7 +345,7 @@ async function loadMore() {
       },
       credentials: 'include',
     })
-    // request() is a raw fetch that skips the resource's transform, so the page
+    // frappeRequest() skips the resource's transform, so the page
     // rows arrive unformatted — run them through the same formatter the resource
     // uses, or this page would keep the dotfiles page 1 hides.
     // The query moved on while this was in flight — these rows belong to the
@@ -349,7 +366,7 @@ async function loadMore() {
 
 // Infinite scroll is driven off the shell's scroll container directly rather
 // than through `useInfiniteScroll`. That composable resolves its target once, at
-// setup — but `useScrollContainer` is a module-level registry the *shell* fills
+// setup — but `shellScrollContainer` is a module-level ref the *shell* fills
 // in, and on a cold mount the shell registers a tick after this component sets
 // up. So it bound to `null`, its internal `arrivedState` never updated again,
 // and the list loaded page 1 and then never paginated no matter how far you
@@ -530,6 +547,12 @@ const actionItems = computed(() => {
         icon: LucideExternalLink,
         action: ([entity]) => openEntity(entity),
         isEnabled: (e) => e.file_type === 'Link',
+      },
+      {
+        label: __('Open in new tab'),
+        icon: LucideSquareArrowOutUpRight,
+        action: ([entity]) => openEntity(entity, true),
+        isEnabled: canOpenInNewTab,
       },
       {
         label: __('Show Info'),

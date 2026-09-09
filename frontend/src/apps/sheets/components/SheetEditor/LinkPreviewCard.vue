@@ -1,7 +1,7 @@
 <template>
 	<div
 		v-if="open"
-		class="sn-lp-card absolute z-40 w-[340px] overflow-hidden rounded-lg border border-outline-gray-1 bg-surface-white shadow-2xl"
+		class="sn-lp-card absolute z-40 w-[340px] overflow-hidden rounded-6 border border-outline-gray-1 bg-surface-base shadow-2xl"
 		:style="style"
 		@mouseenter="$emit('enter')"
 		@mouseleave="$emit('leave')"
@@ -10,13 +10,13 @@
 	>
 		<div class="flex items-center gap-2.5 p-2.5 pl-3">
 			<span
-				class="flex h-7 w-7 shrink-0 items-center justify-center rounded bg-surface-gray-2 text-ink-gray-5"
+				class="flex h-7 w-7 shrink-0 items-center justify-center rounded-4 bg-surface-gray-2 text-ink-gray-5"
 			>
 				<img
 					v-if="preview.favicon && !faviconFailed"
 					:src="preview.favicon"
 					alt=""
-					class="h-5 w-5 rounded-sm"
+					class="h-5 w-5 rounded-1"
 					@error="faviconFailed = true"
 				/>
 				<Spinner v-else-if="preview.loading" class="h-3.5 w-3.5" />
@@ -132,7 +132,7 @@ const style = computed(() => {
 .sn-lp-card {
 	transform-origin: top left;
 	animation: sn-lp-rise 120ms ease-out;
-	/* Paint the fill with a literal colour, NOT the bg-surface-white utility.
+	/* Paint the fill with a literal colour, NOT the bg-surface-base utility.
 	   That utility compiles to color-mix(in srgb, var(--surface-white,#fff) …);
 	   in the production runtime --surface-white resolves to an EMPTY value in
 	   this context, and an empty var defeats even the #fff fallback, so the

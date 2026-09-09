@@ -225,6 +225,9 @@ def _create_root_folder(file_name):
     root._name = file_name
     root.flags.file_created = True
     root.insert(ignore_permissions=True)
+    # creation is triggered by whoever touches Drive first; a pinned root owned
+    # by that visitor would hand them the owner's all-access bypass forever
+    root.db_set("owner", "Administrator", update_modified=False)
     return frappe._dict(name=root.name, file_url=root.file_url)
 
 
@@ -555,6 +558,31 @@ def update_file_size(entity, delta):
     doc.save(ignore_permissions=True)
 
 
+def apply_file_size_delta(folder, delta):
+    """Roll a size delta up the ancestor chain in one atomic UPDATE.
+
+    update_file_size's per-ancestor read-modify-write save silently loses
+    concurrent deltas (the TimestampMismatchError its api/files.py call site
+    swallows with a TODO); an in-place SQL delta serializes on the row locks
+    instead, so simultaneous uploads all land. Bumps modified the way the
+    save-based walk did — a folder's WebDAV getlastmodified reads it."""
+    names = []
+    cursor = folder
+    while cursor and cursor not in names:  # `not in` guards a corrupt cycle
+        names.append(cursor)
+        cursor = frappe.db.get_value("File", cursor, "folder")
+    if not names:
+        return
+    file_table = frappe.qb.DocType("File")
+    (
+        frappe.qb.update(file_table)
+        .set(file_table.file_size, file_table.file_size + delta)
+        .set(file_table.modified, frappe.utils.now())
+        .where(file_table.name.isin(names))
+        .run()
+    )
+
+
 def if_folder_exists(folder_name, parent):
     values = {
         "file_name": folder_name,
@@ -587,6 +615,7 @@ def create_drive_file(
     content_doctype=None,
     content_docname=None,
     owner=None,
+    name=None,
 ):
     values = {
         "doctype": "File",
@@ -604,6 +633,8 @@ def create_drive_file(
         values["content_docname"] = content_docname
     drive_file = frappe.get_doc(values)
     drive_file.flags.file_created = True
+    if name:
+        drive_file._name = name
     drive_file.insert(ignore_permissions=True)
     path = entity_path(drive_file) if callable(entity_path) else entity_path
     drive_file.file_url = str(path) if path else ""

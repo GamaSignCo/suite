@@ -44,7 +44,7 @@
 			<div class="space-y-1.5">
 				<label class="text-ink-gray-5 block text-xs">{{ __('Message') }}</label>
 				<TextEditor
-					editor-class="prose-sm min-h-[8rem] border rounded-b-lg border-t-0 p-2 max-w-none border-outline-gray-2"
+					editor-class="prose-sm min-h-[8rem] border rounded-b-6 border-t-0 p-2 max-w-none border-outline-gray-2"
 					:placeholder="__('Type something...')"
 					:fixed-menu="buttons"
 					:content="vacationResponse.data.html_body"
@@ -63,13 +63,8 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
 import {
-	Button,
-	FormControl,
-	SettingsRow,
-	Switch,
-	TextEditor,
-	createResource,
-} from 'frappe-ui'
+	Button, FormControl, SettingsRow, Switch, createResource } from 'frappe-ui'
+import { TextEditor } from 'frappe-ui/experimental'
 import AppSettingsHeader from '@/components/settings/AppSettingsHeader.vue'
 import AppSettingsBody from '@/components/settings/AppSettingsBody.vue'
 

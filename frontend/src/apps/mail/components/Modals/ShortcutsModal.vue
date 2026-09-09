@@ -1,10 +1,10 @@
 <template>
-	<Dialog :options="{ title: __('Shortcuts'), size: '5xl' }">
-		<template #body-content>
+	<Dialog v-bind="{ title: __('Shortcuts'), size: '5xl' }">
+		<template #default>
 			<div class="grid max-h-[75vh] w-full grid-cols-2 gap-10 overflow-y-auto py-1">
 				<div v-for="(column, index) in shortcutGroups" :key="index">
 					<div v-for="group in column" :key="group.title" class="pb-8">
-						<h2 class="text-ink-gray-8 mb-4 text-xl-semibold">
+						<h2 class="text-ink-gray-8 mb-4 text-lg-semibold">
 							{{ group.title }}
 						</h2>
 						<ul class="space-y-2">
@@ -20,7 +20,7 @@
 										:key="kIndex"
 										class="text-ink-gray-8 my-auto text-xs"
 										:class="{
-											'bg-surface-gray-2 border-outline-gray-2 rounded-sm border px-2 py-0.5 font-mono shadow-sm':
+											'bg-surface-gray-2 border-outline-gray-2 rounded-1 border px-2 py-0.5 font-mono shadow-sm':
 												![__('or'), __('then')].includes(key),
 										}"
 									>
@@ -55,6 +55,8 @@ const shortcutGroups = computed(() => [
 			shortcuts: [
 				[['C'], __('Compose New Mail')],
 				[[modifier.value, 'Enter'], __('Send Mail')],
+				[[modifier.value, 'Shift', 'Enter'], __('Schedule Send')],
+				[[modifier.value, 'Z'], __('Undo Send')],
 				[[modifier.value, 'D'], __('Discard Draft')],
 				[['R'], __('Reply to Mail')],
 				[['Shift', 'R'], __('Reply All to Mail')],
@@ -106,6 +108,7 @@ const shortcutGroups = computed(() => [
 				[['G', __('then'), 'F'], __('Go to Starred')],
 				[['G', __('then'), 'S'], __('Go to {0}', [mailboxName('sent')])],
 				[['G', __('then'), 'D'], __('Go to {0}', [mailboxName('drafts')])],
+				[['G', __('then'), 'O'], __('Go to Outbox')],
 				[['G', __('then'), 'J'], __('Go to {0}', [mailboxName('junk')])],
 				[['G', __('then'), 'E'], __('Go to {0}', [mailboxName('archive')])],
 				[['G', __('then'), 'T'], __('Go to {0}', [mailboxName('trash')])],

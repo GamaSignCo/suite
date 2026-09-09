@@ -6,6 +6,22 @@ import { checkSocketRateLimits, getRoomId } from './utils';
 
 export function registerRoomQueryHandlers(deps: HandlerDeps) {
 	return (socket: Socket) => {
+		socket.on('recording:get_projection_snapshot', (_data, callback) => {
+			try {
+				deps.authManager.ensureRecorderAccess(socket);
+				const roomId = getRoomId(socket);
+				if (!deps.registry.isJoinedActiveRecorder(socket, roomId))
+					throw new Error('Recorder must join the room first');
+
+				callback({
+					success: true,
+					snapshot: deps.registry.getRecorderStageSnapshot(roomId),
+				});
+			} catch (error) {
+				callback({ success: false, error: (error as Error).message });
+			}
+		});
+
 		socket.on('get_router_rtp_capabilities', async (_data, callback) => {
 			try {
 				deps.authManager.ensureMediaConsumerAccess(socket);
@@ -79,12 +95,14 @@ export function registerRoomQueryHandlers(deps: HandlerDeps) {
 					deps.authManager.ensureRecorderAccess(socket);
 				else deps.authManager.ensurePresenceAccess(socket);
 
+				const roomId = getRoomId(socket);
 				if (
 					!checkSocketRateLimits(
 						socket,
 						deps.rateLimiter,
-						10,
-						10,
+						`room-participants:${roomId}`,
+						60,
+						300,
 						60 * 1000,
 						deps.runtime.bypassRateLimits,
 					)
@@ -96,7 +114,6 @@ export function registerRoomQueryHandlers(deps: HandlerDeps) {
 					return;
 				}
 
-				const roomId = getRoomId(socket);
 				loggers.socketHandler.debug(
 					'Getting room participants for room %s, user %s, scope %s',
 					roomId,

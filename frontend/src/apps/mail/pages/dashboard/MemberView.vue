@@ -8,7 +8,7 @@
 		>
 			<template #actions>
 				<Button :label="__('Edit')" @click="showEdit = true" />
-				<Dropdown :options="dropdownOptions" :button="{ icon: 'more-horizontal' }" />
+				<Dropdown :options="dropdownOptions" :button="{ icon: 'lucide-more-horizontal' }" />
 			</template>
 		</DashboardDetailHeader>
 
@@ -39,7 +39,7 @@
 				@action="showAddEmail = true"
 			>
 				<div class="flex flex-col">
-					<div class="bg-surface-gray-2 text-ink-gray-5 flex items-center rounded px-5 py-2.5 text-sm">
+					<div class="bg-surface-gray-2 text-ink-gray-5 flex items-center rounded-4 px-5 py-2.5 text-sm">
 						<span class="flex-1">{{ __('Email Address') }}</span>
 						<span class="flex-1">{{ __('Full Name') }}</span>
 						<span class="w-20 shrink-0 text-center">{{ __('Enabled') }}</span>
@@ -92,7 +92,7 @@
 			<!-- Groups -->
 			<DashboardCard :title="__('Groups')" :button-label="__('Add')" @action="showAddGroups = true">
 				<div class="flex flex-col">
-					<div class="bg-surface-gray-2 text-ink-gray-5 rounded px-5 py-2.5 text-sm">
+					<div class="bg-surface-gray-2 text-ink-gray-5 rounded-4 px-5 py-2.5 text-sm">
 						{{ __('Group') }}
 					</div>
 					<template v-if="member.data.groups.length">
@@ -122,7 +122,7 @@
 			<!-- Mailing Lists -->
 			<DashboardCard :title="__('Mailing Lists')" :button-label="__('Add')" @action="showAddLists = true">
 				<div class="flex flex-col">
-					<div class="bg-surface-gray-2 text-ink-gray-5 rounded px-5 py-2.5 text-sm">
+					<div class="bg-surface-gray-2 text-ink-gray-5 rounded-4 px-5 py-2.5 text-sm">
 						{{ __('Mailing List') }}
 					</div>
 					<template v-if="member.data.mailing_lists.length">
@@ -150,9 +150,9 @@
 			</DashboardCard>
 		</div>
 	</DashboardLayout>
-	<Dialog v-model="showResetPassword" :options="RESET_PASSWORD_OPTIONS" />
-	<Dialog v-model="showToggleEnabled" :options="TOGGLE_ENABLED_OPTIONS" />
-	<Dialog v-model="showDeleteMember" :options="DELETE_MEMBER_OPTIONS" />
+	<Dialog v-model:open="showResetPassword" v-bind="RESET_PASSWORD_OPTIONS" />
+	<Dialog v-model:open="showToggleEnabled" v-bind="TOGGLE_ENABLED_OPTIONS" />
+	<Dialog v-model:open="showDeleteMember" v-bind="DELETE_MEMBER_OPTIONS" />
 	<ChangeMemberPasswordModal v-model="showChangePassword" :member-id="memberId" />
 	<EditMemberModal v-if="data" v-model="showEdit" :member="data" @reload="member.reload()" />
 	<EditMemberQuotaModal v-if="data" v-model="showEditQuota" :member="data" @reload="member.reload()" />
@@ -173,17 +173,11 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { useRouter } from 'vue-router'
 import {
-	Button,
-	Dialog,
-	Dropdown,
-	FeatherIcon,
-	Switch,
-	Tooltip,
-	createResource,
-	usePageMeta,
-} from 'frappe-ui'
+	Button, Dialog, Dropdown, Switch, Tooltip, createResource, usePageMeta } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
 
 import { raiseToast } from '@/apps/mail/utils'
 import { formatDateTime } from '@/apps/mail/utils/datetime'
@@ -221,7 +215,7 @@ const { memberId } = defineProps<{ memberId: string }>()
 const router = useRouter()
 const { localeLabel } = useAccountOptions()
 
-usePageMeta(() => ({ title: memberId }))
+usePageMeta(() => appPageMeta(memberId, 'Mail'))
 
 const showDeleteMember = ref(false)
 const showResetPassword = ref(false)
@@ -387,7 +381,7 @@ const DELETE_MEMBER_OPTIONS = {
 	title: __('Delete Member'),
 	message: __('Are you sure you want to delete this member? This action cannot be undone.'),
 	size: 'xl',
-	icon: { name: 'alert-triangle', appearance: 'warning' },
+	icon: { name: 'lucide-alert-triangle', theme: 'amber' },
 	actions: [
 		{
 			label: __('Confirm'),
@@ -401,36 +395,36 @@ const DELETE_MEMBER_OPTIONS = {
 const dropdownOptions = computed(() => [
 	{
 		group: '',
-		items: [
+		options: [
 			{
 				label: __('Reset Password'),
-				icon: 'mail',
+				icon: 'lucide-mail',
 				onClick: () => (showResetPassword.value = true),
 			},
 			{
 				label: __('Change Password'),
-				icon: 'key',
+				icon: 'lucide-key',
 				onClick: () => (showChangePassword.value = true),
 			},
 		],
 	},
 	{
 		group: '',
-		items: [
+		options: [
 			data.value?.enabled
 				? {
 						label: __('Disable'),
-						icon: 'user-x',
+						icon: 'lucide-user-x',
 						onClick: () => (showToggleEnabled.value = true),
 					}
 				: {
 						label: __('Enable'),
-						icon: 'user-check',
+						icon: 'lucide-user-check',
 						onClick: () => (showToggleEnabled.value = true),
 					},
 			{
 				label: __('Delete'),
-				icon: 'trash-2',
+				icon: 'lucide-trash-2',
 				onClick: () => (showDeleteMember.value = true),
 			},
 		],

@@ -7,12 +7,14 @@ import {
 	Folders,
 	Mailbox,
 	Palette,
+	PenLine,
 	TreePalm,
 	User,
 } from 'lucide-vue-next'
 
 import Account from '@/apps/mail/components/Settings/Account.vue'
 import AppearanceSettings from '@/apps/mail/components/Settings/AppearanceSettings.vue'
+import ComposeSettings from '@/apps/mail/components/Settings/ComposeSettings.vue'
 import FolderSettings from '@/apps/mail/components/Settings/FolderSettings.vue'
 import IdentitySettings from '@/apps/mail/components/Settings/IdentitySettings.vue'
 import ProfileSettings from '@/apps/mail/components/Settings/ProfileSettings.vue'
@@ -90,6 +92,13 @@ export const useSettingsTabs = (exclude: string[] = []) => {
 						value: 'signatures',
 						icon: Feather,
 						component: markRaw(SignatureSettings),
+						condition: jmap,
+					},
+					{
+						label: __('Compose'),
+						value: 'compose',
+						icon: PenLine,
+						component: markRaw(ComposeSettings),
 						condition: jmap,
 					},
 					{

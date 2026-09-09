@@ -1,12 +1,12 @@
 <template>
-	<Dialog v-model="show" :options="dialogOptions">
-		<template #body-content>
+	<Dialog v-model:open="show" v-bind="dialogOptions">
+		<template #default>
 			<div class="space-y-4">
 				<div class="flex flex-col gap-1">
 					<button
 						v-for="preset in presets"
 						:key="preset.label"
-						class="hover:bg-surface-gray-2 flex items-center justify-between rounded px-2.5 py-2 text-left"
+						class="hover:bg-surface-gray-2 flex items-center justify-between rounded-4 px-2.5 py-2 text-left"
 						@click="confirm(preset.value)"
 					>
 						<span class="text-ink-gray-7 text-base">{{ preset.label }}</span>

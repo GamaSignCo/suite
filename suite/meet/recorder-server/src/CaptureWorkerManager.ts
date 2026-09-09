@@ -1,5 +1,9 @@
 import { CaptureWorker, type CaptureWorkerOptions } from './CaptureWorker.js';
-import type { CaptureArtifact, CaptureGap } from './captureTypes.js';
+import type {
+	CaptureArtifact,
+	CaptureGap,
+	CaptureInterruption,
+} from './captureTypes.js';
 import type {
 	RendererBridge,
 	RendererLifecycleEvent,
@@ -12,10 +16,24 @@ type Worker = Pick<
 	| 'initialize'
 	| 'startCapture'
 	| 'rendererFailed'
+	| 'recoverRenderer'
 	| 'stop'
 	| 'recoverStopped'
 	| 'captureResult'
 >;
+
+interface ManagedWorker {
+	worker: Worker;
+	command: CommandClaims;
+	generation: number;
+	active: boolean;
+	interruption?: CaptureInterruption;
+	replacement?: Promise<void>;
+	captureStop?: Promise<'complete' | 'partial' | 'failed'>;
+	stopReason?: string;
+	stopPartial?: boolean;
+	deadlineTimer?: NodeJS.Timeout;
+}
 
 export interface CaptureWorkerManagerOptions
 	extends Omit<CaptureWorkerOptions, 'display' | 'limits' | 'onStopRequested'> {
@@ -23,12 +41,17 @@ export interface CaptureWorkerManagerOptions
 }
 
 export class CaptureWorkerManager implements RendererBridge {
-	private readonly workers = new Map<string, Worker>();
+	private readonly workers = new Map<string, ManagedWorker>();
 	private readonly operations = new Map<string, Promise<void>>();
 	private readonly stopping = new Map<string, Promise<void>>();
 	private handler: (event: RendererLifecycleEvent) => Promise<void> =
 		async () => undefined;
+	private progressHandler?: (
+		job: string,
+		capturedBytes: number,
+	) => Promise<number>;
 	private nextDisplay = 100;
+	private closing = false;
 	constructor(
 		private readonly renderer: RendererBridge,
 		private readonly options: CaptureWorkerManagerOptions,
@@ -45,50 +68,148 @@ export class CaptureWorkerManager implements RendererBridge {
 		return this.renderer.productionReady;
 	}
 	hasWorker(job: string): boolean {
-		return this.workers.has(job) && this.renderer.hasWorker(job);
+		return this.workers.has(job);
 	}
 	onLifecycle(handler: (event: RendererLifecycleEvent) => Promise<void>): void {
 		this.handler = handler;
 	}
-	workerEnvironment(job: string): NodeJS.ProcessEnv | undefined {
-		return this.workers.get(job)?.env;
+	onProgress(
+		handler: (job: string, capturedBytes: number) => Promise<number>,
+	): void {
+		this.progressHandler = handler;
 	}
-	async reserve(command: CommandClaims): Promise<PublicJwk> {
+	workerEnvironment(job: string): NodeJS.ProcessEnv | undefined {
+		return this.workers.get(job)?.worker.env;
+	}
+	async reserve(command: CommandClaims, generation = 0): Promise<PublicJwk> {
+		if (this.closing) throw new Error('capture worker manager is closing');
 		if (this.workers.has(command.job))
 			throw new Error('capture worker already exists');
 		if (this.workers.size >= this.options.maxConcurrent)
 			throw new Error('recording capacity unavailable');
+		let managed!: ManagedWorker;
 		const worker = this.createWorker(command.job, {
 			...this.options,
 			display: this.nextDisplay++,
 			limits: command.limits,
+			onCapturePreparing: (epoch) =>
+				this.renderer.prepareCapture(command.job, managed.generation, epoch),
+			onCaptureCommitted: async (launch) => {
+				if (managed.active) return;
+				managed.active = true;
+				await this.handler({
+					job: command.job,
+					generation: managed.generation,
+					type: 'capture_ready',
+					occurredAt: launch.capture_started_at,
+				});
+			},
+			onCaptureLaunched: (launch) =>
+				this.renderer.captureStarted(
+					command.job,
+					managed.generation,
+					launch.epoch,
+					launch.capture_started_at,
+				),
+			onCaptureAborted: (epoch) =>
+				this.renderer.cancelCapture(command.job, managed.generation, epoch),
+			onProgress: async (capturedBytes) => {
+				if (!this.progressHandler)
+					throw new Error('recording budget callback is unavailable');
+				return this.progressHandler(command.job, capturedBytes);
+			},
+			onInterrupted: (interruption) => {
+				managed.interruption ??= interruption;
+				this.armDeadline(managed);
+				void this.handler({
+					job: command.job,
+					generation: managed.generation,
+					type: 'interrupted',
+					reason: interruption.reason,
+					interruption,
+				}).catch(() => undefined);
+			},
+			onRecovered: (recovery) => {
+				if (managed.deadlineTimer) clearTimeout(managed.deadlineTimer);
+				delete managed.deadlineTimer;
+				delete managed.interruption;
+				void this.handler({
+					job: command.job,
+					generation: managed.generation,
+					type: 'capture_ready',
+					recovery,
+				});
+			},
 			onStopRequested: (partial, reason) => {
-				void this.enqueue(command.job, () =>
-					this.stopWorker(command.job, partial, reason),
-				);
+				managed.stopReason ??= reason;
+				managed.stopPartial ||= partial;
+				managed.captureStop ??= worker.stop(partial, reason);
+				void this.renderer
+					.stop(command.job, managed.generation)
+					.catch(() => undefined);
+				void this.enqueue(command.job, async () => {
+					await this.stopWorker(command.job, partial, reason);
+				});
 			},
 		});
 		// Claim capacity before asynchronous initialization so concurrent reserves cannot overbook.
-		this.workers.set(command.job, worker);
+		managed = { worker, command, generation, active: false };
+		this.workers.set(command.job, managed);
 		try {
 			await worker.initialize();
-			return await this.renderer.reserve(command);
+			if (this.closing || this.workers.get(command.job) !== managed)
+				throw new Error('capture worker manager is closing');
+			return await this.renderer.reserve(command, generation);
 		} catch (error) {
 			this.workers.delete(command.job);
 			await Promise.allSettled([
-				this.renderer.stop(command.job),
+				this.renderer.stop(command.job, generation),
 				worker.stop(true, 'reserve_failed'),
 			]);
 			throw error;
 		}
 	}
-	deliverGrant(job: string, grant: string, acceptedAt: string): Promise<void> {
-		return this.renderer.deliverGrant(job, grant, acceptedAt);
+	deliverGrant(
+		job: string,
+		grant: string,
+		acceptedAt: string,
+		generation: number,
+	): Promise<void> {
+		const managed = this.workers.get(job);
+		if (!managed || managed.generation !== generation)
+			return Promise.reject(new Error('capture generation is unavailable'));
+		return this.renderer.deliverGrant(job, grant, acceptedAt, generation);
 	}
-	stop(job: string): Promise<void> {
+	prepareCapture(
+		job: string,
+		generation: number,
+		epoch: number,
+	): Promise<void> {
+		return this.renderer.prepareCapture(job, generation, epoch);
+	}
+	captureStarted(
+		job: string,
+		generation: number,
+		epoch: number,
+		timestamp: string,
+	): Promise<void> {
+		return this.renderer.captureStarted(job, generation, epoch, timestamp);
+	}
+	cancelCapture(job: string, generation: number, epoch: number): Promise<void> {
+		return this.renderer.cancelCapture(job, generation, epoch);
+	}
+	stop(job: string, _generation?: number, reason?: string): Promise<void> {
 		const existing = this.stopping.get(job);
 		if (existing) return existing;
-		const promise = this.enqueue(job, () => this.stopWorker(job, false));
+		const managed = this.workers.get(job);
+		if (managed) {
+			if (reason) managed.stopReason ??= reason;
+			managed.captureStop ??= managed.worker.stop(false, reason);
+			void this.renderer.stop(job, managed.generation).catch(() => undefined);
+		}
+		const promise = this.enqueue(job, () =>
+			this.stopWorker(job, false, reason),
+		);
 		this.stopping.set(job, promise);
 		void promise.then(
 			() => this.stopping.delete(job),
@@ -100,6 +221,7 @@ export class CaptureWorkerManager implements RendererBridge {
 		type: 'complete' | 'partial' | 'failed';
 		artifact?: CaptureArtifact;
 		gaps: CaptureGap[];
+		capturedBytes: number;
 	}> {
 		const worker = this.createWorker(job, {
 			...this.options,
@@ -111,10 +233,30 @@ export class CaptureWorkerManager implements RendererBridge {
 			type,
 			...(result.artifact ? { artifact: result.artifact } : {}),
 			gaps: result.gaps,
+			capturedBytes: result.capturedBytes,
+			...(result.captureStartedAt
+				? { captureStartedAt: result.captureStartedAt }
+				: {}),
 		};
 	}
 	async close(): Promise<void> {
-		await Promise.all([...this.workers.keys()].map((job) => this.stop(job)));
+		this.closing = true;
+		const rendererStops: Promise<void>[] = [];
+		for (const [job, managed] of this.workers) {
+			managed.active = false;
+			managed.stopReason ??= 'service_shutdown';
+			managed.stopPartial = true;
+			managed.captureStop ??= managed.worker.stop(true, 'service_shutdown');
+			rendererStops.push(
+				this.renderer.stop(job, managed.generation).catch(() => undefined),
+			);
+		}
+		await Promise.all([
+			...rendererStops,
+			...[...this.workers.keys()].map((job) =>
+				this.enqueue(job, () => this.stopWorker(job, true, 'service_shutdown')),
+			),
+		]);
 		await this.renderer.close?.();
 	}
 	private enqueue(job: string, operation: () => Promise<void>): Promise<void> {
@@ -132,60 +274,186 @@ export class CaptureWorkerManager implements RendererBridge {
 		partial: boolean,
 		reason?: string,
 	): Promise<void> {
-		const worker = this.workers.get(job);
-		if (!worker) return;
+		const managed = this.workers.get(job);
+		if (!managed) return;
+		const { worker } = managed;
+		partial ||= managed.stopPartial ?? false;
+		reason = managed.stopReason ?? reason;
+		if (managed.deadlineTimer) clearTimeout(managed.deadlineTimer);
 		let outcome: 'complete' | 'partial' | 'failed' = 'failed';
 		let rendererError: unknown;
 		try {
-			await this.renderer.stop(job).catch((error: unknown) => {
-				rendererError = error;
-			});
-			outcome = await worker.stop(partial, reason);
+			await this.renderer
+				.stop(job, managed.generation)
+				.catch((error: unknown) => {
+					rendererError = error;
+				});
+			outcome = await (managed.captureStop ?? worker.stop(partial, reason));
 		} finally {
 			this.workers.delete(job);
-			await this.renderer.stop(job).catch(() => undefined);
+			await this.renderer.stop(job, managed.generation).catch(() => undefined);
 		}
 		if (rendererError) throw rendererError;
 		const result = worker.captureResult();
+		if (
+			(outcome === 'complete' || outcome === 'partial') &&
+			result.artifact &&
+			!result.captureStartedAt
+		) {
+			outcome = 'failed';
+			reason = 'capture_not_committed';
+		}
 		await this.handler({
 			job,
+			generation: managed.generation,
 			type: outcome,
 			...(reason ? { reason } : {}),
-			...(result.artifact ? { artifact: result.artifact } : {}),
+			...(result.artifact && outcome !== 'failed'
+				? { artifact: result.artifact }
+				: {}),
 			gaps: result.gaps,
+			capturedBytes: result.capturedBytes,
 			...(outcome === 'partial' && !reason
 				? { reason: reason ?? 'capture_interrupted' }
 				: {}),
 		});
 	}
 	private async lifecycle(event: RendererLifecycleEvent): Promise<void> {
-		const worker = this.workers.get(event.job);
-		if (event.type === 'capture_ready') await worker?.startCapture();
+		const managed = this.workers.get(event.job);
+		if (!managed || event.generation !== managed.generation) return;
+		const { worker } = managed;
+		if (event.type === 'capture_ready') {
+			if (managed.active) {
+				worker.recoverRenderer();
+				return;
+			}
+			try {
+				const launch = await worker.startCapture();
+				if (!launch) return;
+			} catch (error) {
+				if (managed.captureStop) return;
+				await this.stopWorker(
+					event.job,
+					false,
+					error instanceof Error ? error.message : 'capture_start_failed',
+				);
+				return;
+			}
+			return;
+		}
 		if (event.type === 'room_empty') {
 			await this.stopWorker(event.job, false, 'room_empty');
 			return;
 		}
-		if ((event.type === 'failed' || event.type === 'interrupted') && worker) {
-			if (event.type === 'interrupted') await this.handler(event);
-			let outcome: 'complete' | 'partial' | 'failed' = 'failed';
-			try {
-				const recovery = worker.rendererFailed(event.reason ?? event.type);
-				await this.renderer.stop(event.job).catch(() => undefined);
-				outcome = await recovery;
-			} finally {
-				this.workers.delete(event.job);
-				await this.renderer.stop(event.job).catch(() => undefined);
+		if (event.type === 'failed' || event.type === 'interrupted') {
+			if (!managed.active) {
+				await this.stopWorker(event.job, false, event.reason ?? event.type);
+				return;
 			}
-			const result = worker.captureResult();
-			await this.handler({
-				job: event.job,
-				type: outcome,
-				reason: 'operator_recovery_required',
-				...(result.artifact ? { artifact: result.artifact } : {}),
-				gaps: result.gaps,
-			});
+			await worker.rendererFailed(event.reason ?? event.type);
+			await this.renderer
+				.stop(event.job, event.generation)
+				.catch(() => undefined);
+			this.startReplacement(managed);
 			return;
 		}
+		if (
+			managed.active &&
+			['configured', 'proof_complete', 'joined'].includes(event.type)
+		)
+			return;
 		await this.handler(event);
+	}
+
+	private armDeadline(managed: ManagedWorker): void {
+		if (managed.deadlineTimer || !managed.interruption) return;
+		const interruption = managed.interruption;
+		managed.deadlineTimer = setTimeout(
+			() => {
+				void this.enqueue(managed.command.job, async () => {
+					if (
+						this.workers.get(managed.command.job) !== managed ||
+						managed.interruption !== interruption
+					)
+						return;
+					await this.stopWorker(
+						managed.command.job,
+						true,
+						'renderer_recovery_timeout',
+					);
+				});
+			},
+			Math.max(0, Date.parse(interruption.deadline) - Date.now()),
+		);
+	}
+
+	private startReplacement(managed: ManagedWorker): void {
+		if (managed.replacement || !managed.interruption) return;
+		managed.replacement = this.replaceRenderer(managed).finally(() => {
+			delete managed.replacement;
+			if (
+				this.workers.get(managed.command.job) === managed &&
+				managed.interruption &&
+				Date.now() < Date.parse(managed.interruption.deadline) &&
+				!this.renderer.hasWorker(managed.command.job)
+			)
+				this.startReplacement(managed);
+		});
+	}
+
+	private async replaceRenderer(managed: ManagedWorker): Promise<void> {
+		let backoff = 250;
+		while (
+			this.workers.get(managed.command.job) === managed &&
+			managed.interruption &&
+			Date.now() < Date.parse(managed.interruption.deadline)
+		) {
+			const interruption = managed.interruption;
+			const generation = managed.generation + 1;
+			try {
+				const publicJwk = await this.renderer.reserve(
+					managed.command,
+					generation,
+				);
+				if (
+					this.workers.get(managed.command.job) !== managed ||
+					managed.interruption !== interruption ||
+					Date.now() >= Date.parse(interruption.deadline)
+				) {
+					await this.renderer
+						.stop(managed.command.job, generation)
+						.catch(() => undefined);
+					return;
+				}
+				managed.generation = generation;
+				await this.handler({
+					job: managed.command.job,
+					generation,
+					type: 'replacement_ready',
+					publicJwk,
+					readyAt: new Date().toISOString(),
+					interruptionId: interruption.id,
+				});
+				if (
+					this.workers.get(managed.command.job) !== managed ||
+					managed.interruption !== interruption ||
+					!this.renderer.hasWorker(managed.command.job)
+				)
+					continue;
+				return;
+			} catch {
+				await this.renderer
+					.stop(managed.command.job, generation)
+					.catch(() => undefined);
+				const remaining = managed.interruption
+					? Date.parse(managed.interruption.deadline) - Date.now()
+					: 0;
+				if (remaining > 0)
+					await new Promise((resolve) =>
+						setTimeout(resolve, Math.min(backoff, remaining)),
+					);
+				backoff = Math.min(backoff * 2, 5_000);
+			}
+		}
 	}
 }

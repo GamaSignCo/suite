@@ -17,7 +17,7 @@ type Dayjs = ReturnType<typeof dayjs>
  * The timing fields every formatted calendar event carries (the backend's
  * `format_calendar_event`): a JSCalendar wall clock, an ISO-8601 duration, and the all-day flag.
  */
-export interface EventTiming {
+interface EventTiming {
 	start: string
 	duration?: string | null
 	show_without_time?: boolean | 0 | 1
@@ -47,9 +47,21 @@ export const isAllDayEvent = (event: EventTiming): boolean => {
 const eventEnd = (start: Dayjs, duration?: string | null): Dayjs =>
 	start.add(dayjs.duration(duration || 'PT0S'))
 
-/** Whole days an all-day event covers; its stored end is the midnight *after* the last one. */
-const allDayCount = (duration?: string | null): number =>
-	Math.max(1, Math.round(dayjs.duration(duration || 'PT0S').asDays()))
+/**
+ * The last calendar day an all-day event touches: the day its final instant falls on. The
+ * stored end is the midnight *after* the last day, so stepping back a moment lands on it;
+ * and an end that is not on midnight (a `show_without_time` event of some odd shape) still
+ * names the day it actually reaches into, where rounding the duration would drop it.
+ */
+const allDayLast = (start: Dayjs, duration?: string | null): Dayjs => {
+	const end = eventEnd(start, duration)
+	if (!end.isAfter(start)) return start.startOf('day')
+	return end.subtract(1, 'millisecond').startOf('day')
+}
+
+/** Whole days an all-day event covers, first to last inclusive. */
+const allDayCount = (start: Dayjs, duration?: string | null): number =>
+	allDayLast(start, duration).diff(start.startOf('day'), 'day') + 1
 
 /**
  * Under this, an event that passes midnight is one sitting rather than a span — an evening that
@@ -76,8 +88,8 @@ export const eventLastDay = (
 	allDay = false,
 ): Dayjs | null => {
 	if (allDay) {
-		const days = allDayCount(duration)
-		return days > 1 ? start.add(days - 1, 'day') : null
+		const last = allDayLast(start, duration)
+		return last.isSame(start, 'day') ? null : last
 	}
 	const end = eventEnd(start, duration)
 	if (end.isSame(start, 'day') || isOvernight(start, end)) return null
@@ -143,7 +155,7 @@ export const formatEventWhen = (
 	if (allDay) {
 		const last = eventLastDay(start, duration, true)
 		const when = last ? dayRangeLabel(start, last, now) : dayLabel(start, now, compact)
-		return `${when} · ${allDayLabel(allDayCount(duration))}`
+		return `${when} · ${allDayLabel(allDayCount(start, duration))}`
 	}
 
 	const end = eventEnd(start, duration)

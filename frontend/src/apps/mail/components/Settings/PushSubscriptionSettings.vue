@@ -59,22 +59,15 @@
 			v-model="showAddModal"
 			@created="pushSubscriptions.reload()"
 		/>
-		<Dialog v-model="showDeleteModal" :options="deleteModalOptions" />
+		<Dialog v-model:open="showDeleteModal" v-bind="deleteModalOptions" />
 	</div>
 </template>
 
 <script setup lang="ts">
 import { computed, inject, ref, useTemplateRef } from 'vue'
 import {
-	Button,
-	Dialog,
-	ListHeader,
-	ListRows,
-	ListSelectBanner,
-	ListView,
-	call,
-	createResource,
-} from 'frappe-ui'
+	Button, Dialog, call, createResource } from 'frappe-ui'
+import { ListHeader, ListRows, ListSelectBanner, ListView } from 'frappe-ui/experimental'
 import AppSettingsHeader from '@/components/settings/AppSettingsHeader.vue'
 
 import { raiseToast } from '@/apps/mail/utils'

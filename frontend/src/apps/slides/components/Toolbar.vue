@@ -1,16 +1,16 @@
 <template>
 	<div
-		class="absolute bottom-10 left-1/2 z-10 flex -translate-x-1/2 items-center justify-center gap-1 rounded bg-surface-elevation-1 p-0.5 shadow-md"
+		class="absolute bottom-10 left-1/2 z-10 flex -translate-x-1/2 items-center justify-center gap-1 rounded-4 bg-surface-elevation-1 p-0.5 shadow-md"
 		@wheel="handleScrollBarWheelEvent"
 	>
 		<Tooltip text="Text" :hover-delay="0.7">
-			<div class="cursor-pointer rounded p-2 hover:bg-surface-gray-3" @click="addTextElement(null)">
+			<div class="cursor-pointer rounded-4 p-2 hover:bg-surface-gray-3" @click="addTextElement(null)">
 				<Type class="size-4 stroke-[1.5] text-ink-gray-7" />
 			</div>
 		</Tooltip>
 
 		<Tooltip text="Media" :hover-delay="0.7">
-			<div class="cursor-pointer rounded p-2 hover:bg-surface-gray-3" @click="openFilePicker">
+			<div class="cursor-pointer rounded-4 p-2 hover:bg-surface-gray-3" @click="openFilePicker">
 				<ImagePlus class="size-4 stroke-[1.5] text-ink-gray-7" />
 			</div>
 		</Tooltip>

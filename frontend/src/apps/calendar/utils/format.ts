@@ -57,7 +57,7 @@ export const extractNameFromEmail = (email: string) =>
         .replace(/\b\w/g, (c) => c.toUpperCase())
     : email
 
-export const getRepeatFrequencyOptions = (interval: number) => [
+const getRepeatFrequencyOptions = (interval: number) => [
   { label: interval === 1 ? __('Year') : __('Years'), value: 'yearly' },
   { label: interval === 1 ? __('Month') : __('Months'), value: 'monthly' },
   { label: interval === 1 ? __('Week') : __('Weeks'), value: 'weekly' },
@@ -65,12 +65,19 @@ export const getRepeatFrequencyOptions = (interval: number) => [
 ]
 
 export const getRepeatMessage = (recurrenceRule: RecurrenceRule) => {
-  const interval = recurrenceRule.interval || 1
+  const interval = recurrenceRule?.interval || 1
+  const frequency = getRepeatFrequencyOptions(interval).find(
+    (option) => option.value === recurrenceRule?.frequency,
+  )
+  // An event can carry an occurrence's recurrence id and no readable rule to go
+  // with it - a series whose rule was cleared keeps the occurrences the server
+  // had already expanded. There is nothing to say about how it repeats, so this
+  // says nothing, rather than throwing out of the panel that was rendering it.
+  if (!frequency) return ''
+
   const message = __('Every {0} {1}', [
     interval === 1 ? '' : interval,
-    getRepeatFrequencyOptions(interval)
-      .find((option) => option.value === recurrenceRule.frequency)!
-      .label.toLowerCase(),
+    frequency.label.toLowerCase(),
   ])
 
   const suffix =
@@ -92,7 +99,7 @@ export const getRepeatMessage = (recurrenceRule: RecurrenceRule) => {
   return fullMessage
 }
 
-interface RecurrenceRule {
+export interface RecurrenceRule {
   frequency: 'daily' | 'weekly' | 'monthly' | 'yearly'
   interval: number
   byDay?: { day: string; nthOfPeriod?: number }[]

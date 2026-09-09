@@ -12,15 +12,15 @@
         @click="emit('select-all')" />
     </div>
     <div v-if="!selectionMode && $route.name === 'drive-Home'"
-      class="bg-surface-gray-2 rounded-md space-x-0.5 h-7 flex items-center sm:mr-2 py-1">
-      <TabButtons v-model="shareView" :options="[
+      class="bg-surface-gray-2 rounded-4 space-x-0.5 h-7 flex items-center sm:mr-2 py-1">
+      <TabButtons v-model="shareViewTab" :options="[
         {
           label: __('Yours'),
-          value: false,
+          value: 'personal',
         },
         {
           label: __('With you'),
-          value: true,
+          value: 'shared',
         },
       ]" />
     </div>
@@ -39,7 +39,7 @@
           class="min-w-0 flex-1 overflow-x-auto sm:ml-3 sm:flex sm:flex-initial sm:flex-wrap sm:items-start sm:justify-end sm:gap-1 sm:overflow-visible">
           <div class="flex min-w-full w-max justify-end gap-1 sm:contents">
             <div v-for="({ icon, name }, index) in activeFilters" :key="index" class="shrink-0">
-              <div class="flex items-center border rounded pl-2 py-1 h-7 text-base select-none">
+              <div class="flex items-center border rounded-4 pl-2 py-1 h-7 text-base select-none">
                 <img class="w-4" :src="icon" />
                 <span class="text-sm ml-2">{{ name }}</span>
                 <Button variant="minimal" :icon="h(LucideX, { class: 'size-3' })"
@@ -50,7 +50,7 @@
         </div>
         <Button v-if="delayedLoading" :loading="true" label="Loading..." />
         <div data-testid="drive-filter">
-          <Dropdown :options="filterOptions" :disabled placement="right">
+          <Dropdown :options="filterOptions" :disabled align="end">
             <template #trigger="{ open }">
               <Button :active="open" :disabled icon="lucide-filter" tooltip="Filter" />
             </template>
@@ -107,6 +107,11 @@ import { onKeyDown } from '@vueuse/core'
 import SortControl from '@/components/SortControl.vue'
 
 import LucideX from '~icons/lucide/x'
+
+const shareViewTab = computed({
+  get: () => (shareView.value ? 'shared' : 'personal'),
+  set: (value) => (shareView.value = value === 'shared'),
+})
 
 const sortOrder = defineModel('sortOrder')
 const search = defineModel('search')
@@ -199,9 +204,9 @@ const columnHeaders = [
 
 const sortMenuItems = computed(() => [
   {
-    group: true,
+    group: '',
     hideLabel: true,
-    items: [
+    options: [
       {
         label: __('Smart'),
         disabled: sortOrder.value.field !== 'file_name',

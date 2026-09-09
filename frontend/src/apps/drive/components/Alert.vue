@@ -1,10 +1,10 @@
 <template>
   <div class="block w-full">
-    <div class="flex items-center rounded-md p-2 ps-4 text-base md:px-5 gap-2.5" :class="classes">
+    <div class="flex items-center rounded-4 p-2 ps-4 text-base md:px-5 gap-2.5" :class="classes">
       <component :is="icon ? icon : LucideInfo" class="size-4 text-ink-gray-6" />
       <div class="flex items-center justify-between flex-1">
         <slot>
-          <h3 v-if="title" class="text-xl-medium text-ink-gray-9">
+          <h3 v-if="title" class="text-lg-medium text-ink-gray-9">
             {{ title }}
           </h3>
         </slot>
@@ -32,7 +32,7 @@ const props = withDefaults(defineProps<AlertProps>(), {
 
 const classes = computed(() => {
   return {
-    info: 'text-ink-gray-7 bg-surface-gray-1 border-outline-gray-1 rounded',
+    info: 'text-ink-gray-7 bg-surface-gray-1 border-outline-gray-1 rounded-4',
     warning: 'text-ink-gray-7 bg-surface-blue-1',
   }[props.type]
 })

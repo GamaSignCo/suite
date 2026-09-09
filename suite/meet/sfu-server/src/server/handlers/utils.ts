@@ -1,6 +1,7 @@
 import type { Server, Socket } from 'socket.io';
 import { loggers } from '../../utils/logger';
 import type { RateLimiter } from '../../utils/rateLimiter';
+import type { RoomRegistry } from '../RoomRegistry';
 import type { TypedSocket } from './Handler';
 
 export function isRealParticipant(participantId: string): boolean {
@@ -20,9 +21,26 @@ export function getPeerId(socket: Socket): string {
 	return socket.peerId ?? socket.userId;
 }
 
+export function ensureParticipantOwner(
+	socket: Socket,
+	registry: RoomRegistry,
+): { roomId: string; participantId: string } {
+	const roomId = socket.roomId;
+	const participantId = socket.participantId;
+	if (
+		!roomId ||
+		!participantId ||
+		!registry.isParticipantOwner(socket, roomId, participantId)
+	) {
+		throw new Error('Participant connection is no longer active');
+	}
+	return { roomId, participantId };
+}
+
 export function checkSocketRateLimits(
 	socket: Socket,
 	rateLimiter: RateLimiter,
+	namespace: string,
 	userLimit: number,
 	ipLimit: number,
 	windowMs: number,
@@ -42,8 +60,8 @@ export function checkSocketRateLimits(
 		getFirstIp(forwarded) ||
 		socket.handshake.address;
 
-	const userKey = `user:${socket.userId}`;
-	const ipKey = `ip:${clientIp}`;
+	const userKey = `${namespace}:user:${socket.userId}`;
+	const ipKey = `${namespace}:ip:${clientIp}`;
 
 	const userAllowed = rateLimiter.checkRateLimit(userKey, userLimit, windowMs);
 	const ipAllowed = rateLimiter.checkRateLimit(ipKey, ipLimit, windowMs);

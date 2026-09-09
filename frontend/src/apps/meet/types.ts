@@ -1,10 +1,5 @@
 export type Platform = "win" | "mac" | "linux" | "unknown";
 
-export interface FrappeRequestError extends Error {
-	messages: string[];
-	exc_type: string;
-}
-
 export interface ParticipantPreview {
 	user_id: string;
 	full_name: string;
@@ -23,7 +18,7 @@ export interface PresenceTokenResponse {
 	expires_in?: number;
 }
 
-export interface PresenceParticipant {
+interface PresenceParticipant {
 	user_id?: string;
 	id: string;
 	info: {
@@ -48,7 +43,7 @@ export interface PresenceJoinResponse {
 	error?: string;
 }
 
-export interface UserData {
+interface UserData {
 	name: string;
 	userId: string;
 	avatar?: string | null;
@@ -69,11 +64,12 @@ export interface JoinUserData {
 }
 
 export interface JoinPayload {
-	status?: string;
+	status?: JoinStatus;
 	lobby_token?: string;
 	auth_token?: string;
 	guest_id?: string;
 	guest_name?: string;
+	guest_session_token?: string;
 	meeting_id?: string;
 	user_id?: string;
 	sfu_url?: string;
@@ -108,16 +104,20 @@ export interface JoinRoomMediaState {
 	video_enabled?: boolean;
 }
 
-export interface DeviceChangedEvent {
-	type: "camera" | "microphone" | "speaker";
-	deviceId: string;
-}
-
 export function isUnknownRecord(
 	value: unknown,
 ): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+type JoinStatus =
+	| "waiting_for_approval"
+	| "pending"
+	| "joined"
+	| "admitted"
+	| "rejected"
+	| "banned"
+	| "expired";
 
 function optionalString(value: unknown): string | undefined {
 	return typeof value === "string" ? value : undefined;
@@ -125,6 +125,21 @@ function optionalString(value: unknown): string | undefined {
 
 function optionalBoolean(value: unknown): boolean | undefined {
 	return typeof value === "boolean" ? value : undefined;
+}
+
+function optionalJoinStatus(value: unknown): JoinPayload["status"] {
+	return typeof value === "string" &&
+		[
+			"waiting_for_approval",
+			"pending",
+			"joined",
+			"admitted",
+			"rejected",
+			"banned",
+			"expired",
+		].includes(value)
+		? (value as JoinPayload["status"])
+		: undefined;
 }
 
 function normalizeJoinUserData(value: unknown): JoinUserData | undefined {
@@ -181,11 +196,12 @@ export function normalizeJoinPayload(value: unknown): JoinPayload | null {
 			? value.sfu_port
 			: undefined;
 	return {
-		status: optionalString(value.status),
+		status: optionalJoinStatus(value.status),
 		lobby_token: optionalString(value.lobby_token),
 		auth_token: optionalString(value.auth_token),
 		guest_id: optionalString(value.guest_id),
 		guest_name: optionalString(value.guest_name),
+		guest_session_token: optionalString(value.guest_session_token),
 		meeting_id: optionalString(value.meeting_id),
 		user_id: optionalString(value.user_id),
 		sfu_url: optionalString(value.sfu_url),
@@ -214,7 +230,7 @@ export interface ParticipantLeftEvent {
 	participantId: string;
 }
 
-export interface PollOption {
+interface PollOption {
 	id: string;
 	text: string;
 	votes: number;

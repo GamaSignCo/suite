@@ -9,19 +9,36 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils import cint, get_datetime, get_system_timezone
 
-ACTIVE_RECORDING_STATUSES = ("Recording", "Interrupted", "Stopping")
-TERMINAL_STATUSES = ("Ready", "Partial", "Failed")
+ACTIVE_RECORDING_STATUSES = ("Starting", "Recording", "Interrupted", "Stopping")
+TERMINAL_STATUSES = ("Ready", "Partial", "Failed", "Cancelled")
 IMMUTABLE_FIELDS = ("meet_room", "room_owner", "initiated_by", "recorder_job_id", "request_id")
-IMMUTABLE_CONFIGURATION_FIELDS = ("budget_bytes", "max_ends_at", "drive_home_folder")
+IMMUTABLE_CONFIGURATION_FIELDS = ("drive_home_folder",)
 WRITE_ONCE_FIELDS = (
     "recorder_key_thumbprint",
     "grant_jti",
     "grant_issued_at",
     "grant_expires_at",
     "stop_operation_id",
+    "metadata_accepted_at",
+    "finalization_deadline",
+    "publication_key",
+)
+TERMINAL_MUTABLE_FIELDS = {
+    "terminal_acknowledged_at",
+    "notification_pending",
+    "notification_attempts",
+    "notification_next_retry_at",
+    "notification_sent_at",
+}
+ENDPOINT_WRITE_ONCE_FIELDS = (
+    "recorder_key_thumbprint",
+    "grant_jti",
+    "grant_issued_at",
+    "grant_expires_at",
 )
 ALLOWED_TRANSITIONS = {
     "Pending": {"Recording", "Failed"},
+    "Starting": {"Recording", "Stopping", "Failed", "Cancelled"},
     "Recording": {"Interrupted", "Stopping", "Failed"},
     "Interrupted": {"Recording", "Stopping", "Failed"},
     "Stopping": {"Processing", "Failed"},
@@ -51,22 +68,96 @@ class MeetRecording(Document):
             frappe.throw(_("Recording identity cannot change"))
         if any(self.has_value_changed(fieldname) for fieldname in IMMUTABLE_CONFIGURATION_FIELDS):
             frappe.throw(_("Recording configuration cannot change"))
-        if previous.recorder_public_jwk and frappe.parse_json(self.recorder_public_jwk) != frappe.parse_json(
+        budget_fields_changed = any(
+            cint(self.get(fieldname)) != cint(previous.get(fieldname))
+            for fieldname in (
+                "budget_bytes",
+                "captured_bytes",
+                "budget_warning_10m_sent",
+                "budget_warning_2m_sent",
+            )
+        )
+        if budget_fields_changed and previous.status not in TERMINAL_STATUSES:
+            if (
+                not getattr(self.flags, "budget_update", False)
+                or previous.status
+                not in (
+                    "Recording",
+                    "Interrupted",
+                    "Stopping",
+                )
+                or self.status != previous.status
+            ):
+                frappe.throw(_("Recording Budget can change only after a durable segment"))
+            if previous.status == "Stopping" and any(
+                cint(self.get(fieldname)) != cint(previous.get(fieldname))
+                for fieldname in (
+                    "budget_bytes",
+                    "budget_warning_10m_sent",
+                    "budget_warning_2m_sent",
+                )
+            ):
+                frappe.throw(_("Recording Budget cannot change while stopping"))
+            if cint(self.budget_bytes) < cint(previous.budget_bytes):
+                frappe.throw(_("Recording Budget cannot decrease"))
+            if cint(self.captured_bytes) <= cint(previous.captured_bytes):
+                frappe.throw(_("Captured bytes must increase"))
+            if cint(self.captured_bytes) > cint(self.budget_bytes):
+                frappe.throw(_("Captured bytes cannot exceed the Recording Budget"))
+            if cint(previous.budget_warning_10m_sent) and not cint(self.budget_warning_10m_sent):
+                frappe.throw(_("Recording Budget warnings cannot be cleared"))
+            if cint(previous.budget_warning_2m_sent) and not cint(self.budget_warning_2m_sent):
+                frappe.throw(_("Recording Budget warnings cannot be cleared"))
+        endpoint_rotated = (
+            previous.status == "Interrupted"
+            and self.status == "Interrupted"
+            and (
+                cint(self.endpoint_generation) == cint(previous.endpoint_generation) + 1
+                or (
+                    getattr(self.flags, "replacement_reconciliation", False)
+                    and cint(self.endpoint_generation) > cint(previous.endpoint_generation)
+                )
+            )
+        )
+        new_interruption = previous.status == "Recording" and self.status == "Interrupted"
+        if self.has_value_changed("endpoint_generation") and not endpoint_rotated:
+            frappe.throw(_("Recorder Endpoint generation can advance only during an interruption"))
+        if any(
+            self.has_value_changed(fieldname)
+            for fieldname in ("replacement_ready_at", "replacement_event_sequence")
+        ) and not (endpoint_rotated or new_interruption):
+            frappe.throw(_("Replacement readiness can change only with the Recorder Endpoint generation"))
+        if self.has_value_changed("max_ends_at") and not (
+            previous.status == "Starting" and self.status == "Recording"
+        ):
+            frappe.throw(_("Recording maximum end can change only when capture starts"))
+        if (
             previous.recorder_public_jwk
+            and frappe.parse_json(self.recorder_public_jwk) != frappe.parse_json(previous.recorder_public_jwk)
+            and not endpoint_rotated
         ):
             frappe.throw(_("Recording operation identifiers cannot change"))
         if any(
             previous.get(fieldname) and self.get(fieldname) != previous.get(fieldname)
             for fieldname in WRITE_ONCE_FIELDS
+            if fieldname not in ENDPOINT_WRITE_ONCE_FIELDS
         ):
             frappe.throw(_("Recording operation identifiers cannot change"))
-        if cint(previous.grant_delivered) and not cint(self.grant_delivered):
+        if (
+            any(
+                previous.get(fieldname) and self.get(fieldname) != previous.get(fieldname)
+                for fieldname in ENDPOINT_WRITE_ONCE_FIELDS
+            )
+            and not endpoint_rotated
+        ):
+            frappe.throw(_("Recording operation identifiers cannot change"))
+        if cint(previous.grant_delivered) and not cint(self.grant_delivered) and not endpoint_rotated:
             frappe.throw(_("Grant delivery acknowledgement cannot be cleared"))
 
     def validate_transition(self):
         if self.is_new():
-            if self.status != "Pending" or self.state_revision != 0:
-                frappe.throw(_("A recording must begin in Pending at revision 0"))
+            if self.status not in ("Pending", "Starting") or self.state_revision != 0:
+                frappe.throw(_("A recording must begin in Starting at revision 0"))
             return
 
         previous = self.get_doc_before_save()
@@ -76,7 +167,10 @@ class MeetRecording(Document):
             changed = [
                 field.fieldname for field in self.meta.fields if self.has_value_changed(field.fieldname)
             ]
-            if changed:
+            if changed and not (
+                getattr(self.flags, "finalization_update", False)
+                and set(changed).issubset(TERMINAL_MUTABLE_FIELDS)
+            ):
                 frappe.throw(_("A terminal recording cannot be modified"))
         if previous.status in TERMINAL_STATUSES and self.has_value_changed("status"):
             frappe.throw(_("A terminal recording cannot change state"))
@@ -86,7 +180,8 @@ class MeetRecording(Document):
             if self.state_revision != previous.state_revision + 1:
                 frappe.throw(_("State revision must increase by one"))
             is_local_transition = (
-                (self.status == "Stopping" and previous.status in ("Recording", "Interrupted"))
+                (self.status == "Stopping" and previous.status in ("Starting", "Recording", "Interrupted"))
+                or getattr(self.flags, "startup_failure", False)
                 or getattr(self.flags, "reconciliation_update", False)
                 or (
                     previous.status == "Interrupted"
@@ -102,6 +197,10 @@ class MeetRecording(Document):
             frappe.throw(_("Recorder event sequence cannot decrease"))
 
     def validate_state(self):
+        if cint(self.endpoint_generation) < 0:
+            frappe.throw(_("Recorder Endpoint generation cannot be negative"))
+        if cint(self.budget_bytes) < 0 or cint(self.captured_bytes) < 0:
+            frappe.throw(_("Recording Budget values cannot be negative"))
         artifact_fields = (self.artifact, self.artifact_size, self.artifact_duration, self.artifact_sha256)
         capture_gaps = frappe.parse_json(self.capture_gaps) or []
         if not isinstance(capture_gaps, list):
@@ -156,9 +255,11 @@ class MeetRecording(Document):
         if self.status in ("Recording", "Interrupted", "Stopping", "Processing", "Ready", "Partial"):
             if not self.started_at or not self.max_ends_at:
                 frappe.throw(_("An accepted recording requires start and maximum end times"))
+        if self.status == "Starting" and self.started_at:
+            frappe.throw(_("A Recording Startup cannot have a Recording Session start time"))
         if self.status in ("Processing", "Ready", "Partial") and (not self.ended_at or not self.end_reason):
             frappe.throw(_("A stopped recording requires an end time and reason"))
-        if self.status in ("Pending", "Recording", "Interrupted", "Stopping") and self.ended_at:
+        if self.status in ("Pending", "Starting", "Recording", "Interrupted", "Stopping") and self.ended_at:
             frappe.throw(_("An active recording cannot have an end time"))
 
         upload_fields = (self.upload_id, self.upload_size, self.upload_sha256, self.upload_duration_ms)
@@ -176,6 +277,42 @@ class MeetRecording(Document):
                 or cint(self.upload_duration_ms) <= 0
             ):
                 frappe.throw(_("Recording upload metadata is invalid"))
+
+        if cint(self.finalization_attempts) < 0 or cint(self.notification_attempts) < 0:
+            frappe.throw(_("Recording finalization counters cannot be negative"))
+        if self.finalization_stage:
+            if not self.metadata_accepted_at or not self.finalization_deadline or not self.publication_key:
+                frappe.throw(_("Recording finalization requires durable metadata"))
+            if get_datetime(self.finalization_deadline) <= get_datetime(self.metadata_accepted_at):
+                frappe.throw(_("Recording finalization deadline must follow metadata acceptance"))
+        if self.upload_completed_at and cint(self.upload_offset) != cint(self.upload_size):
+            frappe.throw(_("A completed recording upload must contain every expected byte"))
+        if self.validated_at and not self.upload_completed_at:
+            frappe.throw(_("A recording artifact cannot be validated before upload completion"))
+        if self.published_at and not self.validated_at:
+            frappe.throw(_("A recording artifact cannot be published before validation"))
+        if self.finalization_stage == "Terminal" and self.status not in ("Ready", "Partial", "Failed"):
+            frappe.throw(_("Terminal finalization requires a terminal recording result"))
+        if self.terminal_acknowledged_at and self.status not in ("Ready", "Partial", "Failed", "Cancelled"):
+            frappe.throw(_("Only a terminal recording can be acknowledged"))
+        if self.notification_sent_at and self.notification_pending:
+            frappe.throw(_("A delivered recording notification cannot remain pending"))
+
+    def on_update(self):
+        previous = self.get_doc_before_save()
+        if self.status in TERMINAL_STATUSES and (not previous or previous.status not in TERMINAL_STATUSES):
+            self._release_storage_reservation()
+
+    def on_trash(self):
+        self._release_storage_reservation()
+
+    def _release_storage_reservation(self):
+        from suite.drive.api.storage import release_storage_reservation
+
+        release_storage_reservation(
+            self.room_owner,
+            recording_storage_reservation_key(self.name),
+        )
 
 
 def _utc_naive(value):
@@ -199,6 +336,10 @@ def _callback_utc_naive(value):
     if parsed.tzinfo is None:
         frappe.throw(_("Capture gap timestamps must include a timezone"))
     return parsed.astimezone(UTC).replace(tzinfo=None)
+
+
+def recording_storage_reservation_key(recording_name: str) -> str:
+    return f"meet-recording:{recording_name}"
 
 
 def get_permission_query_conditions(user: str | None = None) -> str:

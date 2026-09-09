@@ -68,6 +68,15 @@ describe('eventLastDay', () => {
 	it('uses the real end of a timed span', () => {
 		expect(lastDay('2026-08-31T09:00:00', 'PT56H')).toBe('2026-09-02')
 	})
+
+	it('names every day an oddly shaped all-day event reaches into', () => {
+		// A show_without_time event need not sit on midnight or run in whole days; the last
+		// day is wherever its final moment falls, not a rounded count of days from its start.
+		expect(lastDay('2026-08-17T14:00:00', 'PT12H', true)).toBe('2026-08-18')
+		expect(lastDay('2026-08-17T14:00:00', 'P1DT10H', true)).toBe('2026-08-18')
+		expect(lastDay('2026-08-17T14:00:00', 'PT0S', true)).toBe(null)
+		expect(lastDay('2026-08-17T00:00:00', 'PT1M', true)).toBe(null)
+	})
 })
 
 describe('formatEventWhen', () => {

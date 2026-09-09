@@ -113,7 +113,7 @@ describe('pxToDocxSize — CSS px → docx half-points', () => {
   it('non-numeric input → undefined', () => {
     expect(pxToDocxSize('abc')).toBeUndefined()
   })
-  it('converts px to half-points, rounded', () => {
+  it('converts px to half-points, rounded-4', () => {
     expect(pxToDocxSize('15px')).toBe(23)
     expect(pxToDocxSize(20)).toBe(30)
   })

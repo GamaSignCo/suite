@@ -2,10 +2,8 @@ import type { UserAccount } from './doctypes'
 
 export * from './doctypes'
 
-export type COLOR_SCHEME = 'System Default' | 'Light Mode' | 'Dark Mode'
-
 // What happens to a sender when one of their messages is marked as Junk (JMAP Account).
-export type OnMarkAsJunk = "Junk Sender's Mail" | 'Ask to Block Sender'
+type OnMarkAsJunk = "Junk Sender's Mail" | 'Ask to Block Sender'
 
 // A screened sender: how their future mail is handled. 'Reject' discards it silently; 'Spam' files
 // it into the Spam (Junk) folder; 'Accepted' lets it reach the inbox. (Doctype: Screened Email Address.)
@@ -58,9 +56,10 @@ export interface User {
 	// The site's zone — what plain DB datetime fields are stored in; see formatSystemDateTime.
 	system_time_zone: string
 	user_settings?: string
-	color_scheme?: COLOR_SCHEME
 	group_messages_by?: 'None' | 'Day' | 'Month'
 	show_reading_pane?: 0 | 1
+	// Seconds a plain Send is held so it can be undone; see utils/undoSend.ts.
+	undo_send_period?: '5' | '10' | '20' | '30'
 
 	enabled: boolean
 	is_suite_admin: boolean
@@ -141,9 +140,34 @@ export interface Mail {
 	attachments: Attachment[]
 	// Blob id of a bounce message's message/delivery-status part (see DeliveryStatusBanner).
 	dsn_blob_id?: string | null
+	// The other copies of this same message the account holds — see MailCopy.
+	duplicates?: MailCopy[]
 	user_image?: string
 	collapsed?: boolean
 }
+
+/**
+ * One of the copies a message left in the account, stripped to what acting on it takes.
+ *
+ * Mail you send to yourself lands twice: the copy saved in Sent and the one delivery filed. The
+ * thread shows a single message for the pair (the server picks it — see collapse_duplicate_copies)
+ * and hangs the copies it stands in for off it, so an action can still reach them. A body is never
+ * copied here; it is the same message.
+ */
+export type MailCopy = Pick<
+	Mail,
+	| 'name'
+	| 'id'
+	| 'thread_id'
+	| 'from_name'
+	| 'from_email'
+	| 'received_at'
+	| 'mailboxes'
+	| 'seen'
+	| 'junk'
+	| 'flagged'
+	| 'draft'
+>
 
 export interface DraftRecipient {
 	email: string
@@ -214,7 +238,7 @@ export interface MailboxData {
 	automation_rules?: AutomationRules | null
 }
 
-export interface AutomationRules {
+interface AutomationRules {
 	emails_from: string
 	subject_contains: string
 	match_if: 'any' | 'all'

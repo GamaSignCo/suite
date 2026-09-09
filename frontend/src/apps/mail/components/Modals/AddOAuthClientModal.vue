@@ -1,7 +1,7 @@
 <template>
 	<Dialog
-		v-model="show"
-		:options="{
+		v-model:open="show"
+	 v-bind="{
 			title: __('Add OAuth Client'),
 			actions: [
 				{
@@ -14,7 +14,7 @@
 			],
 		}"
 	>
-		<template #body-content>
+		<template #default>
 			<div class="space-y-4">
 				<FormControl
 					v-model="clientId"
@@ -84,7 +84,8 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { Button, Dialog, ErrorMessage, FeatherIcon, FormControl, createResource } from 'frappe-ui'
+import { Button, Dialog, ErrorMessage, FormControl, createResource } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
 
 import { raiseToast } from '@/apps/mail/utils'
 import { fromLocalInput } from '@/apps/mail/utils/datetime'

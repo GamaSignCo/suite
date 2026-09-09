@@ -84,7 +84,7 @@ export function useUpcomingEvents() {
 
 // Day view of the calendar app on the event's start date (1-indexed month),
 // deep-linked to the event itself (?event=) so its detail sidebar opens on
-// arrival. Callers can layer `edit: '1'` onto the query for the edit modal.
+// arrival. The edit modal has its own address, ?edit=<id> (&editRecurrence=).
 // By PATH, not route name: the suite router registers each app's routes
 // lazily on the first navigation into its prefix, so a named push from mail
 // finds no match until the calendar has been visited — and silently no-ops.

@@ -35,7 +35,7 @@
 						/>
 						<div
 							v-if="isSlideActive(orderedSlides[virtualRow.index])"
-							class="pointer-events-none absolute -left-4 top-0 z-10 w-1 rounded-r-lg bg-surface-gray-8 dark:bg-surface-gray-5"
+							class="pointer-events-none absolute -left-4 top-0 z-10 w-1 rounded-r-6 bg-surface-gray-8 dark:bg-surface-gray-5"
 							:style="{ height: `${thumbnailHeight}px` }"
 						/>
 					</div>
@@ -125,7 +125,7 @@ const handleSortEnd = (sortChange) => {
 const slideSort = useDragSort(scrollableArea, slidesLength, rowSize, handleSortEnd)
 
 const insertButtonClasses =
-	'mb-10 flex aspect-video w-full cursor-pointer items-center justify-center gap-2 rounded-md bg-surface-gray-2 text-ink-gray-5 hover:bg-surface-gray-3'
+	'mb-10 flex aspect-video w-full cursor-pointer items-center justify-center gap-2 rounded-6 bg-surface-gray-2 text-ink-gray-5 hover:bg-surface-gray-3'
 
 const panelClasses = computed(() => {
 	// can't add it from parent attrs.class since attrs is not reactive
@@ -149,7 +149,7 @@ const toggleButtonClasses = computed(() => {
 	if (isNavigationPanelOpen.value) {
 		return `${baseClasses} border border-outline-elevation-1 fixed -left-0.4 bottom-0 h-10 w-48 justify-between p-4`
 	}
-	return `${baseClasses} absolute top-1/2 transform -transform-y-1/2 h-12 w-4 justify-center rounded-r-lg shadow-xl`
+	return `${baseClasses} absolute top-1/2 transform -transform-y-1/2 h-12 w-4 justify-center rounded-r-6 shadow-xl`
 })
 
 const orderedSlides = computed(() => {

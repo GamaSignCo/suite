@@ -140,6 +140,8 @@ class File(FrappeFile):
         frappe.db.delete("Drive Permission", {"entity": self.name})
         frappe.db.delete("Drive Notification", {"notif_doctype_name": self.name})
         frappe.db.delete("Drive Entity Activity Log", {"entity": self.name})
+        frappe.db.delete("Drive DAV Property", {"entity": self.name})
+        frappe.db.delete("Drive DAV Lock", {"entity": self.name})
 
         if (
             self.content_doctype
@@ -289,6 +291,12 @@ class File(FrappeFile):
         """
         Move file to a new folder.
         """
+        # Row lock BEFORE any disk transfer: WebDAV promotion and settlement
+        # serialize on this lock, and a relocation whose disk op ran outside
+        # it was observable mid-flight — old bytes already carried while the
+        # row still pointed at the source (see webdav/put.py). Lock order
+        # stays globally consistent: row first, folder rollups after.
+        frappe.db.get_value("File", self.name, "name", for_update=True)
         new_parent = new_parent or get_user_folder().name
 
         if new_parent == self.name:
@@ -350,6 +358,8 @@ class File(FrappeFile):
         """
         Rename file or folder
         """
+        # row lock before the disk transfer — same discipline as move()
+        frappe.db.get_value("File", self.name, "name", for_update=True)
         if not user_has_permission(self, "write"):
             frappe.throw("You cannot rename this file", frappe.PermissionError)
 

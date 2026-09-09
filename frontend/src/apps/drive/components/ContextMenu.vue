@@ -2,7 +2,7 @@
   <div
     v-if="actionItems.length > 0"
     ref="contextMenu"
-    class="w-[208px] p-1.5 fixed mt-2 min-w-40 rounded-lg bg-surface-elevation-2 shadow-2xl ring-1 ring-black ring-opacity-5 focus:outline-none"
+    class="w-[208px] p-1.5 fixed mt-2 min-w-40 rounded-6 bg-surface-elevation-2 shadow-2xl ring-1 ring-black ring-opacity-5 focus:outline-none"
     :style="{
       left: `${calculateX}px`,
       top: `${calculateY}px`,
@@ -24,7 +24,7 @@
       </div>
       <button
         v-else
-        class="group flex h-7 w-full items-center rounded px-2 text-base hover:bg-surface-gray-3 text-ink-gray-6"
+        class="group flex h-7 w-full items-center rounded-4 px-2 text-base hover:bg-surface-gray-3 text-ink-gray-6"
       >
         <component
           :is="item.icon"

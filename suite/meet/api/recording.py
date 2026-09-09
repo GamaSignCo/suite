@@ -6,6 +6,7 @@ from __future__ import annotations
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from re import fullmatch
 from zoneinfo import ZoneInfo
 
 import frappe
@@ -13,27 +14,85 @@ import isodate
 from frappe import _
 from frappe.utils import add_to_date, cint, get_datetime, now_datetime
 
-from suite.drive.api.storage import acquire_owner_storage_lock, get_storage_usage
+from suite.drive.api.storage import (
+    acquire_owner_storage_lock,
+    create_storage_reservation,
+    get_storage_usage,
+    grow_storage_reservation,
+)
 from suite.drive.utils import get_user_folder
-from suite.meet.doctype.meet_recording.meet_recording import ACTIVE_RECORDING_STATUSES
-from suite.meet.recording.callback_auth import authenticate_callback
-from suite.meet.recording.grants import mint_recording_grant, public_jwk_thumbprint
+from suite.meet.doctype.meet_recording.meet_recording import (
+    ACTIVE_RECORDING_STATUSES,
+    recording_storage_reservation_key,
+)
+from suite.meet.recording.callback_auth import (
+    FINALIZATION_PROTOCOL_VERSION,
+    PROTOCOL_VERSION,
+    authenticate_callback,
+    authenticate_finalization_status,
+)
+from suite.meet.recording.grants import (
+    mint_recording_grant,
+    normalize_public_jwk,
+    public_jwk_thumbprint,
+)
 from suite.meet.recording.ingest import (
     CHUNK_SIZE,
     _upload_path,
     append_chunk,
     begin_upload,
     complete_upload,
+    finalization_status,
+    reject_upload_metadata,
 )
 from suite.meet.recording.recorder_client import RecorderClient, RecorderOutcome
 
 MAX_SECONDS = 4 * 60 * 60
 DEFAULT_ESTIMATE_SECONDS = 60 * 60
 BYTES_PER_SECOND = int(((5_000_000 + 128_000) / 8) * 1.1)
-MINIMUM_BUDGET_BYTES = BYTES_PER_SECOND * 30 + 5 * 1024 * 1024
+MAX_BUDGET_BYTES = MAX_SECONDS * BYTES_PER_SECOND
+# Successor-gated adoption, validation, and callback shutdown can leave up to
+# three full segments in flight before capture stops.
+MINIMUM_BUDGET_BYTES = BYTES_PER_SECOND * 90 + 5 * 1024 * 1024
 RECONCILIATION_GRACE_SECONDS = 5 * 60
-PROCESSING_TIMEOUT_SECONDS = 24 * 60 * 60
 FAILED_RETENTION_DAYS = 30
+STARTUP_TIMEOUT_SECONDS = 60
+STARTUP_MILESTONES = {
+    "configured": "configured_at",
+    "proof_complete": "proof_completed_at",
+    "joined": "joined_at",
+    "capture_started": "capture_started_at",
+}
+INTERRUPTION_REASON_CODES = {
+    "browser_disconnected",
+    "capture_interrupted",
+    "configuration_failed",
+    "ffmpeg_exited",
+    "media_attachment_failed",
+    "media_subscription_failed",
+    "page_crashed",
+    "projection_invalid",
+    "receive_transport_failed",
+    "sfu_disconnected",
+}
+END_REASON_CODES = {
+    "duration_limit",
+    "host_stop",
+    "interruption_timeout",
+    "quota_limit",
+    "room_empty",
+    "service_shutdown",
+}
+GAP_REASON_CODES = {"capture_interrupted", "ffmpeg_exited", "renderer_interrupted"}
+
+
+def _validate_callback_protocol(protocol_version: int):
+    if isinstance(protocol_version, bool) or protocol_version != PROTOCOL_VERSION:
+        frappe.throw(_("Unsupported recording callback protocol version"))
+
+
+def _callback_response(result: dict) -> dict:
+    return {"protocol_version": PROTOCOL_VERSION, **result}
 
 
 def _get_room(meeting_id: str):
@@ -50,7 +109,7 @@ def _get_drive_destination(owner: str) -> str:
 def _get_free_bytes(owner: str) -> int:
     usage = get_storage_usage(owner)
     if not usage["limit"]:
-        return MAX_SECONDS * BYTES_PER_SECOND
+        return MAX_BUDGET_BYTES
     return max(0, cint(usage["limit"]) - cint(usage["total_size"]))
 
 
@@ -109,7 +168,7 @@ def get_preflight(meeting_id: str) -> dict:
     except frappe.ValidationError:
         storage_available = False
 
-    budget_bytes = min(estimated_bytes, free_bytes)
+    budget_bytes = min(MAX_BUDGET_BYTES, free_bytes)
     return {
         "eligible": global_enabled
         and not bool(room.e2ee_enabled)
@@ -138,12 +197,26 @@ def get_state(meeting_id: str) -> dict | None:
 
 
 def get_active_recording_state(meeting_id: str) -> dict | None:
-    return frappe.db.get_value(
+    state = frappe.db.get_value(
         "Meet Recording",
         {"meet_room": meeting_id, "status": ["in", ACTIVE_RECORDING_STATUSES]},
-        ["name", "status", "started_at", "capture_started_at", "state_revision"],
+        [
+            "name",
+            "status",
+            "started_at",
+            "capture_started_at",
+            "state_revision",
+            "interruption_id",
+            "interrupted_at",
+            "interruption_deadline",
+        ],
         as_dict=True,
     )
+    if state and state.status == "Starting":
+        room = frappe.get_doc("Meet Room", meeting_id)
+        if not room.is_host_or_cohost(frappe.session.user):
+            return None
+    return state
 
 
 def _validate_request_id(request_id: str):
@@ -154,7 +227,7 @@ def _validate_request_id(request_id: str):
         frappe.throw(_("Request ID must be a UUID"))
 
 
-def _publish_state(room, recording):
+def _publish_state(room, recording, *, hosts_only: bool = False):
     payload = {
         "meeting_id": room.name,
         "recording": (
@@ -164,12 +237,20 @@ def _publish_state(room, recording):
                 "started_at": recording.started_at,
                 "capture_started_at": recording.capture_started_at,
                 "state_revision": recording.state_revision,
+                "interruption_id": recording.interruption_id,
+                "interrupted_at": recording.interrupted_at,
+                "interruption_deadline": recording.interruption_deadline,
             }
             if recording
             else None
         ),
     }
-    for user in set(room.get_members()):
+    users = (
+        {room.owner, *room.get_co_hosts()}
+        if hosts_only or (recording and recording.status == "Starting")
+        else set(room.get_members())
+    )
+    for user in users:
         if user.startswith("guest_"):
             frappe.publish_realtime(
                 "meeting:recording_state", payload, room=f"guest:{user}", after_commit=True
@@ -222,9 +303,14 @@ def _bounded_end(recording):
     return ended_at
 
 
+def _locked_recording(recording_id: str):
+    frappe.db.get_value("Meet Recording", recording_id, "name", for_update=True)
+    return frappe.get_doc("Meet Recording", recording_id)
+
+
 def _fixture_outcome(recording) -> RecorderOutcome:
     accepted_at = _system_datetime_as_utc(recording.creation)
-    return RecorderOutcome("accepted", accepted_at=accepted_at, public_jwk=FIXTURE_JWK)
+    return RecorderOutcome("accepted", accepted_at=accepted_at, public_jwk=FIXTURE_JWK, endpoint_generation=0)
 
 
 def _stored_public_jwk(recording) -> dict[str, str]:
@@ -245,14 +331,16 @@ def _accept(room, recording, outcome: RecorderOutcome):
         or accepted_at > _system_datetime_as_utc(recording.max_ends_at)
     ):
         frappe.throw(_("Recorder acceptance time is outside the recording interval"))
+    if outcome.endpoint_generation != 0:
+        frappe.throw(_("An initial Recorder Endpoint must use generation 0"))
     recording.recorder_public_jwk = outcome.public_jwk
     recording.recorder_key_thumbprint = public_jwk_thumbprint(outcome.public_jwk)
-    recording.status = "Recording"
-    recording.state_revision += 1
-    recording.recorder_event_sequence += 1
-    recording.started_at = accepted_at.replace(tzinfo=None)
+    recording.endpoint_generation = outcome.endpoint_generation
+    recording.status = "Starting"
+    recording.recorder_event_sequence = max(1, recording.recorder_event_sequence)
+    recording.recorder_accepted_at = accepted_at.replace(tzinfo=None)
     recording.save(ignore_permissions=True)
-    _publish_state(room, recording)
+    _publish_state(room, recording, hosts_only=True)
     frappe.db.commit()
     return recording
 
@@ -264,10 +352,20 @@ def _policy_allows_recording(room) -> bool:
 def _reject_pending(room, recording):
     room.recording_policy_lock()
     current = frappe.get_doc("Meet Recording", recording.name)
-    if current.status == "Pending":
-        frappe.delete_doc("Meet Recording", current.name, ignore_permissions=True)
-        _publish_state(room, None)
+    if current.status in ("Pending", "Starting"):
+        _fail_startup(room, current, "recorder_rejected")
         frappe.db.commit()
+
+
+def _fail_startup(room, recording, failure_code: str):
+    if recording.status not in ("Pending", "Starting"):
+        return
+    recording.status = "Failed"
+    recording.state_revision += 1
+    recording.failure_code = failure_code
+    recording.flags.startup_failure = True
+    recording.save(ignore_permissions=True)
+    _publish_state(room, None, hosts_only=True)
 
 
 def _fixture_enabled() -> bool:
@@ -289,14 +387,28 @@ def start(meeting_id: str, request_id: str) -> dict:
     )
     if existing:
         if existing.status != "Pending":
-            if existing.status == "Recording":
+            if existing.status in ("Starting", "Recording"):
                 recording = frappe.get_doc("Meet Recording", existing.name)
+                if existing.status == "Starting" and not recording.recorder_accepted_at:
+                    client = None if _fixture_enabled() else _client()
+                    outcome = (
+                        _fixture_outcome(recording)
+                        if _fixture_enabled()
+                        else client.query(
+                            room=meeting_id,
+                            recording=recording.name,
+                            job=recording.recorder_job_id,
+                            limits=_limits(recording),
+                        )
+                    )
+                    return _finish_start(room, recording, outcome, client)
                 if recording.grant_delivered:
                     return {"name": existing.name, "status": existing.status, "grant_delivered": True}
                 outcome = RecorderOutcome(
                     "accepted",
-                    accepted_at=get_datetime(recording.started_at).replace(tzinfo=UTC),
+                    accepted_at=get_datetime(recording.recorder_accepted_at).replace(tzinfo=UTC),
                     public_jwk=_stored_public_jwk(recording),
+                    endpoint_generation=cint(recording.endpoint_generation),
                 )
                 return _finish_start(room, recording, outcome, None if _fixture_enabled() else _client())
             return existing
@@ -326,6 +438,14 @@ def start(meeting_id: str, request_id: str) -> dict:
     )
     if existing:
         return existing
+    active = frappe.db.get_value(
+        "Meet Recording",
+        {"meet_room": meeting_id, "status": ["in", ACTIVE_RECORDING_STATUSES]},
+        ["name", "status", "grant_delivered"],
+        as_dict=True,
+    )
+    if active:
+        return active
     destination = _get_drive_destination(room.owner)
     acquire_owner_storage_lock(room.owner)
     owner_limit = max(1, cint(frappe.conf.get("recorder_max_concurrent_per_owner") or 1))
@@ -356,17 +476,22 @@ def start(meeting_id: str, request_id: str) -> dict:
             "room_owner": room.owner,
             "initiated_by": frappe.session.user,
             "calendar_event": room.calendar_event,
-            "status": "Pending",
+            "status": "Starting",
             "estimated_seconds": preflight["estimated_seconds"],
             "estimated_bytes": preflight["estimated_bytes"],
             "budget_bytes": preflight["budget_bytes"],
-            "max_ends_at": add_to_date(now, seconds=MAX_SECONDS),
+            "max_ends_at": add_to_date(now, seconds=MAX_SECONDS + STARTUP_TIMEOUT_SECONDS),
             "recorder_job_id": frappe.generate_hash(length=32),
             "request_id": request_id,
-            "pending_deadline": add_to_date(now, seconds=30),
+            "pending_deadline": add_to_date(now, seconds=STARTUP_TIMEOUT_SECONDS),
             "drive_home_folder": destination,
         }
     ).insert(ignore_permissions=True)
+    create_storage_reservation(
+        room.owner,
+        recording_storage_reservation_key(recording.name),
+        cint(recording.budget_bytes),
+    )
     frappe.db.commit()
     client = None if _fixture_enabled() else _client()
     outcome = (
@@ -377,6 +502,7 @@ def start(meeting_id: str, request_id: str) -> dict:
             recording=recording.name,
             job=recording.recorder_job_id,
             limits=_limits(recording),
+            recording_allowed=bool(preflight["eligible"]),
         )
     )
     return _finish_start(room, recording, outcome, client)
@@ -394,13 +520,13 @@ def _finish_start(
         _reject_pending(room, recording)
         return {"status": "Rejected"}
     if outcome.outcome != "accepted":
-        return {"name": recording.name, "status": "Pending"}
+        return {"name": recording.name, "status": recording.status}
 
     room = frappe.get_doc("Meet Room", recording.meet_room)
     if not room_locked:
         room.recording_policy_lock()
     current = frappe.get_doc("Meet Recording", recording.name)
-    if current.status == "Pending":
+    if current.status in ("Pending", "Starting") and not current.recorder_accepted_at:
         room.reload()
         if not _policy_allows_recording(room):
             frappe.db.commit()
@@ -415,7 +541,7 @@ def _finish_start(
                 return {"status": "Rejected"}
             return {"name": current.name, "status": "Pending"}
         current = _accept(room, current, outcome)
-    if current.status != "Recording":
+    if current.status != "Starting":
         return {"name": current.name, "status": current.status}
     if current.grant_delivered:
         return {"name": current.name, "status": current.status, "grant_delivered": True}
@@ -452,22 +578,35 @@ def _finish_start(
             job=current.recorder_job_id,
             limits=_limits(current),
             grant=grant,
+            endpoint_generation=cint(current.endpoint_generation),
         )
     )
     if not delivered:
         return _stop_after_grant_delivery_failure(room, current, client)
     current.grant_delivered = True
+    current.grant_delivered_at = _utc_now_naive()
     current.save(ignore_permissions=True)
     frappe.db.commit()
+    if client is None:
+        timestamp = (
+            _system_datetime_as_utc(now_datetime()).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        )
+        for sequence, milestone in enumerate(
+            ("configured", "proof_complete", "joined", "capture_started"), 2
+        ):
+            _apply_startup_milestone(current.name, sequence, milestone, timestamp)
+        current = frappe.get_doc("Meet Recording", current.name)
     return {"name": current.name, "status": current.status, "grant_delivered": delivered}
 
 
 def _stop_after_grant_delivery_failure(room, recording, client: RecorderClient | None) -> dict:
-    recording.status = "Stopping"
+    recording.status = "Failed"
     recording.state_revision += 1
+    recording.failure_code = "grant_delivery_failed"
+    recording.flags.startup_failure = True
     operation_id = _stop_operation_id(recording)
     recording.save(ignore_permissions=True)
-    _publish_state(room, recording)
+    _publish_state(room, None, hosts_only=True)
     frappe.db.commit()
     if client:
         client.stop(
@@ -492,8 +631,13 @@ def stop(meeting_id: str) -> dict | None:
     )
     if not recording_name:
         return None
-    recording = frappe.get_doc("Meet Recording", recording_name)
-    if recording.status in ("Recording", "Interrupted"):
+    recording = _locked_recording(recording_name)
+    if recording.status == "Starting":
+        recording.status = "Cancelled"
+        recording.state_revision += 1
+        _stop_operation_id(recording)
+        recording.save(ignore_permissions=True)
+    elif recording.status in ("Recording", "Interrupted"):
         recording.status = "Stopping"
         recording.state_revision += 1
         recording.end_reason = "host_stop"
@@ -505,7 +649,7 @@ def stop(meeting_id: str) -> dict | None:
             recording.recorder_event_sequence += 1
             recording.ended_at = _bounded_end(recording)
             recording.save(ignore_permissions=True)
-    _publish_state(room, recording)
+    _publish_state(room, recording, hosts_only=recording.status == "Cancelled")
     frappe.db.commit()
     if not _fixture_enabled():
         _client().stop(
@@ -525,53 +669,498 @@ def _stop_operation_id(recording) -> str:
     return recording.stop_operation_id
 
 
+def _startup_timestamp(value: str) -> datetime:
+    if not isinstance(value, str) or not fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", value):
+        frappe.throw(_("Recording startup timestamp must use canonical UTC milliseconds"))
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        frappe.throw(_("Recording startup timestamp is invalid"))
+    if parsed.tzinfo is None:
+        frappe.throw(_("Recording startup timestamp must include a timezone"))
+    return parsed.astimezone(UTC)
+
+
+def _apply_startup_milestone(
+    recording_id: str,
+    event_sequence: int,
+    milestone: str,
+    occurred_at: str,
+) -> dict:
+    fieldname = STARTUP_MILESTONES.get(milestone)
+    if not fieldname:
+        frappe.throw(_("Invalid Recording Startup milestone"))
+    recording = _locked_recording(recording_id)
+    if recording.status == "Recording" and milestone == "capture_started":
+        return {"status": "Recording"}
+    if recording.status != "Starting":
+        return {"status": recording.status}
+    sequence = cint(event_sequence)
+    if sequence <= recording.recorder_event_sequence:
+        if recording.get(fieldname):
+            return {"status": recording.status}
+        frappe.throw(_("Recorder startup event is out of order"))
+    if sequence != recording.recorder_event_sequence + 1:
+        frappe.throw(_("Recorder startup event sequence has a gap"))
+
+    occurred = _startup_timestamp(occurred_at)
+    accepted = get_datetime(recording.recorder_accepted_at).replace(tzinfo=UTC)
+    if occurred + timedelta(milliseconds=1) < accepted or occurred > _system_datetime_as_utc(
+        now_datetime()
+    ) + timedelta(minutes=5):
+        frappe.throw(_("Recording startup timestamp is outside the startup interval"))
+    previous_fields = list(STARTUP_MILESTONES.values())[: list(STARTUP_MILESTONES).index(milestone)]
+    if any(not recording.get(previous) for previous in previous_fields):
+        frappe.throw(_("Recording Startup milestones must be ordered"))
+    if previous_fields and occurred.replace(tzinfo=None) < get_datetime(recording.get(previous_fields[-1])):
+        frappe.throw(_("Recording Startup milestone time is out of order"))
+
+    occurred_naive = occurred.replace(tzinfo=None)
+    recording.set(fieldname, occurred_naive)
+    recording.recorder_event_sequence = sequence
+    if milestone == "capture_started":
+        recording.started_at = occurred_naive
+        recording.max_ends_at = (
+            (occurred + timedelta(seconds=MAX_SECONDS))
+            .astimezone(ZoneInfo(frappe.utils.get_system_timezone()))
+            .replace(tzinfo=None)
+        )
+        recording.status = "Recording"
+        recording.state_revision += 1
+    recording.save(ignore_permissions=True)
+    room = frappe.get_doc("Meet Room", recording.meet_room)
+    _publish_state(room, recording, hosts_only=recording.status == "Starting")
+    return {"status": recording.status}
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def recorder_startup_progress(
+    recording_id: str,
+    job: str,
+    event_sequence: int,
+    milestone: str,
+    occurred_at: str,
+    protocol_version: int,
+) -> dict:
+    """Apply one authenticated, strictly ordered Recorder Startup milestone."""
+    _validate_callback_protocol(protocol_version)
+    authenticate_callback(
+        protocol_version=protocol_version,
+        recording=recording_id,
+        job=job,
+        operation="startup_progress",
+        operation_id=str(event_sequence),
+    )
+    return _callback_response(_apply_startup_milestone(recording_id, event_sequence, milestone, occurred_at))
+
+
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 def recorder_interrupted(
     recording_id: str,
     job: str,
     event_sequence: int,
-    reason: str,
+    reason_code: str,
+    interruption_id: str,
+    interrupted_at: str,
+    interruption_deadline: str,
+    omission_started_at: str,
+    protocol_version: int,
 ) -> dict:
+    if not isinstance(reason_code, str) or reason_code not in INTERRUPTION_REASON_CODES:
+        frappe.throw(_("Invalid recording interruption reason code"))
+    _validate_callback_protocol(protocol_version)
     authenticate_callback(
+        protocol_version=protocol_version,
         recording=recording_id,
         job=job,
         operation="interrupted",
         operation_id=str(event_sequence),
     )
-    recording = frappe.get_doc("Meet Recording", recording_id)
+    return _callback_response(
+        _apply_interruption(
+            recording_id,
+            event_sequence,
+            reason_code,
+            interruption_id,
+            interrupted_at,
+            interruption_deadline,
+            omission_started_at,
+        )
+    )
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def recorder_segment_progress(
+    recording_id: str, job: str, captured_bytes: int, protocol_version: int
+) -> dict:
+    """Grow one active Recording Session's budget after a durable segment."""
+    _validate_callback_protocol(protocol_version)
+    authenticate_callback(
+        protocol_version=protocol_version,
+        recording=recording_id,
+        job=job,
+        operation="segment_progress",
+        operation_id=str(captured_bytes),
+    )
+    return _callback_response(_apply_segment_progress(recording_id, captured_bytes))
+
+
+def _apply_segment_progress(recording_id: str, captured_bytes: int, *, grow_budget: bool = True) -> dict:
+    if isinstance(captured_bytes, bool) or not isinstance(captured_bytes, int) or captured_bytes < 0:
+        frappe.throw(_("Captured bytes must be a nonnegative integer"))
+
+    recording = _locked_recording(recording_id)
+    if captured_bytes < cint(recording.captured_bytes):
+        frappe.throw(_("Captured bytes cannot decrease"))
+    if captured_bytes == cint(recording.captured_bytes):
+        return {"budget_bytes": cint(recording.budget_bytes)}
+    if recording.status not in ("Recording", "Interrupted", "Stopping"):
+        frappe.throw(_("Recording Session is not accepting segment progress"))
+    if captured_bytes > cint(recording.budget_bytes):
+        frappe.throw(_("Captured bytes exceed the Recording Budget"))
+
+    if recording.status == "Stopping" or not grow_budget:
+        recording.captured_bytes = captured_bytes
+        recording.flags.budget_update = True
+        recording.save(ignore_permissions=True)
+        return {"budget_bytes": cint(recording.budget_bytes)}
+
+    acquire_owner_storage_lock(recording.room_owner)
+    free_bytes = _get_free_bytes(recording.room_owner)
+    budget_bytes = min(MAX_BUDGET_BYTES, cint(recording.budget_bytes) + free_bytes)
+    if budget_bytes > cint(recording.budget_bytes):
+        grow_storage_reservation(
+            recording.room_owner,
+            recording_storage_reservation_key(recording.name),
+            budget_bytes,
+        )
+
+    warnings = []
+    remaining_seconds = max(0, budget_bytes - captured_bytes) // BYTES_PER_SECOND
+    if budget_bytes < MAX_BUDGET_BYTES:
+        if remaining_seconds <= 10 * 60 and not recording.budget_warning_10m_sent:
+            recording.budget_warning_10m_sent = True
+            warnings.append(10 * 60)
+        if remaining_seconds <= 2 * 60 and not recording.budget_warning_2m_sent:
+            recording.budget_warning_2m_sent = True
+            warnings.append(2 * 60)
+
+    recording.budget_bytes = budget_bytes
+    recording.captured_bytes = captured_bytes
+    recording.flags.budget_update = True
+    recording.save(ignore_permissions=True)
+    room = frappe.get_doc("Meet Room", recording.meet_room)
+    for threshold_seconds in warnings:
+        _publish_budget_warning(room, recording, threshold_seconds, remaining_seconds)
+    return {"budget_bytes": budget_bytes}
+
+
+def _publish_budget_warning(room, recording, threshold_seconds: int, remaining_seconds: int):
+    payload = {
+        "meeting_id": room.name,
+        "recording_id": recording.name,
+        "threshold_seconds": threshold_seconds,
+        "remaining_seconds": remaining_seconds,
+    }
+    for user in {room.owner, *room.get_co_hosts()}:
+        frappe.publish_realtime(
+            "meeting:recording_budget_warning",
+            message=payload,
+            user=user,
+            after_commit=True,
+        )
+
+
+def _apply_interruption(
+    recording_id: str,
+    event_sequence: int,
+    reason: str,
+    interruption_id: str,
+    interrupted_at: str,
+    interruption_deadline: str,
+    omission_started_at: str,
+) -> dict:
+    recording = _locked_recording(recording_id)
     if recording.status == "Interrupted":
+        if recording.interruption_id != interruption_id:
+            frappe.throw(_("Recorder interruption does not match the active interruption"))
         return {"status": "Interrupted"}
     if recording.status != "Recording":
         return {"status": recording.status}
-    if cint(event_sequence) <= recording.recorder_event_sequence:
+    if cint(event_sequence) != recording.recorder_event_sequence + 1:
         frappe.throw(_("Recorder event is out of order"))
     if not isinstance(reason, str) or not reason or len(reason) > 256:
         frappe.throw(_("Invalid recording interruption reason"))
+    try:
+        if str(uuid.UUID(interruption_id)) != interruption_id.lower():
+            raise ValueError
+    except (ValueError, AttributeError):
+        frappe.throw(_("Invalid recording interruption ID"))
+    interrupted = _startup_timestamp(interrupted_at)
+    deadline = _startup_timestamp(interruption_deadline)
+    omission_started = _startup_timestamp(omission_started_at)
+    if deadline != interrupted + timedelta(seconds=60):
+        frappe.throw(_("Recording interruption deadline must be fixed at 60 seconds"))
+    started = get_datetime(recording.started_at).replace(tzinfo=UTC)
+    if omission_started < started or omission_started > interrupted:
+        frappe.throw(_("Recording omission start is outside the Recording Session"))
     recording.status = "Interrupted"
     recording.state_revision += 1
     recording.recorder_event_sequence = cint(event_sequence)
+    recording.interruption_id = interruption_id
+    recording.interrupted_at = interrupted.replace(tzinfo=None)
+    recording.interruption_deadline = deadline.replace(tzinfo=None)
+    recording.interruption_reason = reason
+    recording.omission_started_at = omission_started.replace(tzinfo=None)
+    recording.resumed_capture_started_at = None
+    recording.recovered_at = None
+    recording.replacement_ready_at = None
+    recording.replacement_event_sequence = 0
     recording.save(ignore_permissions=True)
     _publish_state(frappe.get_doc("Meet Room", recording.meet_room), recording)
     return {"status": "Interrupted"}
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
-def recorder_recovered(recording_id: str, job: str, event_sequence: int) -> dict:
+def recorder_replacement_ready(
+    recording_id: str,
+    job: str,
+    event_sequence: int,
+    interruption_id: str,
+    endpoint_generation: int,
+    public_jwk: str | dict,
+    ready_at: str,
+    protocol_version: int,
+) -> dict:
+    """Authorize one strictly ordered replacement Recorder Endpoint."""
+    _validate_callback_protocol(protocol_version)
     authenticate_callback(
+        protocol_version=protocol_version,
+        recording=recording_id,
+        job=job,
+        operation="replacement_ready",
+        operation_id=str(event_sequence),
+    )
+    return _callback_response(
+        _apply_replacement_ready(
+            recording_id,
+            event_sequence,
+            interruption_id,
+            endpoint_generation,
+            public_jwk,
+            ready_at,
+            _client(),
+        )
+    )
+
+
+def _apply_replacement_ready(
+    recording_id: str,
+    event_sequence: int,
+    interruption_id: str,
+    endpoint_generation: int,
+    public_jwk: str | dict,
+    ready_at: str,
+    client: RecorderClient,
+    *,
+    reconcile: bool = False,
+) -> dict:
+    recording = _locked_recording(recording_id)
+    sequence = cint(event_sequence)
+    if isinstance(endpoint_generation, bool) or not isinstance(endpoint_generation, int):
+        frappe.throw(_("Replacement Recorder Endpoint generation must be a nonnegative integer"))
+    generation = cint(endpoint_generation)
+    try:
+        normalized_jwk = normalize_public_jwk(frappe.parse_json(public_jwk))
+    except (TypeError, ValueError):
+        frappe.throw(_("Invalid replacement Recorder Endpoint key"))
+    ready = _startup_timestamp(ready_at)
+
+    exact_retry = (
+        generation == cint(recording.endpoint_generation)
+        and sequence == cint(recording.replacement_event_sequence)
+        and interruption_id == recording.interruption_id
+        and recording.replacement_ready_at
+        and ready.replace(tzinfo=None) == get_datetime(recording.replacement_ready_at)
+        and normalized_jwk == _stored_public_jwk(recording)
+    )
+    if exact_retry:
+        if recording.status == "Interrupted" and not recording.grant_delivered:
+            frappe.db.commit()
+            _deliver_replacement_grant(recording, client)
+            recording.reload()
+        return {
+            "status": recording.status,
+            "grant_delivered": bool(recording.grant_delivered),
+        }
+    if recording.status != "Interrupted":
+        frappe.throw(_("A replacement Recorder Endpoint requires an active interruption"))
+    if interruption_id != recording.interruption_id:
+        frappe.throw(_("Replacement Recorder Endpoint does not match the active interruption"))
+    sequence_delta = sequence - cint(recording.recorder_event_sequence)
+    generation_delta = generation - cint(recording.endpoint_generation)
+    if reconcile:
+        if generation_delta <= 0 or sequence_delta != generation_delta:
+            frappe.throw(_("Replacement Recorder Endpoint state is contradictory"))
+    elif sequence_delta != 1 or generation_delta != 1:
+        frappe.throw(_("Replacement Recorder Endpoint event is stale, out of order, or has a gap"))
+    if normalized_jwk == _stored_public_jwk(recording):
+        frappe.throw(_("Replacement Recorder Endpoint must use a fresh key"))
+
+    interrupted = get_datetime(recording.interrupted_at).replace(tzinfo=UTC)
+    deadline = get_datetime(recording.interruption_deadline).replace(tzinfo=UTC)
+    maximum = _system_datetime_as_utc(recording.max_ends_at)
+    now = _system_datetime_as_utc(now_datetime())
+    if ready <= interrupted or ready > min(deadline, maximum) or ready > now + timedelta(minutes=5):
+        frappe.throw(_("Replacement readiness is outside the active interruption interval"))
+    if now >= min(deadline, maximum):
+        frappe.throw(_("The Recording Interruption no longer accepts a replacement endpoint"))
+
+    issued_at = int(ready.timestamp())
+    expires_at = int(min(deadline, maximum).timestamp())
+    if expires_at <= issued_at:
+        frappe.throw(_("The Recording Interruption no longer accepts a replacement endpoint"))
+    recording.endpoint_generation = generation
+    recording.replacement_event_sequence = sequence
+    recording.replacement_ready_at = ready.replace(tzinfo=None)
+    recording.recorder_event_sequence = sequence
+    recording.recorder_public_jwk = normalized_jwk
+    recording.recorder_key_thumbprint = public_jwk_thumbprint(normalized_jwk)
+    recording.grant_jti = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"{frappe.local.site}:{recording.name}:{interruption_id}:{generation}",
+        )
+    )
+    recording.grant_issued_at = issued_at
+    recording.grant_expires_at = expires_at
+    recording.grant_delivered = False
+    recording.grant_delivered_at = None
+    recording.flags.replacement_reconciliation = reconcile
+    recording.save(ignore_permissions=True)
+    _deliver_replacement_grant(recording, client)
+    recording.reload()
+    return {
+        "status": recording.status,
+        "grant_delivered": bool(recording.grant_delivered),
+    }
+
+
+def _deliver_replacement_grant(recording, client: RecorderClient) -> bool:
+    if recording.status != "Interrupted" or recording.grant_delivered:
+        return bool(recording.grant_delivered)
+    now = int(time.time())
+    if now >= cint(recording.grant_expires_at):
+        return False
+    grant = mint_recording_grant(
+        secret=frappe.conf.get("sfu_secret"),
+        site=frappe.local.site,
+        meeting_id=recording.meet_room,
+        recording_id=recording.name,
+        recorder_job_id=recording.recorder_job_id,
+        public_jwk=_stored_public_jwk(recording),
+        max_ends_at=_system_datetime_as_utc(recording.max_ends_at),
+        authorization_expires_at=cint(recording.grant_expires_at),
+        issued_at=cint(recording.grant_issued_at),
+        expires_in=cint(recording.grant_expires_at) - cint(recording.grant_issued_at),
+        jti=recording.grant_jti,
+    )
+    delivered = client.deliver_grant(
+        room=recording.meet_room,
+        recording=recording.name,
+        job=recording.recorder_job_id,
+        limits=_limits(recording),
+        grant=grant,
+        endpoint_generation=cint(recording.endpoint_generation),
+    )
+    if not delivered:
+        return False
+    current = frappe.get_doc("Meet Recording", recording.name)
+    if (
+        current.status == "Interrupted"
+        and cint(current.endpoint_generation) == cint(recording.endpoint_generation)
+        and current.grant_jti == recording.grant_jti
+        and not current.grant_delivered
+    ):
+        current.grant_delivered = True
+        current.grant_delivered_at = _utc_now_naive()
+        current.save(ignore_permissions=True)
+        frappe.db.commit()
+    return True
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def recorder_recovered(
+    recording_id: str,
+    job: str,
+    event_sequence: int,
+    interruption_id: str,
+    resumed_capture_started_at: str,
+    recovered_at: str,
+    protocol_version: int,
+) -> dict:
+    _validate_callback_protocol(protocol_version)
+    authenticate_callback(
+        protocol_version=protocol_version,
         recording=recording_id,
         job=job,
         operation="recovered",
         operation_id=str(event_sequence),
     )
-    recording = frappe.get_doc("Meet Recording", recording_id)
+    return _callback_response(
+        _apply_recovery(
+            recording_id,
+            event_sequence,
+            interruption_id,
+            resumed_capture_started_at,
+            recovered_at,
+        )
+    )
+
+
+def _apply_recovery(
+    recording_id: str,
+    event_sequence: int,
+    interruption_id: str,
+    resumed_capture_started_at: str,
+    recovered_at: str,
+) -> dict:
+    recording = _locked_recording(recording_id)
     if recording.status == "Recording":
         return {"status": "Recording"}
     if recording.status != "Interrupted":
         return {"status": recording.status}
-    if cint(event_sequence) != recording.recorder_event_sequence:
+    if interruption_id != recording.interruption_id:
         frappe.throw(_("Recorder recovery does not match the active interruption"))
+    if recording.replacement_ready_at and not recording.grant_delivered:
+        frappe.throw(_("Replacement Recorder Endpoint grant has not been delivered"))
+    if cint(event_sequence) != recording.recorder_event_sequence + 1:
+        frappe.throw(_("Recorder recovery event is out of order"))
+    resumed = _startup_timestamp(resumed_capture_started_at)
+    recovered = _startup_timestamp(recovered_at)
+    deadline = get_datetime(recording.interruption_deadline).replace(tzinfo=UTC)
+    omission_started = get_datetime(recording.omission_started_at).replace(tzinfo=UTC)
+    if resumed < omission_started or recovered < resumed or recovered > deadline:
+        frappe.throw(_("Recorder recovery is outside the active interruption interval"))
     recording.status = "Recording"
     recording.state_revision += 1
+    recording.recorder_event_sequence = cint(event_sequence)
+    recording.resumed_capture_started_at = resumed.replace(tzinfo=None)
+    recording.recovered_at = recovered.replace(tzinfo=None)
+    gaps = frappe.parse_json(recording.capture_gaps) or []
+    reason = recording.interruption_reason or "capture_interrupted"
+    if reason.startswith("renderer:"):
+        reason = "renderer_interrupted"
+    elif reason != "ffmpeg_exited":
+        reason = "capture_interrupted"
+    gaps.append(
+        {
+            "started_at": omission_started.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "ended_at": resumed.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "reason": reason,
+        }
+    )
+    recording.capture_gaps = frappe.as_json(gaps)
     recording.flags.recovery_update = True
     recording.save(ignore_permissions=True)
     _publish_state(frappe.get_doc("Meet Room", recording.meet_room), recording)
@@ -583,14 +1172,18 @@ def recorder_stopped(
     recording_id: str,
     job: str,
     event_sequence: int,
+    captured_bytes: int,
     size: int,
     sha256: str,
     duration_ms: int,
     ended_at: str,
-    end_reason: str,
+    end_reason_code: str,
+    protocol_version: int,
     gaps: str | list | None = None,
 ) -> dict:
+    _validate_callback_protocol(protocol_version)
     authenticate_callback(
+        protocol_version=protocol_version,
         recording=recording_id,
         job=job,
         operation="stopped",
@@ -598,24 +1191,62 @@ def recorder_stopped(
     )
     if not ended_at:
         frappe.throw(_("Recording stop callback requires an end time"))
-    result = begin_upload(
-        recording_id,
-        event_sequence=event_sequence,
-        size=size,
-        sha256=sha256,
-        duration_ms=duration_ms,
-        gaps=frappe.parse_json(gaps) if isinstance(gaps, str) else gaps,
-        ended_at=ended_at,
-        end_reason=end_reason,
-    )
+    if not isinstance(end_reason_code, str) or end_reason_code not in END_REASON_CODES:
+        frappe.throw(_("Invalid recording end reason code"))
+    gaps = frappe.parse_json(gaps) if isinstance(gaps, str) else gaps
+    if not isinstance(gaps, list) or any(
+        not isinstance(gap, dict)
+        or set(gap) != {"started_at", "ended_at", "reason_code"}
+        or not isinstance(gap["reason_code"], str)
+        or gap["reason_code"] not in GAP_REASON_CODES
+        for gap in gaps
+    ):
+        frappe.throw(_("Invalid recording gap reason code"))
+    recording = frappe.get_doc("Meet Recording", recording_id)
+    if (
+        recording.status == "Failed"
+        and recording.finalization_stage == "Terminal"
+        and recording.finalization_failure_code == "invalid_terminal_metadata"
+    ):
+        return _callback_response({"offset": 0, "complete": True})
+    savepoint = "meet_recording_terminal_metadata"
+    frappe.db.savepoint(savepoint)
+    try:
+        _apply_segment_progress(recording_id, captured_bytes, grow_budget=False)
+        result = begin_upload(
+            recording_id,
+            event_sequence=event_sequence,
+            size=size,
+            sha256=sha256,
+            duration_ms=duration_ms,
+            gaps=[
+                {
+                    "started_at": gap["started_at"],
+                    "ended_at": gap["ended_at"],
+                    "reason": gap["reason_code"],
+                }
+                for gap in gaps
+            ],
+            ended_at=ended_at,
+            end_reason=end_reason_code,
+        )
+    except frappe.ValidationError as error:
+        frappe.db.rollback(save_point=savepoint)
+        result = reject_upload_metadata(recording_id, event_sequence=event_sequence, error=error)
+    finally:
+        frappe.db.release_savepoint(savepoint)
     recording = frappe.get_doc("Meet Recording", recording_id)
     _publish_state(frappe.get_doc("Meet Room", recording.meet_room), recording)
-    return result
+    return _callback_response({"offset": result["offset"], "complete": result["complete"]})
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
-def recorder_upload_chunk(recording_id: str, job: str, offset: int, chunk_sha256: str) -> dict:
+def recorder_upload_chunk(
+    recording_id: str, job: str, offset: int, chunk_sha256: str, protocol_version: int
+) -> dict:
+    _validate_callback_protocol(protocol_version)
     authenticate_callback(
+        protocol_version=protocol_version,
         recording=recording_id,
         job=job,
         operation="upload_chunk",
@@ -625,17 +1256,21 @@ def recorder_upload_chunk(recording_id: str, job: str, offset: int, chunk_sha256
         frappe.throw(_("Recording upload chunks must be binary data"))
     if frappe.request.content_length is not None and frappe.request.content_length > CHUNK_SIZE:
         frappe.throw(_("Recording upload chunk is too large"))
-    return append_chunk(
-        recording_id,
-        offset=offset,
-        chunk=frappe.request.get_data(cache=True),
-        chunk_sha256=chunk_sha256,
+    return _callback_response(
+        append_chunk(
+            recording_id,
+            offset=offset,
+            chunk=frappe.request.get_data(cache=True),
+            chunk_sha256=chunk_sha256,
+        )
     )
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
-def recorder_complete_upload(recording_id: str, job: str, event_sequence: int) -> dict:
+def recorder_complete_upload(recording_id: str, job: str, event_sequence: int, protocol_version: int) -> dict:
+    _validate_callback_protocol(protocol_version)
     authenticate_callback(
+        protocol_version=protocol_version,
         recording=recording_id,
         job=job,
         operation="complete_upload",
@@ -644,7 +1279,19 @@ def recorder_complete_upload(recording_id: str, job: str, event_sequence: int) -
     result = complete_upload(recording_id, event_sequence=event_sequence)
     recording = frappe.get_doc("Meet Recording", recording_id)
     _publish_state(frappe.get_doc("Meet Room", recording.meet_room), recording)
-    return result
+    return _callback_response(result)
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def recorder_finalization_status(recording_id: str, job: str, protocol_version: int) -> dict:
+    if isinstance(protocol_version, bool) or protocol_version != FINALIZATION_PROTOCOL_VERSION:
+        frappe.throw(_("Unsupported recording finalization protocol version"))
+    authenticate_finalization_status(
+        protocol_version=protocol_version,
+        recording=recording_id,
+        job=job,
+    )
+    return {"protocol_version": FINALIZATION_PROTOCOL_VERSION, **finalization_status(recording_id)}
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
@@ -652,41 +1299,79 @@ def recorder_failed(
     recording_id: str,
     job: str,
     event_sequence: int,
-    failure_code: str = "capture_failed",
+    protocol_version: int,
+    reason_code: str = "capture_failed",
 ) -> dict:
+    _validate_callback_protocol(protocol_version)
     authenticate_callback(
+        protocol_version=protocol_version,
         recording=recording_id,
         job=job,
         operation="failed",
         operation_id=str(event_sequence),
     )
-    recording = frappe.get_doc("Meet Recording", recording_id)
+    recording = _locked_recording(recording_id)
     if recording.status == "Failed":
-        return {"status": "Failed"}
-    if recording.status not in ("Recording", "Interrupted", "Stopping", "Processing"):
+        return _callback_response({"status": "Failed"})
+    if recording.status == "Cancelled":
+        return _callback_response({"status": "Cancelled"})
+    if recording.status not in ("Starting", "Recording", "Interrupted", "Stopping", "Processing"):
         frappe.throw(_("Recording cannot accept a failure callback"))
     if cint(event_sequence) <= recording.recorder_event_sequence:
         frappe.throw(_("Recorder event is out of order"))
-    if failure_code not in ("capture_failed", "processing_failed", "storage_unavailable", "quota_exhausted"):
+    if not isinstance(reason_code, str) or reason_code not in (
+        "capture_failed",
+        "processing_failed",
+        "storage_unavailable",
+        "quota_exhausted",
+    ):
         frappe.throw(_("Invalid recording failure code"))
+    startup_failure = recording.status == "Starting"
     recording.status = "Failed"
     recording.state_revision += 1
     recording.recorder_event_sequence = cint(event_sequence)
-    recording.failure_code = failure_code
-    recording.ended_at = recording.ended_at or _bounded_end(recording)
+    recording.failure_code = reason_code
+    if recording.started_at:
+        recording.ended_at = recording.ended_at or _bounded_end(recording)
+    if startup_failure:
+        recording.flags.startup_failure = True
+    else:
+        recording.notification_pending = 1
+        recording.notification_next_retry_at = now_datetime()
     recording.save(ignore_permissions=True)
-    _publish_state(frappe.get_doc("Meet Room", recording.meet_room), recording)
-    return {"status": "Failed"}
+    _publish_state(
+        frappe.get_doc("Meet Room", recording.meet_room),
+        None if startup_failure else recording,
+        hosts_only=startup_failure,
+    )
+    return _callback_response({"status": "Failed"})
 
 
 def reconcile_pending_recordings():
     # Pending/Stopping reconciliation needs the recorder server. Without one configured,
     # skip those phases instead of erroring per recording; the stale sweep below fails
     # such recordings with "recorder_unavailable" once they pass max_ends_at.
-    if _fixture_enabled() or _recorder_available():
+    utc_now = _utc_now_naive()
+    fixture_enabled = _fixture_enabled()
+    recorder_available = not fixture_enabled and _recorder_available()
+    if recorder_available:
+        for name in frappe.get_all("Meet Recording", filters={"status": "Recording"}, pluck="name"):
+            _run_reconciliation(name, _reconcile_recording)
+
+        for name in frappe.get_all("Meet Recording", filters={"status": "Interrupted"}, pluck="name"):
+            _run_reconciliation(name, _reconcile_interrupted)
+
+    for name in frappe.get_all(
+        "Meet Recording",
+        filters={"status": "Interrupted", "interruption_deadline": ["<=", utc_now]},
+        pluck="name",
+    ):
+        _run_reconciliation(name, _timeout_interruption)
+
+    if fixture_enabled or recorder_available:
         names = frappe.get_all(
             "Meet Recording",
-            filters={"status": "Pending", "pending_deadline": ["<=", now_datetime()]},
+            filters={"status": ["in", ("Pending", "Starting")], "pending_deadline": ["<=", now_datetime()]},
             pluck="name",
         )
         for name in names:
@@ -699,17 +1384,9 @@ def reconcile_pending_recordings():
     for name in frappe.get_all(
         "Meet Recording",
         filters={
-            "status": ["in", ("Pending", "Recording", "Interrupted", "Stopping")],
+            "status": ["in", ("Pending", "Starting", "Recording", "Interrupted", "Stopping")],
             "max_ends_at": ["<=", stale_active_cutoff],
         },
-        pluck="name",
-    ):
-        _run_reconciliation(name, _fail_stale_recording)
-
-    processing_cutoff = add_to_date(now_datetime(), seconds=-PROCESSING_TIMEOUT_SECONDS)
-    for name in frappe.get_all(
-        "Meet Recording",
-        filters={"status": "Processing", "modified": ["<=", processing_cutoff]},
         pluck="name",
     ):
         _run_reconciliation(name, _fail_stale_recording)
@@ -717,7 +1394,7 @@ def reconcile_pending_recordings():
     failed_cutoff = add_to_date(now_datetime(), days=-FAILED_RETENTION_DAYS)
     for name in frappe.get_all(
         "Meet Recording",
-        filters={"status": "Failed", "modified": ["<", failed_cutoff]},
+        filters={"status": ["in", ("Failed", "Cancelled")], "modified": ["<", failed_cutoff]},
         pluck="name",
     ):
         _run_reconciliation(name, _delete_expired_failed_recording)
@@ -727,7 +1404,7 @@ def cleanup_failed_recordings():
     failed_cutoff = add_to_date(now_datetime(), days=-FAILED_RETENTION_DAYS)
     for name in frappe.get_all(
         "Meet Recording",
-        filters={"status": "Failed", "modified": ["<=", failed_cutoff]},
+        filters={"status": ["in", ("Failed", "Cancelled")], "modified": ["<=", failed_cutoff]},
         pluck="name",
     ):
         _run_reconciliation(name, _delete_expired_failed_recording)
@@ -747,26 +1424,24 @@ def _run_reconciliation(name: str, operation):
 
 def _fail_stale_recording(name: str):
     recording = frappe.get_doc("Meet Recording", name)
-    if recording.status not in ("Pending", "Recording", "Interrupted", "Stopping", "Processing"):
+    if recording.status not in ("Pending", "Starting", "Recording", "Interrupted", "Stopping"):
         return
-    if recording.status == "Processing" and recording.modified > add_to_date(
-        now_datetime(), seconds=-PROCESSING_TIMEOUT_SECONDS
-    ):
-        return
-    if recording.status != "Processing" and recording.max_ends_at > add_to_date(
-        now_datetime(), seconds=-RECONCILIATION_GRACE_SECONDS
-    ):
+    if recording.max_ends_at > add_to_date(now_datetime(), seconds=-RECONCILIATION_GRACE_SECONDS):
         return
     previous_status = recording.status
     recording.status = "Failed"
     recording.state_revision += 1
-    recording.failure_code = (
-        "processing_failed" if previous_status == "Processing" else "recorder_unavailable"
-    )
-    recording.ended_at = recording.ended_at or _bounded_end(recording)
+    recording.failure_code = "recorder_unavailable"
+    if recording.started_at:
+        recording.ended_at = recording.ended_at or _bounded_end(recording)
     recording.flags.reconciliation_update = True
     recording.save(ignore_permissions=True)
-    _publish_state(frappe.get_doc("Meet Room", recording.meet_room), recording)
+    startup_failure = previous_status in ("Pending", "Starting")
+    _publish_state(
+        frappe.get_doc("Meet Room", recording.meet_room),
+        None if startup_failure else recording,
+        hosts_only=startup_failure,
+    )
 
 
 def _delete_expired_failed_recording(name: str):
@@ -790,6 +1465,143 @@ def _retry_stopping(name: str):
     )
 
 
+def _timeout_interruption(name: str):
+    recording = frappe.get_doc("Meet Recording", name)
+    if recording.status != "Interrupted" or recording.interruption_deadline > _utc_now_naive():
+        return
+    recording.status = "Stopping"
+    recording.state_revision += 1
+    recording.end_reason = "interruption_timeout"
+    _stop_operation_id(recording)
+    recording.save(ignore_permissions=True)
+    _publish_state(frappe.get_doc("Meet Room", recording.meet_room), recording)
+
+
+def _reconcile_recording(name: str):
+    recording = frappe.get_doc("Meet Recording", name)
+    client = _client()
+    outcome = client.query(
+        room=recording.meet_room,
+        recording=recording.name,
+        job=recording.recorder_job_id,
+        limits=_limits(recording),
+    )
+    interruption = outcome.interruption or {}
+    if (
+        outcome.outcome != "accepted"
+        or outcome.state not in {"interrupted", "capture_ready"}
+        or outcome.event_sequence is None
+        or not interruption.get("id")
+        or not interruption.get("interrupted_at")
+        or not interruption.get("deadline")
+        or not interruption.get("omission_started_at")
+    ):
+        return
+    replacement_events = max(0, outcome.endpoint_generation - cint(recording.endpoint_generation))
+    interruption_sequence = outcome.event_sequence
+    if outcome.state == "capture_ready":
+        interruption_sequence -= 1
+    interruption_sequence -= replacement_events
+    if interruption_sequence <= recording.recorder_event_sequence:
+        return
+    _apply_interruption(
+        recording.name,
+        interruption_sequence,
+        outcome.reason_code or "capture_interrupted",
+        interruption["id"],
+        _callback_timestamp(interruption["interrupted_at"]),
+        _callback_timestamp(interruption["deadline"]),
+        _callback_timestamp(interruption["omission_started_at"]),
+    )
+    recording = frappe.get_doc("Meet Recording", recording.name)
+    if outcome.endpoint_generation > cint(recording.endpoint_generation):
+        if not outcome.public_jwk or not outcome.replacement_ready_at:
+            return
+        replacement_sequence = outcome.event_sequence - (1 if outcome.state == "capture_ready" else 0)
+        _apply_replacement_ready(
+            recording.name,
+            replacement_sequence,
+            interruption["id"],
+            outcome.endpoint_generation,
+            outcome.public_jwk,
+            _callback_timestamp(outcome.replacement_ready_at),
+            client,
+            reconcile=True,
+        )
+    if (
+        outcome.state == "capture_ready"
+        and interruption.get("resumed_capture_started_at")
+        and interruption.get("recovered_at")
+    ):
+        _apply_recovery(
+            recording.name,
+            outcome.event_sequence,
+            interruption["id"],
+            _callback_timestamp(interruption["resumed_capture_started_at"]),
+            _callback_timestamp(interruption["recovered_at"]),
+        )
+
+
+def _reconcile_interrupted(name: str):
+    recording = frappe.get_doc("Meet Recording", name)
+    client = _client()
+    outcome = client.query(
+        room=recording.meet_room,
+        recording=recording.name,
+        job=recording.recorder_job_id,
+        limits=_limits(recording),
+    )
+    interruption = outcome.interruption or {}
+    if (
+        outcome.outcome != "accepted"
+        or outcome.state not in {"interrupted", "capture_ready"}
+        or outcome.event_sequence is None
+        or interruption.get("id") != recording.interruption_id
+    ):
+        return
+    if outcome.endpoint_generation > cint(recording.endpoint_generation):
+        if not outcome.public_jwk or not outcome.replacement_ready_at:
+            return
+        replacement_sequence = outcome.event_sequence - (1 if outcome.state == "capture_ready" else 0)
+        _apply_replacement_ready(
+            recording.name,
+            replacement_sequence,
+            interruption["id"],
+            outcome.endpoint_generation,
+            outcome.public_jwk,
+            _callback_timestamp(outcome.replacement_ready_at),
+            client,
+            reconcile=True,
+        )
+        recording.reload()
+    elif outcome.endpoint_generation < cint(recording.endpoint_generation):
+        return
+    elif recording.replacement_ready_at:
+        if outcome.public_jwk != _stored_public_jwk(recording):
+            return
+        if not recording.grant_delivered:
+            _deliver_replacement_grant(recording, client)
+            recording.reload()
+    if (
+        outcome.state != "capture_ready"
+        or outcome.event_sequence <= recording.recorder_event_sequence
+        or not interruption.get("resumed_capture_started_at")
+        or not interruption.get("recovered_at")
+    ):
+        return
+    _apply_recovery(
+        recording.name,
+        outcome.event_sequence,
+        interruption["id"],
+        _callback_timestamp(interruption["resumed_capture_started_at"]),
+        _callback_timestamp(interruption["recovered_at"]),
+    )
+
+
+def _callback_timestamp(value: datetime) -> str:
+    return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def _reconcile_pending(name: str):
     recording = frappe.get_doc("Meet Recording", name)
     client = None if _fixture_enabled() else _client()
@@ -808,16 +1620,43 @@ def _reconcile_pending(name: str):
         _reject_pending(room, recording)
         return
     if outcome.outcome != "accepted":
+        room.recording_policy_lock()
+        current = frappe.get_doc("Meet Recording", name)
+        _fail_startup(room, current, "startup_timeout")
         return
 
     room.recording_policy_lock()
     current = frappe.get_doc("Meet Recording", name)
-    if current.status != "Pending":
+    if current.status not in ("Pending", "Starting"):
         frappe.db.commit()
         return
     room.reload()
     if _policy_allows_recording(room):
         _finish_start(room, current, outcome, client, room_locked=True)
+        for sequence, milestone in enumerate(
+            ("configured", "proof_complete", "joined", "capture_started"), 2
+        ):
+            occurred = (outcome.milestones or {}).get(milestone)
+            if occurred and (outcome.event_sequence or 0) >= sequence:
+                _apply_startup_milestone(
+                    current.name,
+                    sequence,
+                    milestone,
+                    occurred.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                )
+        current = frappe.get_doc("Meet Recording", name)
+        if current.status == "Starting":
+            operation_id = _stop_operation_id(current)
+            _fail_startup(room, current, "startup_timeout")
+            frappe.db.commit()
+            if client:
+                client.stop(
+                    room=current.meet_room,
+                    recording=current.name,
+                    job=current.recorder_job_id,
+                    limits=_limits(current),
+                    operation_id=operation_id,
+                )
         return
 
     operation_id = _stop_operation_id(current)

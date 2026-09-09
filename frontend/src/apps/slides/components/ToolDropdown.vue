@@ -25,7 +25,7 @@ defineProps({
 })
 
 const triggerClass = (open) => [
-	'flex cursor-pointer items-center gap-1 rounded py-2 pl-2 pr-1 hover:bg-surface-gray-3',
+	'flex cursor-pointer items-center gap-1 rounded-4 py-2 pl-2 pr-1 hover:bg-surface-gray-3',
 	{ 'bg-surface-gray-3': open },
 ]
 </script>

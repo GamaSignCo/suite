@@ -12,7 +12,7 @@
 				:count="senders.data?.length ? waitingLabel : undefined"
 			>
 				<template #actions>
-					<AdaptiveDropdown :options="bulkOptions" placement="bottom-end">
+					<AdaptiveDropdown :options="bulkOptions">
 						<Button variant="ghost" class="!h-10 !w-10 !rounded-full">
 							<template #icon><Ellipsis class="icon" /></template>
 						</Button>
@@ -102,18 +102,17 @@
 								<span class="truncate">{{ waitingLabel }}</span>
 								<!-- Redundant while the explainer slab is teaching the same lesson above,
 								     and skipped on mobile where the popover doesn't sit well. -->
-								<Popover v-if="explainerDismissed && !isMobile" placement="bottom-start">
-									<template #target="{ togglePopover }">
+								<Popover v-if="explainerDismissed && !isMobile" side="bottom" align="start">
+									<template #trigger>
 										<Button
 											variant="ghost"
 											class="ml-1 !px-1.5"
 											:tooltip="__('How the Screener works')"
-											@click="togglePopover()"
 										>
 											<template #icon><CircleHelp class="icon" /></template>
 										</Button>
 									</template>
-									<template #body-main>
+									<template #default>
 										<div class="w-80 p-4">
 											<div class="text-ink-gray-8 mb-1.5 text-sm !font-semibold">
 												{{ __('How the Screener works') }}
@@ -146,7 +145,7 @@
 								</Popover>
 							</div>
 							<div class="-mr-2 flex shrink-0 items-center space-x-2">
-								<Dropdown :options="bulkOptions" placement="bottom-end">
+								<Dropdown :options="bulkOptions">
 									<Button variant="ghost" class="!px-1.5">
 										<template #icon><Ellipsis class="icon" /></template>
 									</Button>
@@ -272,6 +271,7 @@
 						hidden: !isMobile && !showReadingPane && !openSender,
 					}"
 					@touchstart.passive="onPreviewTouchStart"
+					@touchmove.passive="onPreviewTouchMove"
 					@touchend.passive="onPreviewTouchEnd"
 				>
 					<template v-if="openSender">
@@ -319,7 +319,7 @@
 									/>
 									<AdaptiveDropdown
 										:options="denyOptions(openSender)"
-										placement="bottom-end"
+										align="end"
 									>
 										<Button variant="outline" class="-ml-px !rounded-l-none !px-1.5">
 											<template #icon><ChevronDown class="h-4 w-4" /></template>
@@ -336,7 +336,7 @@
 									/>
 									<AdaptiveDropdown
 										:options="allowOptions(openSender)"
-										placement="bottom-end"
+										align="end"
 									>
 										<Button
 											variant="solid"
@@ -401,7 +401,7 @@
 
 					<div v-else class="flex-1 overflow-hidden">
 						<div
-							class="bg-surface-gray-1 m-5 flex h-[calc(100%-2.9em)] items-center justify-center rounded-md"
+							class="bg-surface-gray-1 m-5 flex h-[calc(100%-2.9em)] items-center justify-center rounded-4"
 						>
 							<div class="flex flex-col items-center space-y-3">
 								<NoMails class="text-ink-gray-2 h-16 w-16" />
@@ -416,13 +416,14 @@
 			</template>
 		</div>
 
-		<Dialog v-model="showClearAll" :options="clearAllOptions" />
-		<Dialog v-model="showBulkConfirm" :options="bulkConfirmOptions" />
+		<Dialog v-model:open="showClearAll" v-bind="clearAllOptions" />
+		<Dialog v-model:open="showBulkConfirm" v-bind="bulkConfirmOptions" />
 	</div>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { useRouter } from 'vue-router'
 import {
 	Archive,
@@ -451,7 +452,11 @@ import {
 } from 'frappe-ui'
 
 import { raiseToast, shouldIgnoreKeypress } from '@/apps/mail/utils'
-import { isNavigationKey, navigationOffset } from '@/apps/mail/utils/listNavigation'
+import {
+	isNavigationKey,
+	navigationOffset,
+	neighbourAfterRemoval,
+} from '@/apps/mail/utils/listNavigation'
 import {
 	useListReload,
 	useReadingPane,
@@ -488,7 +493,7 @@ const showReadingPane = useReadingPane()
 
 // The same undo the thread lists hang Cmd/Ctrl+Z off — one shared slot, so the last thing you did in
 // mail is the thing that key takes back, wherever you did it.
-const { setUndoAction, undo } = useUndo()
+const { setUndoAction, undo, dropViewUndo } = useUndo()
 
 // The Screener only exists when screening is enabled. If it's off, render nothing and send the user to
 // their inbox (the route is still reachable by URL even though the sidebar hides it).
@@ -639,7 +644,11 @@ watch(
 
 // Swipe on the open preview (mobile): left → next sender, right → previous — the
 // screener counterpart of the mailbox thread swipe.
-const { onTouchStart: onPreviewTouchStart, onTouchEnd: onPreviewTouchEnd } = useSwipeNav(
+const {
+	onTouchStart: onPreviewTouchStart,
+	onTouchMove: onPreviewTouchMove,
+	onTouchEnd: onPreviewTouchEnd,
+} = useSwipeNav(
 	() => isMobile.value && !!openSender.value,
 	(offset) => {
 		const list = senders.data ?? []
@@ -669,14 +678,6 @@ watch(openSender, (sender) => {
 // allow the sender straight to Archive or Trash, and Esc closes. Else inert.
 const handleKeydown = (e: KeyboardEvent) => {
 	const key = e.key.toLowerCase()
-
-	// Above the guard below: a verdict is just as often given from a list row with nothing open, and
-	// that is exactly when you'd reach for undo — the row is gone and there is nothing else to press.
-	if ((e.metaKey || e.ctrlKey) && key === 'z' && !shouldIgnoreKeypress(e, true)) {
-		e.preventDefault()
-		return undo()
-	}
-
 	if (!openSender.value || shouldIgnoreKeypress(e)) return
 
 	if (key === 'escape') {
@@ -751,7 +752,7 @@ onMounted(() => {
 onUnmounted(() => {
 	window.removeEventListener('keydown', handleKeydown)
 	// Don't leave a verdict undoable from a view that can't show what came back.
-	setUndoAction(undefined)
+	dropViewUndo()
 	clearInterval(pollInterval)
 	// Don't strand a queued batch on navigation — the acted rows were already removed optimistically.
 	if (flushTimer) {
@@ -764,10 +765,11 @@ usePageMeta(() => {
 	// Name the open sender, the way the mailbox view names the open thread. The queue's own title is
 	// the right one for the list, but it made every sender's page — each its own URL, each shareable
 	// and restorable — read as the same tab, and the count kept moving under it as you triaged.
-	if (openSender.value) return { title: openSender.value.from_name || openSender.value.from_email }
+	if (openSender.value)
+		return appPageMeta(openSender.value.from_name || openSender.value.from_email, 'Mail')
 
 	const n = senders.data?.length ?? 0
-	return { title: n ? `(${n}) ${__('Screener')}` : __('Screener') }
+	return appPageMeta(n ? `(${n}) ${__('Screener')}` : __('Screener'), 'Mail')
 })
 
 const waitingLabel = computed(() => {
@@ -916,8 +918,10 @@ const runAction = (
 ) => {
 	if (!fromEmails.length) return
 
-	// When acting on the sender open in the detail view, line up the next one down so you can triage
-	// straight through — resolved before the optimistic removal.
+	// When acting on the sender open in the detail view, line up the next one so you can triage
+	// straight through — the one below, or the one above at the end of the queue, since a pass that
+	// starts at the oldest sender spends all of itself there (see neighbourAfterRemoval). Resolved
+	// before the optimistic removal.
 	const list = senders.data ?? []
 	const actingOnOpen = !!openSender.value && matchSender(openSender.value)
 	let nextSender: ScreeningSender | undefined
@@ -925,7 +929,11 @@ const runAction = (
 		const idx = list.findIndex(
 			(s: ScreeningSender) => s.from_email === openSender.value!.from_email,
 		)
-		nextSender = list.slice(idx + 1).find((s: ScreeningSender) => !matchSender(s))
+		nextSender = neighbourAfterRemoval(
+			list as ScreeningSender[],
+			idx,
+			(s: ScreeningSender) => !matchSender(s),
+		)
 	}
 
 	// Optimistically drop the acted senders so the rows leave immediately and every other row stays
@@ -1160,7 +1168,7 @@ const domainOption = (action: 'allow' | 'screenOut', sender: ScreeningSender) =>
 const allowOptions = (sender: ScreeningSender) => [
 	{
 		group: '',
-		items: [
+		options: [
 			{
 				label: __('Allow and Archive ({0})', ['E']),
 				icon: Archive,
@@ -1173,7 +1181,7 @@ const allowOptions = (sender: ScreeningSender) => [
 			},
 		],
 	},
-	{ group: '', items: [domainOption('allow', sender)] },
+	{ group: '', options: [domainOption('allow', sender)] },
 ]
 
 const denyOptions = (sender: ScreeningSender) => [domainOption('screenOut', sender)]
@@ -1187,7 +1195,7 @@ const moreOptions = (sender: ScreeningSender) => [
 	// domain rows read as a pair (same phrasing, same globes) and shouldn't be split from each other.
 	{
 		group: '',
-		items: [
+		options: [
 			{
 				label: __('Allow and Archive'),
 				icon: Archive,
@@ -1205,7 +1213,7 @@ const moreOptions = (sender: ScreeningSender) => [
 	// without a divider of its own — it is the only row here that shuts someone out.
 	{
 		group: '',
-		items: [
+		options: [
 			{
 				label: __('Allow all emails from {0}', [domainOf(sender.from_email)]),
 				icon: Globe,
@@ -1325,4 +1333,3 @@ const bulkOptions = computed(() => [
 	{ label: __('Move All to Inbox'), icon: Inbox, onClick: () => (showClearAll.value = true) },
 ])
 </script>
-

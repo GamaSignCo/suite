@@ -209,6 +209,18 @@ export class ConsumerManager {
 		return this.consumers.size;
 	}
 
+	getConsumerCountsByWorker(
+		roomWorkerIds: Map<string, number>,
+	): Map<number, number> {
+		const counts = new Map<number, number>();
+		for (const data of this.consumers.values()) {
+			const workerId = roomWorkerIds.get(data.roomId);
+			if (workerId === undefined) continue;
+			counts.set(workerId, (counts.get(workerId) ?? 0) + 1);
+		}
+		return counts;
+	}
+
 	async pauseConsumer(consumerId: string): Promise<boolean> {
 		const consumerData = this.consumers.get(consumerId);
 		if (!consumerData) {

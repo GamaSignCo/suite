@@ -58,21 +58,11 @@
 </template>
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { watchDebounced } from '@vueuse/core'
 import {
-	Badge,
-	Button,
-	FeatherIcon,
-	FormControl,
-	ListEmptyState,
-	ListHeader,
-	ListRow,
-	ListRowItem,
-	ListRows,
-	ListView,
-	createResource,
-	usePageMeta,
-} from 'frappe-ui'
+	Badge, Button, FormControl, createResource, usePageMeta } from 'frappe-ui'
+import { Icon as FeatherIcon, ListEmptyState, ListHeader, ListRow, ListRowItem, ListRows, ListView } from 'frappe-ui/experimental'
 
 import { formatDateTime } from '@/apps/mail/utils/datetime'
 import DashboardLayout from '@/apps/mail/components/DashboardLayout.vue'
@@ -89,7 +79,7 @@ type LogRow = {
 	details?: string
 }
 
-usePageMeta(() => ({ title: __('Logs') }))
+usePageMeta(() => appPageMeta(__('Logs'), 'Mail'))
 
 const PAGE_LENGTH = 100
 const search = ref('')

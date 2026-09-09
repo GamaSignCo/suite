@@ -66,6 +66,7 @@
 			<ThreadPane
 				:thread-open="!!threadID"
 				@touch-start="onThreadTouchStart"
+				@touch-move="onThreadTouchMove"
 				@touch-end="onThreadTouchEnd"
 			>
 				<template #list>
@@ -296,8 +297,11 @@
 										:selection-mode="mobileSelectionMode"
 										:is-selected="selections.includes(row.thread.thread_id)"
 										:hide-sender="row.inStack"
+										:draggable="!isMobile && !isAllAccountsSearch"
 										:class="rowClasses(row)"
 										:data-row-key="row.key"
+										@drag-start="(e: DragEvent) => startThreadDrag(row.thread, e)"
+										@drag-end="threadDrag.end()"
 										@set-seen="(seen: boolean) => rowSetSeen(row.thread, seen)"
 										@archive-thread="rowArchive(row.thread)"
 										@trash-thread="rowTrash(row.thread)"
@@ -391,8 +395,8 @@
 		</div>
 	</div>
 
-	<Dialog v-model="showEmptyMailbox" :options="emptyMailboxOptions" />
-	<Dialog v-model="showJunkOrDeleteThreads" :options="junkOrDeleteThreadsOptions" />
+	<Dialog v-model:open="showEmptyMailbox" v-bind="emptyMailboxOptions" />
+	<Dialog v-model:open="showJunkOrDeleteThreads" v-bind="junkOrDeleteThreadsOptions" />
 	<ScreenedEmailAddressModal />
 	<!-- Selection action bar (design: 5·Selection) — replaces the tab bar while
 	     selecting: thumb reach, Delete last and red. -->
@@ -454,6 +458,7 @@
 </template>
 <script setup lang="ts">
 import { computed, inject, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { useRoute, useRouter } from 'vue-router'
 import {
 	Archive,
@@ -496,6 +501,7 @@ import {
 	hasCursor,
 	isNavigationKey,
 	navigationOffset,
+	neighbourAfterRemoval,
 	stepFromKey,
 	useGPrefix,
 } from '@/apps/mail/utils/listNavigation'
@@ -507,6 +513,7 @@ import {
 	useSwipeNav,
 	useUndo,
 } from '@/apps/mail/utils/composables'
+import { useThreadDrag } from '@/apps/mail/composables/useThreadDrag'
 import { useStoredFilter } from '@/apps/mail/utils/listFilter'
 import { useListRows } from '@/apps/mail/composables/useListRows'
 import {
@@ -543,7 +550,7 @@ const router = useRouter()
 const { isMobile } = useScreenSize()
 const { listReloadRequest } = useListReload()
 const { setMobileSelectionActive } = useMobileSelection()
-const { undo, setUndoAction } = useUndo()
+const { dropViewUndo } = useUndo()
 
 const socket = inject('$socket')
 const user = inject('$user') as UserResource
@@ -772,13 +779,6 @@ const handleKeyDown = (e: KeyboardEvent) => {
 		e.preventDefault()
 		gPrefix.disarm()
 		return toggleSelectAll(true)
-	}
-
-	// Handle Ctrl/Cmd+Z (Undo)
-	if ((e.metaKey || e.ctrlKey) && key === 'z' && !shouldIgnoreKeypress(e, true)) {
-		e.preventDefault()
-		gPrefix.disarm()
-		return undo()
 	}
 
 	if (shouldIgnoreKeypress(e)) return
@@ -1358,7 +1358,7 @@ onUnmounted(() => {
 	window.removeEventListener('keyup', handleKeyUp)
 	if (reloadInterval.value) clearInterval(reloadInterval.value)
 	// Leaving the mailbox drops any pending undo so a lingering toast can't undo into another view.
-	setUndoAction(undefined)
+	dropViewUndo()
 })
 
 const goToMailbox = () =>
@@ -1377,7 +1377,11 @@ const goToThreadByOffset = (offset: number) => {
 }
 
 // Swipe on the open thread (mobile): left → next thread, right → previous.
-const { onTouchStart: onThreadTouchStart, onTouchEnd: onThreadTouchEnd } = useSwipeNav(
+const {
+	onTouchStart: onThreadTouchStart,
+	onTouchMove: onThreadTouchMove,
+	onTouchEnd: onThreadTouchEnd,
+} = useSwipeNav(
 	() => isMobile.value && !!threadID,
 	(offset) => {
 		// Arms the paging animation for this navigation only — goToThread consumes it, so
@@ -1393,9 +1397,14 @@ const { onTouchStart: onThreadTouchStart, onTouchEnd: onThreadTouchEnd } = useSw
 const threadSlide = ref('')
 let pendingThreadSlide = ''
 
+// Down the list first, then up: triaging from the oldest mail lives at the bottom, where there is
+// never anything below (see neighbourAfterRemoval). Only an emptied list falls back to the mailbox.
 const goToNextThreadOrMailbox = (excludedThreads: string[] = []) => {
-	const idx = threadIDs.value.indexOf(threadID)
-	const next = threadIDs.value.slice(idx + 1).find((id) => !excludedThreads.includes(id))
+	const next = neighbourAfterRemoval(
+		threadIDs.value,
+		threadIDs.value.indexOf(threadID),
+		(id) => !excludedThreads.includes(id),
+	)
 	if (next) goToThread(next)
 	else goToMailbox()
 }
@@ -1436,6 +1445,34 @@ const {
 	goToMailbox,
 	goToNextThreadOrMailbox,
 })
+
+// ── Dragging threads onto a folder ────────────────────────────────────────────────────────────────
+// A drop is the same act as picking a folder from the "Move to" menu, so it runs the same handler —
+// undo snapshot, Junk diversion and toast included. The sidebar owns the drop; it borrows the move
+// from here, since only the view knows how to perform one.
+const threadDrag = useThreadDrag()
+
+onMounted(() => threadDrag.setMoveHandler(handleMoveThreads))
+onUnmounted(() => threadDrag.setMoveHandler(null))
+
+/**
+ * What the drag carries. Dragging a row that is part of the selection takes the
+ * whole selection with it; dragging one outside it takes that row alone and
+ * leaves the selection untouched — the same reading every file manager gives
+ * the gesture, and the alternative (always the selection) silently moves mail
+ * the reader never pointed at.
+ *
+ * Rows are undraggable in an all-accounts search, alongside `selectable`, and
+ * for the same reason: the move below runs against the active account, while
+ * those rows can belong to any. There is no cross-account handler to route to
+ * either — the ones above work by reading a role off the row's own account
+ * (`mail.archive`, `mail.trash`), and the folder being dropped on is one of
+ * *this* account's, which another account has no counterpart for.
+ */
+const startThreadDrag = (thread: Thread, e: DragEvent) => {
+	const id = thread.thread_id
+	threadDrag.start(selections.value.includes(id) ? [...selections.value] : [id], e)
+}
 
 // ── Cross-account search row actions ──────────────────────────────────────────────────────────────
 // In an all-accounts search the merged rows can belong to any account, so the shared handlers above
@@ -1561,7 +1598,7 @@ const emptyMailbox = createResource({
 const emptyMailboxOptions = computed(() => ({
 	title: __('Empty {0}', [mailboxName.value]),
 	message: __(`Are you sure you want to empty the contents of this mailbox?`),
-	icon: { name: 'alert-triangle', appearance: 'warning' },
+	icon: { name: 'lucide-alert-triangle', theme: 'amber' },
 	actions: [
 		{
 			label: __('Confirm'),
@@ -1595,8 +1632,8 @@ const currentThread = computed(() =>
 )
 
 usePageMeta(() => {
-	if (threadID) return { title: currentThread.value?.subject || __('[No Subject]') }
-	return { title: `${unreadThreadsPrefix.value} ${mailboxName.value}` }
+	if (threadID) return appPageMeta(currentThread.value?.subject || __('[No Subject]'), 'Mail')
+	return appPageMeta(`${unreadThreadsPrefix.value} ${mailboxName.value}`, 'Mail')
 })
 
 const title = computed(() => {

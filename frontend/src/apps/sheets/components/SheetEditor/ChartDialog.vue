@@ -1,6 +1,6 @@
 <template>
-  <Dialog v-model="show" :options="{ title: chartId ? 'Edit chart' : 'Insert chart', size: '4xl' }">
-    <template #body-content>
+  <Dialog v-model:open="show" :title="chartId ? 'Edit chart' : 'Insert chart'" size="4xl">
+    <template #default>
 
       <!-- ── Source range ─────────────────────────────────────────────── -->
       <div class="cd-section">
@@ -52,12 +52,13 @@
           <p class="cd-label" style="margin-top:14px">
             {{ chartType === 'pie' ? 'Labels' : 'X axis' }}
           </p>
-          <!-- Autocomplete keeps the dropdown anchored + scrollable + searchable.
-               Native <select> on macOS renders a system popover that grows to
-               fit all options and clips on top of the dialog body. -->
-          <Autocomplete
-            :model-value="xAxisOption"
+          <!-- Combobox keeps the dropdown anchored + scrollable + searchable.
+                Native <select> on macOS renders a system popover that grows to
+                fit all options and clips on top of the dialog body. -->
+          <Combobox
+            :model-value="String(xCol)"
             :options="columnOptions"
+            trigger="button"
             placeholder="Pick a column"
             @update:model-value="onXAxisChange"
           />
@@ -195,17 +196,18 @@
 
 <script setup>
 import { computed, defineAsyncComponent, reactive, ref, watch } from 'vue'
-import { Autocomplete, Button, Dialog, FormControl, FeatherIcon } from 'frappe-ui'
+import { Button, Combobox, Dialog, FormControl } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
 // Lazy-load — same rationale as in ChartOverlay.
 const ChartView = defineAsyncComponent(() => import('./ChartView.vue'))
 import { CHART_TYPES, CHART_PALETTES, ESPRESSO_PALETTE, CHART_AGGREGATIONS } from '../../engine/charts.js'
 
 const CHART_ICONS = {
   line:    'trending-up',
-  bar:     'bar-chart-2',
+  bar:     'chart-column',
   area:    'activity',
-  pie:     'pie-chart',
-  scatter: 'git-commit',
+  pie:     'chart-pie',
+  scatter: 'git-commit-horizontal',
 }
 
 const props = defineProps({
@@ -322,12 +324,9 @@ function detect() {
 
 const columnOptions = computed(() => columns.value.map(c => ({ label: c.label, value: String(c.idx) })))
 
-// Autocomplete works in option-object terms — pre-pick the option whose
-// value matches our current xCol so the picker shows the right label.
-const xAxisOption = computed(() => columnOptions.value.find(o => o.value === String(xCol.value)) || null)
 function onXAxisChange(opt) {
   if (!opt) return
-  xCol.value = parseInt(opt.value, 10)
+  xCol.value = parseInt(opt, 10)
   // If the new X axis was previously selected as a Y series, drop it —
   // otherwise the same column would feed both axes and the chart breaks.
   if (yCols.value.includes(xCol.value)) {

@@ -521,6 +521,8 @@ def update_calendar_event(
         previous_emails, event["sequence"] = _previous_invite_state(account, id)
 
     service = get_calendar_event_service(account)
+    # Read before the write: moving a series moves the occurrences its overrides are keyed by.
+    stored = (service.get([id]) or [{}])[0]
     response = service.update(
         [event], send_scheduling_messages=send_scheduling_messages and not use_custom_invites
     )
@@ -532,8 +534,63 @@ def update_calendar_event(
         else:
             frappe.throw(_(response["description"]), title=title)
 
+    _reanchor_overrides(service, id, stored, start, recurrence_rule)
+
     if use_custom_invites:
         _enqueue_event_notification(account, "update", event_id=id, previous_emails=previous_emails)
+
+
+def _reanchor_overrides(service, id: str, stored: dict, start: str | None, rule: dict | None) -> None:
+    """Moves an edited series' overrides along with the occurrences they belong to.
+
+    An override is keyed by the start its occurrence was expanded at. Move the series and every
+    occurrence moves with it, but the key does not — and an override on a date the rule no
+    longer generates is not ignored: RFC 8984 reads it as an occurrence in its own right, so the
+    edited occurrence is drawn twice, once where the rule now puts it and once where it used to
+    be. Shifting the keys by what the series moved keeps each edit on its own occurrence.
+
+    Only a plain shift is followed. Changing the rule itself can move occurrences by no single
+    amount, and guessing which one an override belonged to would be worse than leaving it.
+    """
+
+    overrides = stored.get("recurrenceOverrides") or {}
+    if not overrides or not start or not stored.get("start"):
+        return
+
+    # The stored rule is the server's own normalisation of what was sent — it drops "@type" and
+    # anything left at its default — so the two are compared on what they actually say.
+    #
+    # Not on their day selectors, though. Those are read off the start, so moving a Monday series
+    # to a Wednesday rewrites them to follow it: the rule reads differently while describing the
+    # same series, moved. What must not have changed is how far apart the occurrences are, since
+    # that is what makes one shift the answer for all of them.
+    ignored = ("@type", "byDay", "byMonthDay")
+
+    def spoken(value: dict | None) -> str:
+        return json.dumps({k: v for k, v in (value or {}).items() if k not in ignored and v}, sort_keys=True)
+
+    if spoken(stored.get("recurrenceRule")) != spoken(rule):
+        return
+
+    try:
+        shift = datetime.fromisoformat(start) - datetime.fromisoformat(stored["start"])
+    except ValueError:
+        return
+    if not shift:
+        return
+
+    def moved(value: str) -> str:
+        return (datetime.fromisoformat(value) + shift).strftime("%Y-%m-%dT%H:%M:%S")
+
+    try:
+        reanchored = {
+            moved(key): ({**override, "start": moved(override["start"])} if "start" in override else override)
+            for key, override in overrides.items()
+        }
+    except ValueError:
+        return
+
+    service.set_overrides(id, reanchored)
 
 
 @frappe.whitelist()
@@ -666,7 +723,7 @@ def format_calendar_event(account: str, calendar_map: dict, event: dict) -> dict
             "uid": uid,
             "action": a.get("action", "").title(),
             "type": a.get("trigger", {}).get("@type", ""),
-            "relative_to": a.get("trigger", {}).get("relativeTo", "").title(),
+            "relative_to": (a.get("trigger", {}).get("relativeTo") or "start").title(),
             "offset": a.get("trigger", {}).get("offset", "").upper(),
             # AbsoluteTrigger.when is a UTCDateTime; serve it in the canonical ``...Z`` form.
             "when": normalize_utc_z(a.get("trigger", {}).get("when")) or "",
@@ -712,6 +769,10 @@ def format_calendar_event(account: str, calendar_map: dict, event: dict) -> dict
         "id": event["id"],
         "uid": event["uid"],
         "recurrence_id": event.get("recurrenceId"),
+        # When the event behind this row was stored. An occurrence the server holds has one; one
+        # synthesised from a recurrence override does not, which is what tells the two apart when
+        # both come back for the same date.
+        "created": event.get("created"),
         "organizer": organizer,
         "calendars": calendars,
         "status": (event.get("status") and event["status"].title()) or "Confirmed",
@@ -779,11 +840,6 @@ def send_event_alert_notification(user: str, alert: dict, ctx: dict | None = Non
         return
 
     try:
-        pn = PushNotification("mail")
-        if not pn.is_enabled():
-            logger.debug("push-notifications-disabled")
-            return
-
         service = CalendarEventService(account, get_jmap_connection(user))
 
         events = service.get([event_id])
@@ -826,9 +882,24 @@ def send_event_alert_notification(user: str, alert: dict, ctx: dict | None = Non
             if recurrence_id:
                 link += f"&recurrence={quote(recurrence_id, safe='')}"
 
+        title = event.get("title") or _("[No title]")
+
+        # An open tab hears the alert over the socket whether or not device push is set
+        # up; the path is the link without the host, for the app's router.
+        frappe.publish_realtime(
+            "calendar_alert",
+            {"title": title, "body": body, "path": link[len(url) :]},
+            user=user,
+        )
+
+        pn = PushNotification("mail")
+        if not pn.is_enabled():
+            logger.debug("push-notifications-disabled")
+            return
+
         pn.send_notification_to_user(
             user,
-            event.get("title") or _("[No title]"),
+            title,
             body,
             link,
             f"{url}/assets/suite/calendar/images/logo.png",

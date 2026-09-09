@@ -344,6 +344,17 @@ class CoreService(CoreServiceHelper):
 
         return self._exec("get", ids=ids, properties=properties, **kwargs)
 
+    def get_state(self) -> str | None:
+        """Returns the server's current state string for this type, via an empty 'get'.
+
+        The state is what 'changes' diffs against; an error response yields None.
+        """
+
+        response = self._get(ids=[], properties=["id"])
+        for _name, body, _call_id in response.get("methodResponses") or []:
+            return body.get("state")
+        return None
+
     def _update(self, update: dict, **kwargs) -> dict:
         """Internal method to update objects of the specified type using the JMAP 'set' method."""
 

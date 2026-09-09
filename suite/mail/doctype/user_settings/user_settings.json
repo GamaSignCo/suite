@@ -23,11 +23,12 @@
   "jmap_session",
   "ui_tab",
   "appearance_section",
-  "color_scheme",
   "mail_list_section",
   "group_messages_by",
   "column_break_cxak",
-  "show_reading_pane"
+  "show_reading_pane",
+  "compose_section",
+  "undo_send_period"
  ],
  "fields": [
   {
@@ -168,15 +169,6 @@
    "label": "Appearance"
   },
   {
-   "default": "System Default",
-   "description": "Preferred interface theme.",
-   "fieldname": "color_scheme",
-   "fieldtype": "Select",
-   "label": "Color Scheme",
-   "options": "System Default\nLight Mode\nDark Mode",
-   "reqd": 1
-  },
-  {
    "depends_on": "eval: doc.username",
    "fieldname": "mail_list_section",
    "fieldtype": "Section Break",
@@ -200,6 +192,21 @@
    "fieldname": "show_reading_pane",
    "fieldtype": "Check",
    "label": "Split View"
+  },
+  {
+   "depends_on": "eval: doc.username",
+   "fieldname": "compose_section",
+   "fieldtype": "Section Break",
+   "label": "Compose"
+  },
+  {
+   "default": "5",
+   "description": "Seconds a sent message is held before delivery so it can still be undone from the Mail UI.",
+   "fieldname": "undo_send_period",
+   "fieldtype": "Select",
+   "label": "Undo Send Period",
+   "options": "5\n10\n20\n30",
+   "reqd": 1
   }
  ],
  "grid_page_length": 50,
@@ -211,7 +218,7 @@
    "link_fieldname": "user_settings"
   }
  ],
- "modified": "2026-08-07 12:00:00.000000",
+ "modified": "2026-08-31 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mail",
  "name": "User Settings",

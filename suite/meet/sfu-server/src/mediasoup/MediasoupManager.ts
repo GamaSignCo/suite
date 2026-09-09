@@ -1,7 +1,6 @@
 import type {
 	CloseProducerResult,
 	Consumer,
-	ConsumerData,
 	DtlsParameters,
 	ExistingProducer,
 	IceCandidate,
@@ -15,7 +14,6 @@ import type {
 	ProducerCloseDetails,
 	ProducerCloseReason,
 	ProducerCloseSource,
-	ProducerData,
 	Room,
 	RtpCapabilities,
 	RtpCodecCapability,
@@ -49,6 +47,7 @@ export interface ProducerClosedLifecycle extends ProducerCloseMetadata {
 
 export class MediasoupManager {
 	private readonly closingRooms = new Set<string>();
+	private creatingRooms = new Map<string, Promise<Room>>();
 	private workerManager = new WorkerManager();
 	private roomManager = new RoomManager();
 	private peerManager = new PeerManager();
@@ -205,30 +204,60 @@ export class MediasoupManager {
 		this.producerClosedListeners.push(listener);
 	}
 
-	async getWorkerResourceUsage(): Promise<{
-		userCpuSeconds: number;
-		systemCpuSeconds: number;
-		maxResidentMemoryBytes: number;
-	}> {
+	async getWorkerResourceUsage(): Promise<
+		Array<{
+			worker: string;
+			userCpuSeconds?: number;
+			systemCpuSeconds?: number;
+			maxResidentMemoryBytes?: number;
+			rooms: number;
+			peers: number;
+			transports: number;
+			producers: number;
+			consumers: number;
+		}>
+	> {
+		const workers = this.workerManager.getAllWorkers();
 		const usage = await Promise.allSettled(
-			this.workerManager
-				.getAllWorkers()
-				.map(({ worker }) => worker.getResourceUsage()),
+			workers.map(({ worker }) => worker.getResourceUsage()),
 		);
-		return usage.reduce(
-			(total, result) => {
-				if (result.status === 'rejected') return total;
-				return {
-					userCpuSeconds:
-						total.userCpuSeconds + result.value.ru_utime / 1_000_000,
-					systemCpuSeconds:
-						total.systemCpuSeconds + result.value.ru_stime / 1_000_000,
-					maxResidentMemoryBytes:
-						total.maxResidentMemoryBytes + result.value.ru_maxrss * 1024,
-				};
-			},
-			{ userCpuSeconds: 0, systemCpuSeconds: 0, maxResidentMemoryBytes: 0 },
+		const rooms = this.roomManager.getAllRooms();
+		const roomWorkerIds = new Map(
+			rooms.map((room) => [room.id, room.workerId]),
 		);
+		const roomCounts = new Map<number, { rooms: number; peers: number }>();
+		for (const room of rooms) {
+			const counts = roomCounts.get(room.workerId) ?? { rooms: 0, peers: 0 };
+			counts.rooms += 1;
+			counts.peers += room.peers.size;
+			roomCounts.set(room.workerId, counts);
+		}
+		const transportCounts =
+			this.transportManager.getTransportCountsByWorker(roomWorkerIds);
+		const producerCounts =
+			this.producerManager.getProducerCountsByWorker(roomWorkerIds);
+		const consumerCounts =
+			this.consumerManager.getConsumerCountsByWorker(roomWorkerIds);
+		return workers.map(({ id }, index) => {
+			const counts = {
+				...{ rooms: 0, peers: 0 },
+				...roomCounts.get(id),
+				transports: transportCounts.get(id) ?? 0,
+				producers: producerCounts.get(id) ?? 0,
+				consumers: consumerCounts.get(id) ?? 0,
+			};
+			const result = usage[index];
+			if (result.status === 'rejected')
+				return { worker: String(id), ...counts };
+			return {
+				worker: String(id),
+				...counts,
+				// mediasoup reports CPU time in milliseconds and max RSS in KiB.
+				userCpuSeconds: result.value.ru_utime / 1_000,
+				systemCpuSeconds: result.value.ru_stime / 1_000,
+				maxResidentMemoryBytes: result.value.ru_maxrss * 1024,
+			};
+		});
 	}
 
 	async init(): Promise<void> {
@@ -247,14 +276,26 @@ export class MediasoupManager {
 		roomId: string,
 		onActiveSpeaker?: (roomId: string, participantIds: string[]) => void,
 	): Promise<Room> {
-		const { worker, webRtcServer } = this.workerManager.getNextWorker();
-		return this.roomManager.createRoom(
+		const room = this.roomManager.getRoom(roomId);
+		if (room) return room;
+		const pending = this.creatingRooms.get(roomId);
+		if (pending) return pending;
+
+		const { id, worker, webRtcServer } = this.workerManager.getNextWorker();
+		const creation = this.roomManager.createRoom(
 			roomId,
+			id,
 			worker,
 			webRtcServer,
 			this.config.router.mediaCodecs as RtpCodecCapability[],
 			onActiveSpeaker,
 		);
+		this.creatingRooms.set(roomId, creation);
+		try {
+			return await creation;
+		} finally {
+			this.creatingRooms.delete(roomId);
+		}
 	}
 
 	async closeRoom(roomId: string): Promise<void> {
@@ -633,10 +674,6 @@ export class MediasoupManager {
 
 	async requestConsumerKeyFrame(consumerId: string): Promise<boolean> {
 		return this.consumerManager.requestConsumerKeyFrame(consumerId);
-	}
-
-	getConsumerData(consumerId: string): ConsumerData | undefined {
-		return this.consumerManager.getConsumerData(consumerId);
 	}
 
 	assertTransportAccess(
@@ -1034,15 +1071,6 @@ export class MediasoupManager {
 		return this.roomManager.getRoom(roomId)?.peers;
 	}
 
-	getProducerData(producerId: string): ProducerData | undefined {
-		return this.producerManager.getProducerData(producerId);
-	}
-
-	peerExistsInRoom(roomId: string, peerId: string): boolean {
-		const room = this.roomManager.getRoom(roomId);
-		return room?.peers.has(peerId) || false;
-	}
-
 	participantExistsInRoom(roomId: string, participantId: string): boolean {
 		const room = this.roomManager.getRoom(roomId);
 		return Array.from(room?.peers.values() ?? []).some(
@@ -1052,10 +1080,6 @@ export class MediasoupManager {
 
 	get rooms() {
 		return this.roomManager;
-	}
-
-	get peers() {
-		return this.peerManager;
 	}
 
 	getResourceCounts(): Record<string, number> {

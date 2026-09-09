@@ -61,6 +61,7 @@ function createMediaReconfigurationController({
 		sfuManager: shallowRef({
 			reconfigureForE2EE,
 			rejoinParticipantConnection: joinRoom,
+			hasLocalMediaPublications: vi.fn(() => true),
 		} as never),
 		currentUser: {
 			currentUser: shallowRef({ user_id: "user-1", full_name: "User One" }),
@@ -103,14 +104,12 @@ function createController() {
 				encodedState: new Uint8Array([1]),
 				meetingSecret: new Uint8Array(32) as Uint8Array<ArrayBuffer>,
 			})),
-			createGenesisEpochWithMembers: vi.fn(),
 			generateKeyPackage: vi.fn(),
 			encodeKeyPackage: vi.fn(),
 			decodeKeyPackage: vi.fn(),
 			encodeCommit: vi.fn(),
 			encodeWelcome: vi.fn(),
 			decodeWelcome: vi.fn(),
-			addMember: vi.fn(),
 			addMultipleMembers: vi.fn(),
 			removeMember: vi.fn(),
 			joinFromWelcome: vi.fn(),
@@ -174,7 +173,6 @@ describe("E2EEHandshakeController", () => {
 				encodedState: new Uint8Array([1]),
 				meetingSecret: new Uint8Array(32) as Uint8Array<ArrayBuffer>,
 			})),
-			createGenesisEpochWithMembers: vi.fn(),
 			generateKeyPackage: vi.fn(),
 			encodeKeyPackage: vi.fn(),
 			decodeKeyPackage: vi.fn((encoded: Uint8Array) => ({
@@ -183,7 +181,6 @@ describe("E2EEHandshakeController", () => {
 			encodeCommit: vi.fn(() => new Uint8Array([4, 5, 6])),
 			encodeWelcome: vi.fn(() => new Uint8Array([7, 8, 9])),
 			decodeWelcome: vi.fn(),
-			addMember: vi.fn(),
 			addMultipleMembers: vi.fn(async (state: unknown) => ({
 				commit: { id: "commit" } as never,
 				welcome: { id: "welcome" } as never,
@@ -396,14 +393,12 @@ describe("E2EEHandshakeController", () => {
 			})),
 			epochProtocolProvider: {
 				createGenesisEpoch: vi.fn(),
-				createGenesisEpochWithMembers: vi.fn(),
 				generateKeyPackage: vi.fn(),
 				encodeKeyPackage: vi.fn(),
 				decodeKeyPackage: vi.fn(),
 				encodeCommit: vi.fn(),
 				encodeWelcome: vi.fn(),
 				decodeWelcome: vi.fn(),
-				addMember: vi.fn(),
 				addMultipleMembers: vi.fn(),
 				removeMember: vi.fn(),
 				joinFromWelcome: vi.fn(),
@@ -439,10 +434,7 @@ describe("E2EEHandshakeController", () => {
 				videoPublished: true,
 				audioPublished: true,
 			})),
-			mediaHandler: {
-				videoProducer: {} as never,
-				audioProducer: {} as never,
-			},
+			hasLocalMediaPublications: vi.fn(() => true),
 		} as never);
 		const controller = new E2EEHandshakeController({
 			meetingId: "meeting-1",
@@ -461,14 +453,12 @@ describe("E2EEHandshakeController", () => {
 			getDeviceIdentity: vi.fn(),
 			epochProtocolProvider: {
 				createGenesisEpoch: vi.fn(),
-				createGenesisEpochWithMembers: vi.fn(),
 				generateKeyPackage: vi.fn(),
 				encodeKeyPackage: vi.fn(),
 				decodeKeyPackage: vi.fn(),
 				encodeCommit: vi.fn(),
 				encodeWelcome: vi.fn(),
 				decodeWelcome: vi.fn(),
-				addMember: vi.fn(),
 				addMultipleMembers: vi.fn(),
 				removeMember: vi.fn(),
 				joinFromWelcome: vi.fn(),
@@ -521,10 +511,6 @@ describe("E2EEHandshakeController", () => {
 			reconfigurationEntered.resolve();
 			return releaseReconfiguration.promise;
 		});
-		Reflect.set(Reflect.get(controller, "sfuManager").value, "mediaHandler", {
-			videoProducer: {},
-			audioProducer: null,
-		});
 		E2EEMeeting.instance.setMeetingContext(
 			new Uint8Array(32) as Uint8Array<ArrayBuffer>,
 			1,
@@ -558,10 +544,6 @@ describe("E2EEHandshakeController", () => {
 				},
 			});
 		reconfigureForE2EE.mockRejectedValue(abortError);
-		Reflect.set(Reflect.get(controller, "sfuManager").value, "mediaHandler", {
-			videoProducer: {},
-			audioProducer: null,
-		});
 		E2EEMeeting.instance.setMeetingContext(
 			new Uint8Array(32) as Uint8Array<ArrayBuffer>,
 			1,
@@ -592,10 +574,6 @@ describe("E2EEHandshakeController", () => {
 				},
 			});
 		reconfigureForE2EE.mockRejectedValue(failure);
-		Reflect.set(Reflect.get(controller, "sfuManager").value, "mediaHandler", {
-			videoProducer: {},
-			audioProducer: null,
-		});
 		E2EEMeeting.instance.setMeetingContext(
 			new Uint8Array(32) as Uint8Array<ArrayBuffer>,
 			1,
@@ -633,14 +611,12 @@ describe("E2EEHandshakeController", () => {
 			})),
 			epochProtocolProvider: {
 				createGenesisEpoch: vi.fn(),
-				createGenesisEpochWithMembers: vi.fn(),
 				generateKeyPackage: vi.fn(),
 				encodeKeyPackage: vi.fn(),
 				decodeKeyPackage: vi.fn(),
 				encodeCommit: vi.fn(),
 				encodeWelcome: vi.fn(),
 				decodeWelcome: vi.fn(),
-				addMember: vi.fn(),
 				addMultipleMembers: vi.fn(),
 				removeMember: vi.fn(),
 				joinFromWelcome: vi.fn(),

@@ -2,7 +2,7 @@
 import { computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useNow } from '@vueuse/core'
-import { createResource } from 'frappe-ui'
+import { useCall } from 'frappe-ui'
 
 import { userStore as useCalendarUserStore } from '@/apps/calendar/stores/user'
 import dayjs from '@/apps/calendar/utils/dayjs'
@@ -73,10 +73,10 @@ const now = useNow({ interval: 30_000 })
 
 const timezone = () => dayjs.tz?.guess?.() || Intl.DateTimeFormat().resolvedOptions().timeZone
 
-const upcomingEvents = createResource({
-	url: 'suite.calendar.api.get_calendar_events',
-	cache: 'UpcomingMeetings',
-	makeParams: () => ({
+const upcomingEvents = useCall({
+	url: '/api/v2/method/suite.calendar.api.get_calendar_events',
+	immediate: false,
+	params: () => ({
 		account: calendarStore.accountId,
 		from_date: dayjs().startOf('day').format('YYYY-MM-DD[T]HH:mm:ss'),
 		to_date: dayjs().endOf('day').format('YYYY-MM-DD[T]HH:mm:ss'),
@@ -187,29 +187,29 @@ defineExpose({ reload })
 <template>
 	<div v-if="meetings.length" class="mt-10">
 		<h2 class="mb-3 text-base-medium text-ink-gray-8">Upcoming meetings</h2>
-		<div class="overflow-hidden rounded-xl border border-outline-gray-1 bg-surface-gray-1">
+		<div class="overflow-hidden rounded-7 border border-outline-gray-1 bg-surface-gray-1">
 			<button
 				v-for="(event, index) in meetings"
 				:key="event.id"
 				type="button"
-				class="flex min-h-[66px] w-full items-center gap-8 border-outline-gray-1 px-2.5 py-2.5 text-left transition-colors first:rounded-t-xl last:rounded-b-xl hover:bg-surface-gray-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ink-gray-4"
+				class="flex min-h-[66px] w-full items-center gap-8 border-outline-gray-1 px-2.5 py-2.5 text-left transition-colors first:rounded-t-7 last:rounded-b-7 hover:bg-surface-gray-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ink-gray-4"
 				:class="index !== meetings.length - 1 ? 'border-b' : ''"
 				@click="joinMeeting(event)"
 			>
 				<div class="flex min-w-0 flex-1 items-center gap-2.5">
 					<div
-						class="flex w-11 shrink-0 items-center justify-center rounded-lg border border-outline-gray-1 bg-surface-base p-1"
+						class="flex w-11 shrink-0 items-center justify-center rounded-6 border border-outline-gray-1 bg-surface-base p-1"
 					>
 						<div
 							class="flex h-[38px] min-w-0 flex-1 flex-col items-center justify-center gap-0.5 text-center"
 						>
 							<div
-								class="w-full text-[11px] font-medium uppercase leading-[1.15] tracking-[0.99px] text-ink-red-5"
+								class="w-full text-xs font-medium uppercase text-ink-red-5"
 							>
 								{{ formatMeetingMonth(event) }}
 							</div>
 							<div
-								class="w-full text-lg font-medium leading-[1.15] tracking-[0.18px] text-ink-gray-7"
+								class="w-full text-md font-medium text-ink-gray-7"
 							>
 								{{ formatMeetingDay(event) }}
 							</div>
@@ -218,12 +218,12 @@ defineExpose({ reload })
 
 					<div class="min-w-0 flex-1">
 						<div
-							class="truncate text-sm-medium leading-[1.15] tracking-[0.21px] text-ink-gray-8"
+							class="truncate text-sm-medium text-ink-gray-8"
 						>
-							{{ event.title || 'Frappe Meet' }}
+							{{ event.title || 'Scheduled Meeting' }}
 						</div>
 						<div
-							class="mt-1.5 flex min-w-0 items-center gap-0.5 text-sm leading-[1.15] tracking-[0.28px] text-ink-gray-6"
+							class="mt-1.5 flex min-w-0 items-center gap-0.5 text-sm text-ink-gray-6"
 						>
 							<span class="shrink-0">{{ formatMeetingTime(event) }}</span>
 							<span v-if="eventParticipants(event).length" class="shrink-0">・</span>

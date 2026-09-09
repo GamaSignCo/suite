@@ -36,9 +36,9 @@
         <div>You have an invite to join this Drive.</div>
       </div>
     </Alert>
-    <Tabs v-model="tabIndex" :tabs>
+    <Tabs v-model="tab" :tabs>
       <template #tab-panel="{ tab }">
-        <template v-if="tab.label === 'Members'">
+        <template v-if="tab.value === 'members'">
           <div class="flex flex-col overflow-y-auto divide-y divide-outline-elevation-2">
             <div
               v-for="user in siteUsers?.data"
@@ -83,7 +83,7 @@
                     "
                   >
                     <Badge
-                      :theme="pending.status === 'Pending' ? 'gray' : 'orange'"
+                      :theme="pending.status === 'Pending' ? 'gray' : 'amber'"
                       variant="subtle"
                       class="my-auto mr-2"
                       size="sm"
@@ -108,7 +108,7 @@
 
     <Dialog v-model:open="showInvite" :title="__('Invite people to Drive')" size="lg">
       <div class="flex items-start justify-start gap-4">
-        <div class="flex flex-wrap gap-1 rounded w-full bg-surface-gray-2 p-2">
+        <div class="flex flex-wrap gap-1 rounded-4 w-full bg-surface-gray-2 p-2">
           <Button
             v-for="(email, idx) in invited"
             :key="email"
@@ -126,7 +126,7 @@
               type="text"
               autocomplete="off"
               placeholder="Enter email address"
-              class="h-7 w-full rounded border-none bg-surface-gray-2 py-1.5 pl-2 pr-2 text-base text-ink-gray-8 placeholder-ink-gray-4 transition-colors focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0"
+              class="h-7 w-full rounded-4 border-none bg-surface-gray-2 py-1.5 pl-2 pr-2 text-base text-ink-gray-8 placeholder-ink-gray-4 transition-colors focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0"
               @keydown="isValidEmail"
               @keydown.enter.capture.stop="extractEmails"
               @keydown.space.prevent.stop="extractEmails"
@@ -183,7 +183,7 @@ import Alert from '@/apps/drive/components/Alert.vue'
 import UserTooltip from '@/apps/drive/components/UserTooltip.vue'
 
 const currentUserId = computed(() => useSessionStore().user)
-const tabIndex = ref(0)
+const tab = ref('members')
 
 siteUsers.fetch()
 const invites = createResource({
@@ -200,17 +200,20 @@ const invited = ref([])
 const emailInput = ref('')
 const showInvite = ref(false)
 
+// iconLeft, not icon: `icon` makes an icon-only trigger and drops the label.
 const tabs = computed(() => [
   {
+    value: 'members',
     label: 'Members',
-    icon: h(LucideUsers, { class: 'size-4' }),
+    iconLeft: h(LucideUsers, { class: 'size-4' }),
   },
   // Invite management is admin-only.
   ...(isAdmin.data?.is_admin
     ? [
         {
+          value: 'invites',
           label: 'Invites',
-          icon: h(LucideMail, { class: 'size-4' }),
+          iconLeft: h(LucideMail, { class: 'size-4' }),
         },
       ]
     : []),

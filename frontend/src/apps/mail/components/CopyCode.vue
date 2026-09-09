@@ -1,8 +1,8 @@
 <template>
-	<div class="bg-surface-gray-1 flex justify-between rounded p-3">
+	<div class="bg-surface-gray-1 flex justify-between rounded-4 p-3">
 		<pre class="text-wrap p-1 text-base">{{ code }}</pre>
 		<Button
-			icon="copy"
+			icon="lucide-copy"
 			size="sm"
 			variant="ghost"
 			class="shrink-0"

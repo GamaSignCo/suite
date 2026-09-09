@@ -10,7 +10,7 @@
 						:class="cellBorders(index, group.items.length)"
 					>
 						<div class="flex min-w-0 items-center gap-3">
-							<div class="bg-surface-gray-2 text-ink-gray-7 flex size-7 shrink-0 items-center justify-center rounded">
+							<div class="bg-surface-gray-2 text-ink-gray-7 flex size-7 shrink-0 items-center justify-center rounded-4">
 								<FeatherIcon :name="actionIcon(action, group.label)" class="size-4" />
 							</div>
 							<div class="min-w-0">
@@ -35,12 +35,14 @@
 		</div>
 		<DashboardListSkeleton v-else :columns="2" />
 	</DashboardLayout>
-	<Dialog v-model="showConfirm" :options="confirmOptions" />
+	<Dialog v-model:open="showConfirm" v-bind="confirmOptions" />
 	<RunActionModal v-model="showRun" :action="activeAction" :fields="activeFields" />
 </template>
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { Button, Dialog, FeatherIcon, Tooltip, createResource, usePageMeta } from 'frappe-ui'
+import { appPageMeta } from '@/utils/documentTitle'
+import { Button, Dialog, Tooltip, createResource, usePageMeta } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
 
 import { getSessionUser } from '@/boot/session'
 
@@ -67,7 +69,7 @@ type ActionField = {
 	options?: ActionOption[]
 }
 
-usePageMeta(() => ({ title: __('Actions') }))
+usePageMeta(() => appPageMeta(__('Actions'), 'Mail'))
 
 // Input fields for the parameterized actions (parameterless actions run directly).
 const ACTION_FIELDS: Record<string, ActionField[]> = {
@@ -96,16 +98,16 @@ const ACTION_FIELDS: Record<string, ActionField[]> = {
 
 // Icon per action, falling back to the section's icon for any action the server adds later.
 const ACTION_ICONS: Record<string, string> = {
-	ReloadSettings: 'sliders',
+	ReloadSettings: 'sliders-horizontal',
 	ReloadTlsCertificates: 'shield',
 	ReloadLookupStores: 'database',
 	ReloadBlockedIps: 'shield-off',
-	UpdateApps: 'download-cloud',
-	TroubleshootDmarc: 'tool',
-	ClassifySpam: 'filter',
+	UpdateApps: 'cloud-download',
+	TroubleshootDmarc: 'wrench',
+	ClassifySpam: 'funnel',
 	InvalidateCaches: 'trash-2',
 	InvalidateNegativeCaches: 'trash',
-	PauseMtaQueue: 'pause-circle',
+	PauseMtaQueue: 'circle-pause',
 	ResumeMtaQueue: 'play-circle',
 }
 const SECTION_ICONS: Record<string, string> = {
@@ -113,7 +115,7 @@ const SECTION_ICONS: Record<string, string> = {
 	Cache: 'trash-2',
 	MTA: 'send',
 	DMARC: 'shield',
-	'Spam Filter': 'filter',
+	'Spam Filter': 'funnel',
 	'Application Management': 'package',
 }
 const FALLBACK_ICON = 'zap'

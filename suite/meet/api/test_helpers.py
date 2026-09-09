@@ -35,11 +35,6 @@ def provision_host() -> dict[str, str]:
 
 
 @whitelist_for_tests()
-def clear_create_rate_limit() -> None:
-    """Clear rate-limit buckets shared by meeting E2E browser contexts."""
-    keys = frappe.cache.get_keys("rl:suite.meet.api.meeting.join_meeting_as_guest:*")
-    keys += frappe.cache.get_keys("rl:suite.meet.api.meeting.create:*")
-    keys += frappe.cache.get_keys("rl:suite.meet.api.meeting.get_public_meeting_preview:*")
-    keys += frappe.cache.get_keys("rl:suite.meet.api.meeting.check_meeting_access:*")
-    for key in keys:
-        frappe.cache.set(key, 0)  # nosemgrep
+def clear_rate_limits() -> None:
+    """Clear Meet API rate-limit buckets shared by E2E browser contexts."""
+    frappe.cache.delete_keys("rl:suite.meet.api.meeting.*")

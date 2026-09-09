@@ -8,6 +8,22 @@ PRIVILEGED_FIELDS = ("quota", "user_folder")
 
 
 class DriveSettings(Document):
+    # begin: auto-generated types
+    # This code is auto-generated. Do not modify anything in this block.
+
+    from typing import TYPE_CHECKING
+
+    if TYPE_CHECKING:
+        from frappe.types import DF
+
+        auto_detect_links: DF.Check
+        quota: DF.Int
+        user: DF.Link | None
+        user_folder: DF.Link | None
+        webdav_enabled: DF.Check
+        writer_settings: DF.JSON | None
+    # end: auto-generated types
+
     def validate(self):
         if self.flags.ignore_permissions or frappe.session.user == "Administrator":
             return

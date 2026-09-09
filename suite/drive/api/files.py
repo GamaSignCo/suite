@@ -22,6 +22,7 @@ from suite.drive.utils import (
     ATTACHMENT_CONTENT_DOCTYPE,
     STATUS_ACTIVE,
     STATUS_TRASHED,
+    apply_file_size_delta,
     create_drive_file,
     get_file_type,
     get_new_file_name,
@@ -684,45 +685,43 @@ def remove_or_restore(entity_names: list[str] | str):
     manager = FileManager()
     locked_owners = set()
 
-    def depth_zero_toggle_status(doc):
-        if not user_has_permission(doc, "write"):
-            raise frappe.PermissionError("You do not have permission to remove this file")
-        if doc.owner not in locked_owners:
-            acquire_owner_storage_lock(doc.owner)
-            locked_owners.add(doc.owner)
-        if doc.status == STATUS_ACTIVE:
-            flag = STATUS_TRASHED
-            manager.move_to_trash(doc)
-        else:
-            validate_quota(doc.owner, doc.file_size)
-            # A trashed name is free — get_new_file_name only counts Active siblings —
-            # so something may have taken it. Restoring onto it would overwrite the
-            # newcomer's blob, or, for a folder, land inside it.
-            available = get_new_file_name(doc.file_name, doc.folder, doc.file_type, doc.name)
-            if available != doc.file_name:
-                doc.flags.drive_disk_rename = True
-                doc.file_name = available
-                if not manager.flat and not doc._not_in_disk():
-                    doc.file_url = str(manager.get_disk_path(doc)) + ("/" if doc.is_folder else "")
-            manager.restore(doc)
-            flag = STATUS_ACTIVE
-
-        doc.status = flag
-        doc.file_modified = frappe.utils.now_datetime()
-        # Only update parent folder size if parent exists (not root level)
-        if doc.folder:
-            folder_size = frappe.db.get_value("File", doc.folder, "file_size") or 0
-            frappe.db.set_value(
-                "File",
-                doc.folder,
-                "file_size",
-                folder_size + doc.file_size * (1 if flag == STATUS_ACTIVE else -1),
-            )
-
-        doc.save()
-
     for entity in entity_names:
-        depth_zero_toggle_status(frappe.get_doc("File", entity))
+        toggle_entity_status(frappe.get_doc("File", entity), manager, locked_owners)
+
+
+def toggle_entity_status(doc, manager: FileManager, locked_owners: set):
+    """Trash an Active entity, or restore a Trashed one. Shared by
+    remove_or_restore and WebDAV DELETE."""
+    # row lock before the disk transfer — same discipline as File.move()
+    frappe.db.get_value("File", doc.name, "name", for_update=True)
+    if not user_has_permission(doc, "write"):
+        raise frappe.PermissionError("You do not have permission to remove this file")
+    if doc.owner not in locked_owners:
+        acquire_owner_storage_lock(doc.owner)
+        locked_owners.add(doc.owner)
+    if doc.status == STATUS_ACTIVE:
+        flag = STATUS_TRASHED
+        manager.move_to_trash(doc)
+    else:
+        validate_quota(doc.owner, doc.file_size)
+        # A trashed name is free — get_new_file_name only counts Active siblings —
+        # so something may have taken it. Restoring onto it would overwrite the
+        # newcomer's blob, or, for a folder, land inside it.
+        available = get_new_file_name(doc.file_name, doc.folder, doc.file_type, doc.name)
+        if available != doc.file_name:
+            doc.flags.drive_disk_rename = True
+            doc.file_name = available
+            if not manager.flat and not doc._not_in_disk():
+                doc.file_url = str(manager.get_disk_path(doc)) + ("/" if doc.is_folder else "")
+        manager.restore(doc)
+        flag = STATUS_ACTIVE
+
+    doc.status = flag
+    doc.file_modified = frappe.utils.now_datetime()
+    if doc.folder and doc.file_size:
+        apply_file_size_delta(doc.folder, doc.file_size * (1 if flag == STATUS_ACTIVE else -1))
+
+    doc.save()
 
 
 @frappe.whitelist()

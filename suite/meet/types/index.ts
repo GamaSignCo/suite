@@ -4,9 +4,96 @@ export interface RecordingJoinRequest {
 	roomId: string;
 }
 
+export interface RecordingProofChallenge {
+	protocol_version: 1;
+	jti: string;
+	socket_id: string;
+	nonce: string;
+	issued_at: number;
+	expires_at: number;
+}
+
 export interface RecordingProofRequest {
+	protocol_version: 1;
 	signature: string;
 }
+
+export interface RecorderStageParticipant {
+	participant_id: string;
+	name: string;
+	avatar?: string;
+	audio_enabled: boolean;
+	video_enabled: boolean;
+}
+
+export interface RecorderStageProducer {
+	producer_id: string;
+	participant_id: string;
+	kind: 'audio' | 'video';
+	paused: boolean;
+	is_screen: boolean;
+	observed_at: string;
+}
+
+export interface RecorderStageSnapshot {
+	protocol_version: 1;
+	room_id: string;
+	cursor: number;
+	observed_at: string;
+	participants: RecorderStageParticipant[];
+	producers: RecorderStageProducer[];
+	raised_hands: Record<string, string>;
+	active_speaker_ids: string[];
+}
+
+export type RecorderStageProjectionPayload =
+	| { type: 'participant_joined'; participant: RecorderStageParticipant }
+	| { type: 'participant_updated'; participant: RecorderStageParticipant }
+	| { type: 'participant_left'; participant_id: string }
+	| { type: 'producer_created'; producer: RecorderStageProducer }
+	| { type: 'producer_updated'; producer_id: string; paused: boolean }
+	| {
+			type: 'producer_closed';
+			producer_id: string;
+			participant_id: string;
+			is_screen: boolean;
+	  }
+	| {
+			type: 'media_control';
+			participant_id: string;
+			action: MediaControlAction;
+	  }
+	| { type: 'active_speaker'; participant_ids: string[] }
+	| { type: 'hand_raised'; participant_id: string; raised: boolean }
+	| { type: 'reaction'; from_user: string; reaction: string }
+	| {
+			type: 'chat_message';
+			message_id: string;
+			message: string;
+			from_user: string;
+			from_name: string;
+	  };
+
+export interface RecorderStageProjectionEvent {
+	protocol_version: 1;
+	room_id: string;
+	cursor: number;
+	observed_at: string;
+	payload: RecorderStageProjectionPayload;
+}
+
+export type RecordingProjectionSnapshotResponse =
+	| { success: true; snapshot: RecorderStageSnapshot }
+	| { success: false; error: string };
+
+export type RecordingProofResponse =
+	| { protocol_version: 1; success: true }
+	| {
+			protocol_version: 1;
+			success: false;
+			reason_code: 'invalid_proof';
+			diagnostic?: string;
+	  };
 
 export interface UserData {
 	name: string;
@@ -46,6 +133,7 @@ export type MediaControlAction = 'mute' | 'unmute' | 'video_off' | 'video_on';
 export type HostControlAction =
 	| 'mute_participant'
 	| 'kick_participant'
+	| 'ban_participant'
 	| 'lower_hand';
 
 export type ProducerCloseReason =
@@ -181,6 +269,7 @@ export interface ScreenShareStartedEvent {
 
 export interface ScreenShareStoppedEvent {
 	participantId: string;
+	producerId: string;
 	timestamp: string;
 	reason?: string;
 }
@@ -287,32 +376,4 @@ export interface RaiseHandRequest {
 
 export interface LeaveRoomRequest {
 	roomId?: string;
-}
-
-export interface PresenceTokenResponse {
-	auth_token?: string;
-	sfu_url?: string;
-	sfu_port?: number;
-	error?: string;
-}
-
-export interface PresenceParticipant extends PreviewParticipantInfo {
-	user_id?: string;
-	info: PreviewParticipantInfo['info'] & {
-		userId?: string;
-		audio_enabled?: boolean;
-		video_enabled?: boolean;
-		is_guest?: boolean;
-	};
-}
-
-export interface PresenceParticipantsResponse {
-	success: boolean;
-	participants?: PresenceParticipant[];
-	error?: string;
-}
-
-export interface PresenceJoinResponse {
-	success: boolean;
-	error?: string;
 }

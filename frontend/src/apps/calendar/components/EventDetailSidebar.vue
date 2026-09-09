@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, inject, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import {
 	Bell,
 	Briefcase,
@@ -12,23 +13,33 @@ import {
 	Repeat,
 	SquarePen,
 	Text,
-	Trash2,
 	Users,
 	X,
 } from 'lucide-vue-next'
-import { Button, Dialog, Dropdown, TabButtons, createResource, toast } from 'frappe-ui'
+import { Badge, Button, Dialog, Dropdown, TabButtons, createResource, toast } from 'frappe-ui'
 import DOMPurify from 'dompurify'
 
 import meetLogo from '@/assets/app-logos/meet.png'
 
-import { getMeetUrl, getReorderedParticipants, isUrl } from '@/apps/calendar/utils'
+import {
+	getMeetUrl,
+	getReorderedParticipants,
+	isUrl,
+	participationStatusDisplay,
+} from '@/apps/calendar/utils'
 import { fromEventZone, inUserTimeZone } from '@/apps/calendar/utils/datetime'
+import { eventLastDay, isAllDayEvent } from '@/apps/calendar/utils/eventTime'
 import { getRepeatMessage } from '@/apps/calendar/utils/format'
+import { scopeOptions } from '@/apps/calendar/utils/recurringScope'
+import type { RecurringScope } from '@/apps/calendar/utils/recurringScope'
 import { userStore } from '@/apps/calendar/stores/user'
+import { useEventDelete } from '@/apps/calendar/composables/useEventDelete'
 import EventParticipantList from '@/apps/calendar/components/EventParticipantList.vue'
+import RecurringScopeModal from '@/apps/calendar/components/Modals/RecurringScopeModal.vue'
 import LinkifiedText from '@/components/LinkifiedText.vue'
 
 const { calendarEvent } = defineProps<{ calendarEvent: any }>()
+const router = useRouter()
 
 const emit = defineEmits(['close', 'edit', 'reloadEvents', 'emailParticipants'])
 
@@ -55,23 +66,81 @@ const RSVP_OPTIONS = [
 // event_response template when custom event invites are enabled.
 const rsvpEvent = createResource({
 	url: 'suite.calendar.api.rsvp_calendar_event',
-	makeParams: (response: string) => ({
+	makeParams: ({ response, scope }: { response: string; scope: RecurringScope }) => ({
 		account: store.accountId,
 		// master_id is only set on recurring events; fall back to the event's own id
 		id: calendarEvent.master_id || calendarEvent.id,
 		response: response.toLowerCase(),
+		// One occurrence answered on its own is an override on the series, addressed by this
+		// occurrence's recurrence id. The whole series is the same call without one.
+		recurrence_id: scope === 'instance' ? calendarEvent.recurrence_id : null,
 	}),
 	onSuccess: () => emit('reloadEvents'),
 })
 
-const handleSetResponse = (response: string) => {
-	if (!response || response === userResponse.value) return
-	toast.promise(rsvpEvent.submit(response), {
+// A recurring event asks the same question an edit or a delete asks — a standup you miss one
+// week is not a standup you have left. Only the series-wide answer reaches the server so far,
+// so the other is greyed out rather than absent. The tab buttons stay where they were until
+// the server confirms, so cancelling the question leaves the shown answer alone.
+const showRsvpScopeModal = ref(false)
+const pendingResponse = ref('')
+
+const submitResponse = (response: string, scope: RecurringScope) => {
+	showRsvpScopeModal.value = false
+	toast.promise(rsvpEvent.submit({ response, scope }), {
 		loading: __('Sending response...'),
 		success: __('Response sent.'),
 		error: __('Action failed. Please try again in some time.'),
 	})
 }
+
+const handleSetResponse = (response: string) => {
+	if (!response || response === userResponse.value) return
+	if (!calendarEvent.recurrence_id) return submitResponse(response, 'series')
+	pendingResponse.value = response
+	showRsvpScopeModal.value = true
+}
+
+// An event this account organizes is one whose series it can write an override on; an
+// invitation delivered from elsewhere is not, whoever else is on it.
+const isOwnEvent = computed(
+	() =>
+		!calendarEvent.organizer ||
+		(participantIdentities.data?.some(
+			(id) => id.email === calendarEvent.organizer.replace('mailto:', ''),
+		) ??
+			false),
+)
+
+const rsvpScopeModalProps = computed(() => ({
+	title: __('Respond to repeating event'),
+	// The answer about to be sent, drawn as the participant list draws it: the dialog is
+	// about this yes or this no, not about responding in general.
+	icon: {
+		name: participationStatusDisplay(pendingResponse.value).name,
+		theme: participationStatusDisplay(pendingResponse.value).theme,
+	},
+	// No "this and following": ending a series partway is the organizer's act, and an attendee
+	// answering an invitation is not editing the event at all.
+	//
+	// And no "this event only" on an event this account did not call. An invitation can arrive
+	// as a set of separate occurrences beside a copy that holds nothing but the answer, and
+	// answering one date of one of those is what makes it so: the server finds no series on the
+	// copy to hang the status on and gives it to the whole event, which then reads onto every
+	// occurrence. The copy only loses its rule at that moment, so nothing about the event before
+	// the answer tells the two apart — only whose event it is.
+	options: scopeOptions({
+		unavailable: isOwnEvent.value ? [] : ['instance'],
+	}).filter((option) => option.value !== 'following'),
+	confirmLabel: __('Send response'),
+	loading: rsvpEvent.loading,
+}))
+
+// An occurrence whose series has no readable rule left has nothing to say here,
+// and the row goes with the sentence rather than standing empty beside an icon.
+const repeatMessage = computed(() =>
+	calendarEvent.recurrence_id ? getRepeatMessage(calendarEvent.recurrence_rule) : '',
+)
 
 // --- Calendar (colour + account) ---
 
@@ -95,25 +164,25 @@ const calendarOwnerLabel = computed(
 // --- Date / time label ---
 
 const dateLabel = computed(() => {
-	// Full-day detection reads the stored wall clock (midnight in the event's own zone);
-	// timed events are then shown in the viewer's zone.
-	const rawStart = dayjs(calendarEvent.start)
-	const duration = dayjs.duration(calendarEvent.duration)
-	const isFullDay = duration.asHours() % 24 === 0 && rawStart.isSame(rawStart.startOf('day'))
-	const start = isFullDay ? rawStart : fromEventZone(calendarEvent.start, calendarEvent.time_zone)
-	const end = start.add(duration)
-	const isSameDay =
-		start.isSame(end, 'day') || (isFullDay && start.isSame(end.subtract(1, 'ms'), 'day'))
+	// Full-day events keep their own calendar date (the stored wall clock); timed events are
+	// shown in the viewer's zone.
+	const isFullDay = isAllDayEvent(calendarEvent)
+	const start = isFullDay
+		? dayjs(calendarEvent.start)
+		: fromEventZone(calendarEvent.start, calendarEvent.time_zone)
+	const end = start.add(dayjs.duration(calendarEvent.duration))
 
 	const currentYear = dayjs().year()
 	const showYear = start.year() !== currentYear || end.year() !== currentYear
 	const dateFormat = showYear ? 'ddd, D MMM YYYY' : 'ddd, D MMM'
 
 	if (isFullDay) {
-		if (isSameDay) return start.format(dateFormat)
-		return `${start.format(dateFormat)} - ${end.subtract(1, 'day').format(dateFormat)}`
+		const lastDay = eventLastDay(start, calendarEvent.duration, true)
+		if (!lastDay) return start.format(dateFormat)
+		return `${start.format(dateFormat)} - ${lastDay.format(dateFormat)}`
 	}
 
+	const isSameDay = start.isSame(end, 'day')
 	if (isSameDay)
 		return `${start.format('h:mm a')} - ${end.format('h:mm a')} · ${start.format(dateFormat)}`
 	return `${start.format(`${dateFormat}, h:mm a`)} - ${end.format(`${dateFormat}, h:mm a`)}`
@@ -255,7 +324,7 @@ const copyMeetLink = async () => {
 const joinMeet = () => {
 	if (!meetUrl.value) return
 	// Same-origin paths stay in-app; foreign links open in a new tab.
-	if (meetUrl.value.startsWith('/')) window.location.href = meetUrl.value
+	if (meetUrl.value.startsWith('/')) router.push(meetUrl.value)
 	else window.open(meetUrl.value, '_blank', 'noopener')
 }
 
@@ -276,133 +345,27 @@ const hasDetails = computed(
 
 // --- Actions dropdown (delete) ---
 
-const dropdownOptions = computed(() => {
-	const editOption = { label: __('Edit'), icon: SquarePen, onClick: () => emit('edit') }
-
-	if (calendarEvent.recurrence_id)
-		return [
-			editOption,
-			{
-				label: __('Delete'),
-				icon: Trash2,
-				submenu: [
-					{ label: __('This instance'), onClick: () => handleDeleteEventInstance() },
-					{
-						label: __('This and following instances'),
-						onClick: () => handleDeleteFollowingEventInstances(),
-					},
-					{ label: __('Entire series'), onClick: () => handleDeleteEvent() },
-				],
-			},
-		]
-	return [
-		editOption,
-		{ label: __('Delete'), icon: Trash2, onClick: () => handleDeleteEvent() },
-	]
-})
-
-// --- Server calls ---
-
-const editEvent = createResource({
-	url: 'suite.calendar.api.edit_calendar_event',
-	makeParams: ({ patch }) => ({
-		account: store.accountId,
-		// master_id is only set on recurring events; fall back to the event's own id
-		id: calendarEvent.master_id || calendarEvent.id,
-		...patch,
-		send_scheduling_messages: true,
-	}),
-	onSuccess: () => emit('reloadEvents'),
-})
-
-// When the organizer deletes an event with other participants, offer to email a cancellation
-// (mirrors the "Notify Participants" prompt shown when creating/editing an event).
-const isOrganizer = computed(
-	() =>
-		participantIdentities.data?.some(
-			(id) => id.email === (calendarEvent.organizer || '').replace('mailto:', ''),
-		) ?? false,
-)
-const hasParticipantsOtherThanUser = computed(
-	() =>
-		calendarEvent.participants?.some((p) => participantIdentities.data?.every((i) => i.email !== p.email)) ??
-		false,
-)
-
-const showNotifyModal = ref(false)
-const pendingDelete = ref<((sendEmail: boolean) => void) | null>(null)
-
-const confirmDelete = (submit: (sendEmail: boolean) => Promise<any>, recurring: boolean) => {
-	const run = (sendEmail: boolean) => {
-		showNotifyModal.value = false
-		toast.promise(submit(sendEmail), {
-			loading: recurring ? __('Deleting events...') : __('Deleting event...'),
-			success: recurring ? __('Events deleted.') : __('Event deleted.'),
-			error: __('Action failed. Please try again in some time.'),
-		})
-	}
-
-	if (isOrganizer.value && hasParticipantsOtherThanUser.value) {
-		pendingDelete.value = run
-		showNotifyModal.value = true
-	} else {
-		run(false)
-	}
-}
-
-const handleDeleteEventInstance = () =>
-	confirmDelete((sendEmail) => deleteEventInstance.submit({ sendEmail }), false)
-
-const handleDeleteFollowingEventInstances = () => {
-	const recurrenceRule = { ...calendarEvent.recurrence_rule }
-	recurrenceRule.until = `${calendarEvent.date}T00:00:00Z`
-	const patch = { recurrence_rule: JSON.stringify(recurrenceRule) }
-
-	toast.promise(
-		editEvent.submit({ patch }).then(() => emit('close')),
-		{
-			loading: __('Deleting events...'),
-			success: __('Events deleted.'),
-			error: __('Action failed. Please try again in some time.'),
-		},
-	)
-}
-
-const handleDeleteEvent = () =>
-	confirmDelete((sendEmail) => deleteEvent.submit({ sendEmail }), !!calendarEvent.recurrence_id)
-
-const deleteEventInstance = createResource({
-	url: 'suite.calendar.doctype.calendar_event.calendar_event.delete_calendar_event_instance',
-	makeParams: ({ sendEmail }: { sendEmail: boolean }) => ({
-		account: store.accountId,
-		master_id: calendarEvent.master_id,
-		recurrence_id: calendarEvent.recurrence_id,
-		send_scheduling_messages: sendEmail,
-	}),
-	onSuccess: () => {
+const {
+	deleteOption,
+	isDeleting,
+	showScopeModal: showDeleteScopeModal,
+	deleteScopeModalProps,
+	deleteScope,
+	showNotifyModal,
+	pendingDelete,
+	NOTIFY_DELETE_OPTIONS,
+} = useEventDelete(
+	() => calendarEvent,
+	() => {
 		emit('reloadEvents')
 		emit('close')
 	},
-})
+)
 
-const deleteEvent = createResource({
-	url: 'suite.calendar.doctype.calendar_event.calendar_event.delete_calendar_events',
-	makeParams: ({ sendEmail }: { sendEmail: boolean }) => ({
-		account: store.accountId,
-		ids: [calendarEvent.master_id || calendarEvent.id],
-		send_scheduling_messages: sendEmail,
-	}),
-	onSuccess: () => {
-		emit('reloadEvents')
-		emit('close')
-	},
-})
-
-const NOTIFY_DELETE_OPTIONS = {
-	title: __('Notify Participants'),
-	icon: { name: 'bell' },
-	message: __('Send a cancellation email to let attendees know this event was deleted?'),
-}
+const dropdownOptions = computed(() => [
+	{ label: __('Edit'), icon: SquarePen, onClick: () => emit('edit') },
+	deleteOption.value,
+])
 
 const openUrl = (location: string) => {
 	if (isUrl(location)) window.open(location, '_blank')
@@ -411,7 +374,7 @@ const openUrl = (location: string) => {
 
 <template>
 	<div
-		class="bg-surface-white flex h-full w-[352px] shrink-0 flex-col overflow-hidden border-l text-left"
+		class="bg-surface-base flex h-full w-[352px] shrink-0 flex-col overflow-hidden border-l text-left"
 	>
 		<!-- Header -->
 		<!-- h-12 matches the mail header bar's 48px, so when mail hosts this panel
@@ -431,7 +394,7 @@ const openUrl = (location: string) => {
 				<Dropdown :options="dropdownOptions">
 					<Button
 						variant="ghost"
-						:disabled="deleteEventInstance.loading || deleteEvent.loading"
+						:disabled="isDeleting"
 					>
 						<MoreHorizontal class="icon text-ink-gray-7" />
 					</Button>
@@ -461,11 +424,12 @@ const openUrl = (location: string) => {
 				     date keeps text-sm's default 1.15 line-height (14.95px), so
 				     -8 + 24 + 6 + 14.95 + 12 sums to 49 within a subpixel. -->
 				<div class="min-w-0 space-y-1.5">
-					<h3 class="text-ink-gray-8 break-words text-lg font-semibold leading-6">
+					<h3 class="text-ink-gray-8 break-words text-md font-semibold leading-6">
 						{{ calendarEvent.title || __('Untitled event') }}
 					</h3>
-					<div class="text-ink-gray-6 break-words text-sm">
-						{{ dateLabel }}
+					<div class="flex items-center gap-2 text-sm text-ink-gray-6">
+						<Badge v-if="calendarEvent.isDraft" theme="gray" :label="__('Draft')" />
+						<span class="break-words">{{ dateLabel }}</span>
 					</div>
 				</div>
 			</div>
@@ -477,14 +441,9 @@ const openUrl = (location: string) => {
 			     panel reads title / date / participants. -->
 			<div v-if="hasDetails" class="flex flex-col py-2">
 				<!-- Recurrence -->
-				<div
-					v-if="calendarEvent.recurrence_id"
-					class="flex items-center gap-2.5 px-4.5 py-2"
-				>
+				<div v-if="repeatMessage" class="flex items-center gap-2.5 px-4.5 py-2">
 					<Repeat class="icon text-ink-gray-5 size-4 shrink-0" />
-					<span class="text-ink-gray-7 min-w-0 break-words text-sm">
-						{{ getRepeatMessage(calendarEvent.recurrence_rule) }}
-					</span>
+					<span class="text-ink-gray-7 min-w-0 break-words text-sm">{{ repeatMessage }}</span>
 				</div>
 
 				<!-- Meet link -->
@@ -507,7 +466,7 @@ const openUrl = (location: string) => {
 					</div>
 					<div class="px-4.5 py-2">
 						<button
-							class="bg-surface-gray-2 hover:bg-surface-gray-3 text-ink-gray-7 flex w-full items-center justify-center gap-2 rounded py-1.5 text-sm"
+					class="bg-surface-gray-2 hover:bg-surface-gray-3 text-ink-gray-7 flex w-full items-center justify-center gap-2 rounded-4 py-1.5 text-sm"
 							@click="joinMeet"
 						>
 							{{ __('Join') }}
@@ -534,16 +493,24 @@ const openUrl = (location: string) => {
 					</span>
 				</div>
 
-				<!-- Alerts -->
+				<!-- Alerts. Every reminder is the same kind of thing, so the bell is
+				     drawn once and the rows below it keep the text column — the group
+				     reads as one list rather than as several details. -->
 				<div
-					v-for="(alert, i) in calendarEvent.alerts"
-					:key="i"
-					class="flex items-center gap-2.5 px-4.5 py-2"
+					v-if="calendarEvent.alerts?.length"
+					class="flex flex-col gap-1 px-4.5 py-2"
 				>
-					<Bell class="icon text-ink-gray-5 size-4 shrink-0" />
-					<span class="text-ink-gray-7 min-w-0 break-words text-sm">
-						{{ formatAlert(alert) }}
-					</span>
+					<div
+						v-for="(alert, i) in calendarEvent.alerts"
+						:key="i"
+						class="flex items-center gap-2.5"
+					>
+						<Bell v-if="i === 0" class="icon text-ink-gray-5 size-4 shrink-0" />
+						<span v-else class="size-4 shrink-0" />
+						<span class="text-ink-gray-7 min-w-0 break-words text-sm">
+							{{ formatAlert(alert) }}
+						</span>
+					</div>
 				</div>
 
 				<!-- Availability -->
@@ -634,7 +601,17 @@ const openUrl = (location: string) => {
 			/>
 		</div>
 
-		<Dialog v-model="showNotifyModal" :options="NOTIFY_DELETE_OPTIONS">
+		<RecurringScopeModal
+			v-model="showDeleteScopeModal"
+			v-bind="deleteScopeModalProps"
+			@confirm="deleteScope"
+		/>
+		<RecurringScopeModal
+			v-model="showRsvpScopeModal"
+			v-bind="rsvpScopeModalProps"
+			@confirm="(scope) => submitResponse(pendingResponse, scope)"
+		/>
+		<Dialog v-model:open="showNotifyModal" v-bind="NOTIFY_DELETE_OPTIONS">
 			<template #actions>
 				<div class="flex justify-end space-x-2">
 					<Button variant="outline" @click="pendingDelete?.(false)"> {{ __('Skip') }} </Button>

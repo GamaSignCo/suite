@@ -28,12 +28,12 @@
 			<!-- It stays outside a card: it's the screen's subject, not one more group. -->
 			<button
 				v-if="profileTab"
-				class="active:bg-surface-gray-1 flex w-full items-center gap-3.5 rounded-lg px-1 py-3.5"
+				class="active:bg-surface-gray-1 flex w-full items-center gap-3.5 rounded-6 px-1 py-3.5"
 				@click="openTab(profileTab)"
 			>
 				<Avatar :label="fullName" :image="user.data?.user_image" size="2xl" class="size-14" />
 				<div class="min-w-0 flex-1 text-left">
-					<div class="text-ink-gray-9 truncate text-lg !font-semibold">{{ fullName }}</div>
+					<div class="text-ink-gray-9 truncate text-md !font-semibold">{{ fullName }}</div>
 					<div class="text-ink-gray-5 mt-0.5 truncate text-sm">{{ loginId }}</div>
 				</div>
 				<ChevronRight class="text-ink-gray-4 h-4 w-4 shrink-0" />
@@ -85,11 +85,11 @@
 		<!-- In the sheet, logging out took two deliberate steps (open the sheet, tap the red
 		     row). Here it's whatever happens to be resting at the bottom of a scroll, so it asks. -->
 		<Dialog
-			v-model="showLogoutConfirm"
-			:options="{
+			v-model:open="showLogoutConfirm"
+		 v-bind="{
 				title: __('Log Out'),
 				message: __('Are you sure you want to log out?'),
-				icon: { name: 'alert-triangle', appearance: 'warning' },
+				icon: { name: 'lucide-alert-triangle', theme: 'amber' },
 				actions: [{ label: __('Log Out'), theme: 'red', onClick: logout.submit }],
 			}"
 		/>

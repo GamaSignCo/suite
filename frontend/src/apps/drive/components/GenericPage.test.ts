@@ -38,13 +38,12 @@ vi.mock('./ListDialogs.vue', () => ({ default: defineComponent(stub) }))
 vi.mock('./ErrorPage.vue', () => ({ default: defineComponent(stub) }))
 vi.mock('./DriveListSkeleton.vue', () => ({ default: defineComponent(stub) }))
 
-const frappeUI = vi.hoisted(() => ({ request: vi.fn() }))
+const frappeUI = vi.hoisted(() => ({ request: vi.fn(), scrollHost: null as null | { value: unknown } }))
 // The shell's scroll container, as a ref the tests can fill in *after* mount —
 // which is exactly the cold-mount ordering that used to break infinite scroll.
-const host = vi.hoisted(() => ({ el: null as null | { value: unknown } }))
 vi.mock('frappe-ui', () => ({
-  request: frappeUI.request,
-  useScrollContainer: () => ({ el: host.el }),
+  frappeRequest: frappeUI.request,
+  shellScrollContainer: (frappeUI.scrollHost = ref(null)),
 }))
 vi.mock('vue-router', () => ({
   useRoute: () => ({ name: 'drive-Recents', params: {} }),
@@ -136,7 +135,7 @@ const freshObjectGrouper = (rows: unknown[]) => ({
 
 describe('GenericPage grouped rows', () => {
   beforeEach(() => {
-    host.el = ref(null)
+    frappeUI.scrollHost!.value = null
     listView.renders = 0
     listView.received = []
     window.__ = (message: string) => message
@@ -226,7 +225,7 @@ const scrollTo = async (el: HTMLElement, top: number) => {
 
 describe('GenericPage pagination', () => {
   beforeEach(() => {
-    host.el = ref(null)
+    frappeUI.scrollHost!.value = null
     frappeUI.request.mockReset()
     frappeUI.request.mockResolvedValue({
       message: {
@@ -255,7 +254,7 @@ describe('GenericPage pagination', () => {
     // `page.length >= PAGE_SIZE` check read as end-of-list — permanently
     // freezing infinite scroll and stranding the rest of the folder.
     const el = makeHost()
-    host.el = ref(el)
+    frappeUI.scrollHost!.value = el
     const { app, getEntities } = mountPaginated({
       rows: [{ name: 'a', file_name: 'A' }, { name: 'b', file_name: 'B' }],
       has_next: true,
@@ -278,7 +277,7 @@ describe('GenericPage pagination', () => {
   })
 
   it('binds to a scroll container that only registers after mount', async () => {
-    // Regression. `useScrollContainer` is a module-level registry the app
+    // Regression. `shellScrollContainer` is a module-level ref the app
     // shell fills in, and on a cold mount it does so a tick after this component
     // sets up. Binding once at setup caught `null` and never re-armed, so the
     // list loaded page 1 and then never paginated however far you scrolled.
@@ -289,7 +288,7 @@ describe('GenericPage pagination', () => {
     await nextTick()
 
     const el = makeHost()
-    host.el.value = el // the shell registers, late
+    frappeUI.scrollHost!.value = el // the shell registers, late
     await nextTick()
 
     await scrollTo(el, 2300)
@@ -301,7 +300,7 @@ describe('GenericPage pagination', () => {
 
   it('does not page while still far from the bottom', async () => {
     const el = makeHost()
-    host.el = ref(el)
+    frappeUI.scrollHost!.value = el
     const { app } = mountPaginated({
       rows: [{ name: 'a', file_name: 'A' }],
       has_next: true,
@@ -316,7 +315,7 @@ describe('GenericPage pagination', () => {
 
   it('stops when the server reports no more rows', async () => {
     const el = makeHost()
-    host.el = ref(el)
+    frappeUI.scrollHost!.value = el
     const { app } = mountPaginated({
       rows: [{ name: 'a', file_name: 'A' }],
       has_next: false,
@@ -334,7 +333,7 @@ describe('GenericPage pagination', () => {
     // still awaiting. Appending the stale rows mixes two result sets and the
     // stale cursor overwrites the reset, skipping a page of the new query.
     const el = makeHost()
-    host.el = ref(el)
+    frappeUI.scrollHost!.value = el
     const { app, getEntities } = mountPaginated({
       rows: [{ name: 'a', file_name: 'A' }],
       has_next: true,
@@ -361,7 +360,7 @@ describe('GenericPage pagination', () => {
 
   it('discards a page that lands after unmount', async () => {
     const el = makeHost()
-    host.el = ref(el)
+    frappeUI.scrollHost!.value = el
     const { app, getEntities } = mountPaginated({
       rows: [{ name: 'a', file_name: 'A' }],
       has_next: true,
@@ -382,7 +381,7 @@ describe('GenericPage pagination', () => {
 
   it('keeps paging after a loaded page still leaves the viewport near the bottom', async () => {
     const el = makeHost({ scrollHeight: 3000, clientHeight: 800 })
-    host.el = ref(el)
+    frappeUI.scrollHost!.value = el
     const { app } = mountPaginated({
       rows: [{ name: 'a', file_name: 'A' }],
       has_next: true,
@@ -410,7 +409,7 @@ describe('GenericPage pagination', () => {
     // No scroll event can ever follow a page that does not overflow its
     // container, so the fill has to be driven from the data arriving.
     const el = makeHost({ scrollHeight: 700, clientHeight: 800 })
-    host.el = ref(el)
+    frappeUI.scrollHost!.value = el
     const { app } = mountPaginated({
       rows: [{ name: 'a', file_name: 'A' }],
       has_next: true,

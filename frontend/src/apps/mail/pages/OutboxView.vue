@@ -67,7 +67,7 @@
 												<Mail class="text-ink-gray-5 h-4 w-4" />
 											</template>
 										</Button>
-										<AdaptiveDropdown :options="rowOptions(row)" placement="bottom-end">
+										<AdaptiveDropdown :options="rowOptions(row)" align="end">
 											<Button variant="ghost" @click.stop.prevent>
 												<template #icon>
 													<EllipsisVertical class="text-ink-gray-5 h-4 w-4" />
@@ -99,14 +99,15 @@
 			:initial-value="selected?.send_at"
 			@confirm="(sendAt: string) => rescheduleMail.submit({ send_at: sendAt })"
 		/>
-		<Dialog v-model="showSendNow" :options="sendNowOptions" />
-		<Dialog v-model="showRetry" :options="retryOptions" />
-		<Dialog v-model="showCancel" :options="cancelOptions" />
+		<Dialog v-model:open="showSendNow" v-bind="sendNowOptions" />
+		<Dialog v-model:open="showRetry" v-bind="retryOptions" />
+		<Dialog v-model:open="showCancel" v-bind="cancelOptions" />
 	</div>
 </template>
 
 <script setup lang="ts">
 import { computed, inject, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { useRouter } from 'vue-router'
 import { useDebounceFn, watchDebounced } from '@vueuse/core'
 import { EllipsisVertical, Mail } from 'lucide-vue-next'
@@ -115,16 +116,12 @@ import {
 	Breadcrumbs,
 	Button,
 	Dialog,
-	ListHeader,
-	ListRow,
-	ListRowItem,
-	ListRows,
-	ListView,
 	LoadingIndicator,
 	call,
 	createResource,
 	usePageMeta,
 } from 'frappe-ui'
+import { ListHeader, ListRow, ListRowItem, ListRows, ListView } from 'frappe-ui/experimental'
 
 import { raiseToast } from '@/apps/mail/utils'
 import { formatDateTime, fromNow, utcDayEnd, utcDayStart } from '@/apps/mail/utils/datetime'
@@ -148,7 +145,7 @@ import MobileTitleHeader from '@/apps/mail/components/mobile/MobileTitleHeader.v
 import OutboxFilters from '@/apps/mail/components/OutboxFilters.vue'
 import ScheduleSendModal from '@/apps/mail/components/Modals/ScheduleSendModal.vue'
 
-usePageMeta(() => ({ title: __('Outbox') }))
+usePageMeta(() => appPageMeta(__('Outbox'), 'Mail'))
 
 const store = userStore()
 const router = useRouter()
@@ -517,7 +514,7 @@ const cancelOptions = computed(() => ({
 	message: selected.value?.email_deleted
 		? __('Cancel the scheduled delivery?')
 		: __('Cancel the scheduled delivery and move the message back to Drafts?'),
-	icon: { name: 'alert-triangle', appearance: 'warning' },
+	icon: { name: 'lucide-alert-triangle', theme: 'amber' },
 	actions: [
 		{
 			label: __('Confirm'),

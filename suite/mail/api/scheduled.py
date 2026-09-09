@@ -6,10 +6,10 @@
 The server's submissions are the source of truth: the listing browses all of them — held
 (FUTURERELEASE), in flight, and concluded — through EmailSubmission/query with the RFC 8621
 §7.3 filters (undoStatus, identity, email, thread, and a sendAt window), newest sends first.
-Emails submitted by other clients appear too, and nothing is reconciled into the Mail Queue —
-its rows are only a log of what this app submitted. Every action is keyed on the
-EmailSubmission id. Since undoStatus is a submission's only mutable property (RFC 8621 §7.5),
-reschedule and send-now cancel the held submission and create a replacement.
+Emails submitted by other clients appear too, and the Mail Queue is neither read nor written
+here — its rows only log what this app submitted, as it was submitted. Every action is keyed
+on the EmailSubmission id. Since undoStatus is a submission's only mutable property
+(RFC 8621 §7.5), reschedule and send-now cancel the held submission and create a replacement.
 
 Where the delivery actually stands is computed per recipient from the submission's
 deliveryStatus — delivered (queued/yes/no/unknown), displayed (unknown/yes, a read receipt),
@@ -195,7 +195,6 @@ def reschedule_mail(account: str, id: str, send_at: str) -> dict:
     send_at = _validate_send_at(service, from_utc_z(send_at))
 
     created = _replace_submission(account, service, submission, hold_until=_hold_until(send_at))
-    _sync_queue_log(id, submission_id=created["id"], send_at=send_at)
 
     return {"id": created["id"], "send_at": to_utc_z(send_at)}
 
@@ -211,7 +210,6 @@ def send_scheduled_mail_now(account: str, id: str) -> dict:
     submission = _get_pending_submission(service, id)
 
     created = _replace_submission(account, service, submission, hold_until=None)
-    _sync_queue_log(id, submission_id=created["id"], submitted_at=now(), send_at=None)
 
     return {"id": created["id"], "thread_id": submission.get("threadId")}
 
@@ -234,8 +232,6 @@ def cancel_scheduled_mail(account: str, id: str) -> dict:
     # Already canceled (e.g. a retried undo whose move below failed): skip straight to the move.
 
     email_id = _move_email_to_drafts(account, submission.get("emailId"))
-    # The row stays Submitted — it did get submitted; cancelled_at records the undone hold.
-    _sync_queue_log(id, cancelled_at=now())
 
     return {"id": email_id}
 
@@ -283,7 +279,6 @@ def retry_failed_mail(account: str, id: str) -> dict:
         **_resubmit_args(account, submission), envelope_id=str(uuid7()), hold_until=None
     )
     service.destroy(id)
-    _sync_queue_log(id, submission_id=created["id"], submitted_at=now(), send_at=None)
 
     return {"id": created["id"]}
 
@@ -632,7 +627,6 @@ def _replace_submission(
         # message lands back in Drafts instead of sitting in Sent never sending.
         log_mail_error(_("Failed to resubmit scheduled email"), frappe.get_traceback(with_context=True))
         _move_email_to_drafts(account, args["email_id"])
-        _sync_queue_log(submission["id"], cancelled_at=now())
         frappe.throw(
             _(
                 "The email could not be resubmitted; its delivery was cancelled and the message "
@@ -700,11 +694,3 @@ def _move_email_to_drafts(account: str, email_id: str | None) -> str | None:
     )
 
     return email_id
-
-
-def _sync_queue_log(current_submission_id: str, **values) -> None:
-    """Best-effort mirror into the Mail Queue log for sends that originated here — submissions
-    created by other clients have no row. `values` may carry a replacement submission_id."""
-
-    if name := frappe.db.get_value("Mail Queue", {"submission_id": current_submission_id}):
-        frappe.db.set_value("Mail Queue", name, values)

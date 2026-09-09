@@ -15,7 +15,6 @@ async function main(): Promise<void> {
 	await mkdir(config.dataRoot, { recursive: true, mode: 0o700 });
 	const disk = new DiskGuard(config.dataRoot, config.minimumFreeBytes);
 	const store = new JobStore(config.ledgerPath);
-	await store.initialize();
 	let capture!: CaptureWorkerManager;
 	const renderer = new ChromiumRendererBridge({
 		executablePath: config.chromiumExecutable,
@@ -29,7 +28,6 @@ async function main(): Promise<void> {
 		configureTimeoutMs: config.rendererConfigureTimeoutMs,
 		workerEnvironment: (job) => capture.workerEnvironment(job),
 	});
-	await renderer.initialize();
 	capture = new CaptureWorkerManager(renderer, {
 		dataRoot: config.dataRoot,
 		segmentSeconds: config.segmentSeconds,
@@ -51,7 +49,32 @@ async function main(): Promise<void> {
 		store,
 		capture,
 		config.maxConcurrent,
-		(job) => callbacks.upload(job),
+		async (job) => {
+			try {
+				await callbacks.upload(job, async (phase, terminalResult) => {
+					await store.update((records) => {
+						const current = records[job.job];
+						if (!current) throw new Error('job disappeared');
+						const now = new Date().toISOString();
+						if (phase === 'started') current.finalization_started_at ??= now;
+						if (phase === 'cleanup_authorized') {
+							if (!terminalResult)
+								throw new Error('cleanup result is unavailable');
+							current.cleanup_authorized_at ??= now;
+							current.cleanup_result ??= terminalResult;
+						}
+						if (phase === 'local_deleted') current.local_deleted_at ??= now;
+					});
+				});
+			} catch (error) {
+				logger.error({
+					event: 'terminal_delivery_failed',
+					job: job.job,
+					reason: error instanceof Error ? error.message : 'callback_failed',
+				});
+				throw error;
+			}
+		},
 		async (job) => {
 			await callbacks.interrupted(job).catch((error: unknown) =>
 				logger.error({
@@ -70,8 +93,30 @@ async function main(): Promise<void> {
 			);
 		},
 		disk,
+		async (job) => {
+			try {
+				await callbacks.startup(job);
+			} catch (error) {
+				logger.error({
+					event: 'startup_callback_failed',
+					reason: error instanceof Error ? error.message : 'callback_failed',
+				});
+				throw error;
+			}
+		},
+		async (job) => {
+			try {
+				await callbacks.replacementReady(job);
+			} catch (error) {
+				logger.error({
+					event: 'replacement_ready_callback_failed',
+					reason: error instanceof Error ? error.message : 'callback_failed',
+				});
+				throw error;
+			}
+		},
+		(job, capturedBytes) => callbacks.segmentProgress(job, capturedBytes),
 	);
-	await jobs.initialize();
 	const auth = new AuthManager(
 		config.secret,
 		config.site,
@@ -88,6 +133,19 @@ async function main(): Promise<void> {
 	};
 	process.once('SIGINT', () => void shutdown());
 	process.once('SIGTERM', () => void shutdown());
+	try {
+		await store.initialize();
+		await renderer.initialize();
+		await jobs.initialize();
+	} catch (error) {
+		logger.error({
+			event: 'service_initialization_failed',
+			reason: error instanceof Error ? error.message : 'initialization_failed',
+		});
+		await new Promise((resolve) => setTimeout(resolve, 5_000));
+		await shutdown();
+		throw error;
+	}
 }
 
 main().catch((error: unknown) => {

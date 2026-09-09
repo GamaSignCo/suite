@@ -12,15 +12,15 @@
   own (the toolbar uses its glyph + underline button).
 -->
 <template>
-  <Popover :placement="placement">
-    <template #target="{ togglePopover, isOpen }">
-      <slot name="trigger" :toggle="togglePopover" :open="isOpen" :color="modelValue">
-        <button type="button" class="sn-cp-trigger" :class="{ open: isOpen }" :title="title" @click="togglePopover()">
+  <Popover bare side="bottom" align="start">
+    <template #trigger="{ toggle, open }">
+      <slot name="trigger" :toggle :open :color="modelValue">
+        <button type="button" class="sn-cp-trigger" :class="{ open }" :title="title">
           <span class="sn-cp-trigger-sw" :style="{ background: isHex(modelValue) ? modelValue : 'transparent' }" />
         </button>
       </slot>
     </template>
-    <template #body="{ close }">
+    <template #default="{ close }">
       <div class="sn-cp-pop">
         <div class="sn-cp-grid">
           <button v-for="c in COLORS" :key="c" type="button" class="sn-cp-sw"
@@ -50,7 +50,8 @@
 
 <script setup>
 import { ref, watch } from 'vue'
-import { Popover, FeatherIcon } from 'frappe-ui'
+import { Popover } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
 
 // Tailwind palette, one family per row (50→900), flattened in row order so the
 // grid reads as 9 columns × 8 families — same source palette Gameplan uses.
@@ -73,7 +74,6 @@ const props = defineProps({
   defaultValue: { type: String, default: '' },
   defaultLabel: { type: String, default: 'Default' },
   title:        { type: String, default: 'Colour' },
-  placement:    { type: String, default: 'bottom-start' },
   // The native picker needs a literal hex even when modelValue is unset.
   fallback:     { type: String, default: '#000000' },
 })

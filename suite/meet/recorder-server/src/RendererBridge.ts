@@ -10,7 +10,13 @@ import puppeteer, {
 	type HTTPRequest,
 	type Page,
 } from 'puppeteer-core';
-import type { CaptureArtifact, CaptureGap } from './captureTypes.js';
+import { validUtcTimestamp } from './AuthManager.js';
+import type {
+	CaptureArtifact,
+	CaptureGap,
+	CaptureInterruption,
+	CaptureRecovery,
+} from './captureTypes.js';
 import type { CommandClaims, PublicJwk } from './types.js';
 
 declare global {
@@ -21,34 +27,61 @@ declare global {
 
 export interface RendererBridge {
 	readonly productionReady: boolean;
-	reserve(command: CommandClaims): Promise<PublicJwk>;
-	deliverGrant(job: string, grant: string, acceptedAt: string): Promise<void>;
-	stop(job: string): Promise<void>;
+	reserve(command: CommandClaims, generation?: number): Promise<PublicJwk>;
+	deliverGrant(
+		job: string,
+		grant: string,
+		acceptedAt: string,
+		generation: number,
+	): Promise<void>;
+	prepareCapture(job: string, generation: number, epoch: number): Promise<void>;
+	captureStarted(
+		job: string,
+		generation: number,
+		epoch: number,
+		timestamp: string,
+	): Promise<void>;
+	cancelCapture(job: string, generation: number, epoch: number): Promise<void>;
+	stop(job: string, generation?: number, reason?: string): Promise<void>;
 	recoverStopping?(job: string): Promise<{
 		type: 'complete' | 'partial' | 'failed';
 		artifact?: CaptureArtifact;
 		gaps?: CaptureGap[];
+		capturedBytes?: number;
+		captureStartedAt?: string;
 	}>;
 	close?(): Promise<void>;
 	hasWorker(job: string): boolean;
 	onLifecycle(handler: (event: RendererLifecycleEvent) => Promise<void>): void;
+	onProgress?(
+		handler: (job: string, capturedBytes: number) => Promise<number>,
+	): void;
 }
 
 export type RendererLifecycleEvent = {
 	job: string;
+	generation: number;
 	type:
 		| 'configured'
 		| 'proof_complete'
 		| 'joined'
 		| 'capture_ready'
+		| 'replacement_ready'
 		| 'interrupted'
 		| 'room_empty'
 		| 'failed'
 		| 'complete'
 		| 'partial';
 	reason?: string;
+	occurredAt?: string;
 	artifact?: CaptureArtifact;
 	gaps?: CaptureGap[];
+	capturedBytes?: number;
+	interruption?: CaptureInterruption;
+	recovery?: CaptureRecovery;
+	publicJwk?: PublicJwk;
+	readyAt?: string;
+	interruptionId?: string;
 };
 
 export interface BrowserAdapter {
@@ -72,10 +105,35 @@ interface RendererJob {
 	browser: Browser;
 	page: Page;
 	command: CommandClaims;
+	generation: number;
 	grantHash?: string;
 	configurationAccepted?: Promise<void>;
 	resolveConfiguration?: () => void;
 	rejectConfiguration?: (error: Error) => void;
+	capture?: {
+		epoch: number;
+		prepared: Promise<void>;
+		preparedAccepted: boolean;
+		resolvePrepared: () => void;
+		rejectPrepared: (error: Error) => void;
+		started?: {
+			timestamp: string;
+			accepted: Promise<void>;
+			acceptedByRenderer: boolean;
+			resolve: () => void;
+			reject: (error: Error) => void;
+		};
+	};
+}
+
+interface PendingRenderer {
+	generation: number;
+	cancelled: boolean;
+	cancelledPromise: Promise<never>;
+	cancel: (error: Error) => void;
+	browser?: Browser;
+	settled: Promise<void>;
+	resolveSettled: () => void;
 }
 
 const browserAdapter: BrowserAdapter = {
@@ -85,6 +143,7 @@ const browserAdapter: BrowserAdapter = {
 function isPublicJwk(value: unknown): value is PublicJwk {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
 	return (
+		hasExactKeys(value, ['kty', 'crv', 'x', 'y']) &&
 		'kty' in value &&
 		value.kty === 'EC' &&
 		'crv' in value &&
@@ -98,8 +157,33 @@ function isPublicJwk(value: unknown): value is PublicJwk {
 	);
 }
 
+const RECORDER_PROTOCOL_VERSION = 1;
+const RENDERER_REASON_CODES = new Set([
+	'sfu_disconnected',
+	'media_attachment_failed',
+	'media_subscription_failed',
+	'receive_transport_failed',
+	'projection_invalid',
+	'configuration_failed',
+	'browser_disconnected',
+	'page_crashed',
+]);
+
+function hasExactKeys(
+	value: object,
+	required: string[],
+	optional: string[] = [],
+): boolean {
+	const keys = Object.keys(value);
+	return (
+		required.every((key) => keys.includes(key)) &&
+		keys.every((key) => required.includes(key) || optional.includes(key))
+	);
+}
+
 export class ChromiumRendererBridge implements RendererBridge {
 	private readonly jobs = new Map<string, RendererJob>();
+	private readonly reservations = new Map<string, PendingRenderer>();
 	private server: Server | undefined;
 	private rendererOrigin?: string;
 	private available = false;
@@ -163,10 +247,10 @@ export class ChromiumRendererBridge implements RendererBridge {
 		this.available = true;
 	}
 
-	async reserve(command: CommandClaims): Promise<PublicJwk> {
+	async reserve(command: CommandClaims, generation = 0): Promise<PublicJwk> {
 		if (!this.available || !this.rendererOrigin)
 			throw new Error('renderer bridge is unavailable');
-		if (this.jobs.has(command.job))
+		if (this.jobs.has(command.job) || this.reservations.has(command.job))
 			throw new Error('renderer job already exists');
 
 		const args = [
@@ -176,22 +260,64 @@ export class ChromiumRendererBridge implements RendererBridge {
 		];
 		if (this.options.noSandbox)
 			args.push('--no-sandbox', '--disable-setuid-sandbox');
-		const workerEnvironment = this.options.workerEnvironment?.(command.job);
-		const browser = await this.adapter.launch({
-			executablePath: this.options.executablePath,
-			headless: false,
-			...(workerEnvironment ? { env: workerEnvironment } : {}),
-			defaultViewport: null,
-			ignoreDefaultArgs: ['--enable-automation'],
-			args: [
-				...args,
-				'--kiosk',
-				'--window-position=0,0',
-				'--window-size=1920,1080',
-				'--force-device-scale-factor=1',
-			],
-		});
+		let resolveSettled!: () => void;
+		let rejectCancelled!: (error: Error) => void;
+		const pending: PendingRenderer = {
+			generation,
+			cancelled: false,
+			cancelledPromise: new Promise<never>((_, reject) => {
+				rejectCancelled = reject;
+			}),
+			cancel: (error) => {
+				if (pending.cancelled) return;
+				pending.cancelled = true;
+				rejectCancelled(error);
+			},
+			settled: new Promise<void>((resolve) => {
+				resolveSettled = resolve;
+			}),
+			resolveSettled: () => resolveSettled(),
+		};
+		this.reservations.set(command.job, pending);
+		let browser: Browser | undefined;
 		try {
+			const workerEnvironment = this.options.workerEnvironment?.(command.job);
+			const launching = this.adapter.launch({
+				executablePath: this.options.executablePath,
+				headless: false,
+				...(workerEnvironment ? { env: workerEnvironment } : {}),
+				defaultViewport: null,
+				ignoreDefaultArgs: ['--enable-automation'],
+				args: [
+					...args,
+					'--kiosk',
+					'--window-position=0,0',
+					'--window-size=1920,1080',
+					'--force-device-scale-factor=1',
+				],
+			});
+			void launching.then(
+				(lateBrowser) => {
+					if (pending.cancelled)
+						void lateBrowser.close().catch(() => undefined);
+				},
+				() => undefined,
+			);
+			let launchTimeout: NodeJS.Timeout | undefined;
+			browser = await Promise.race([
+				launching,
+				pending.cancelledPromise,
+				new Promise<never>((_, reject) => {
+					launchTimeout = setTimeout(() => {
+						const error = new Error('renderer launch timed out');
+						pending.cancel(error);
+						reject(error);
+					}, this.options.reserveTimeoutMs);
+				}),
+			]).finally(() => clearTimeout(launchTimeout));
+			pending.browser = browser;
+			if (pending.cancelled || !this.available)
+				throw new Error('renderer reservation was cancelled');
 			const page = await browser.newPage();
 			await page.setViewport({ width: 1920, height: 1080 });
 			await page.setRequestInterception(true);
@@ -227,7 +353,13 @@ export class ChromiumRendererBridge implements RendererBridge {
 			await page.exposeFunction(
 				'__suiteRecorderLifecycle',
 				(value: unknown) => {
-					this.receive(command.job, value, resolveReady, rejectReady);
+					this.receive(
+						command.job,
+						generation,
+						value,
+						resolveReady,
+						rejectReady,
+					);
 				},
 			);
 			await page.evaluateOnNewDocument(() => {
@@ -257,19 +389,31 @@ export class ChromiumRendererBridge implements RendererBridge {
 			const publicJwk = await readyWithinDeadline.finally(() =>
 				clearTimeout(timeout),
 			);
-			this.jobs.set(command.job, { browser, page, command });
+			if (pending.cancelled || !this.available)
+				throw new Error('renderer reservation was cancelled');
+			const renderer = { browser, page, command, generation };
+			this.jobs.set(command.job, renderer);
 			browser.on(
 				'disconnected',
-				() => void this.workerFailed(command.job, 'browser_disconnected'),
+				() =>
+					void this.workerFailed(
+						command.job,
+						generation,
+						'browser_disconnected',
+					),
 			);
 			page.on(
 				'error',
-				() => void this.workerFailed(command.job, 'page_crashed'),
+				() => void this.workerFailed(command.job, generation, 'page_crashed'),
 			);
 			return publicJwk;
 		} catch (error) {
-			await browser.close();
+			await browser?.close().catch(() => undefined);
 			throw error;
+		} finally {
+			if (this.reservations.get(command.job) === pending)
+				this.reservations.delete(command.job);
+			pending.resolveSettled();
 		}
 	}
 
@@ -277,9 +421,11 @@ export class ChromiumRendererBridge implements RendererBridge {
 		job: string,
 		grant: string,
 		acceptedAt: string,
+		generation = 0,
 	): Promise<void> {
 		const renderer = this.jobs.get(job);
-		if (!renderer) throw new Error('renderer job is unavailable');
+		if (!renderer || renderer.generation !== generation)
+			throw new Error('renderer generation is unavailable');
 		const hash = createHash('sha256').update(grant).digest('base64url');
 		if (renderer.grantHash) {
 			if (renderer.grantHash !== hash)
@@ -292,21 +438,22 @@ export class ChromiumRendererBridge implements RendererBridge {
 			renderer.resolveConfiguration = resolve;
 			renderer.rejectConfiguration = reject;
 		});
-		const config = {
-			job,
-			grant,
-			meetingId: renderer.command.room,
-			sfuOrigin: this.options.sfuOrigin,
-			frappeOrigin: renderer.command.origin,
-			socketPath: this.options.sfuSocketPath,
-			startedAt: Date.parse(acceptedAt),
+		const message = {
+			type: 'suite-recorder:configure' as const,
+			protocol_version: RECORDER_PROTOCOL_VERSION,
+			config: {
+				job,
+				grant,
+				meetingId: renderer.command.room,
+				sfuOrigin: this.options.sfuOrigin,
+				frappeOrigin: renderer.command.origin,
+				socketPath: this.options.sfuSocketPath,
+				acceptedAt,
+			},
 		};
 		await renderer.page.evaluate((value) => {
-			window.postMessage(
-				{ type: 'suite-recorder:configure', config: value },
-				window.location.origin,
-			);
-		}, config);
+			window.postMessage(value, window.location.origin);
+		}, message);
 		let timeout: NodeJS.Timeout | undefined;
 		try {
 			await Promise.race([
@@ -319,9 +466,10 @@ export class ChromiumRendererBridge implements RendererBridge {
 				}),
 			]).finally(() => clearTimeout(timeout));
 		} catch (error) {
-			await this.stop(job);
+			await this.stop(job, generation);
 			await this.lifecycleHandler({
 				job,
+				generation,
 				type: 'failed',
 				reason: 'configuration_failed',
 			});
@@ -329,17 +477,178 @@ export class ChromiumRendererBridge implements RendererBridge {
 		}
 	}
 
-	async stop(job: string): Promise<void> {
+	async prepareCapture(
+		job: string,
+		generation: number,
+		epoch: number,
+	): Promise<void> {
+		if (!Number.isSafeInteger(epoch) || epoch < 0)
+			throw new Error('invalid capture epoch');
 		const renderer = this.jobs.get(job);
-		if (!renderer) return;
-		this.jobs.delete(job);
-		renderer.rejectConfiguration?.(new Error('renderer stopped'));
-		await renderer.browser.close().catch(() => undefined);
+		if (!renderer || renderer.generation !== generation)
+			throw new Error('renderer generation is unavailable');
+		const current = renderer.capture;
+		if (current) {
+			if (epoch === current.epoch) return current.prepared;
+			if (epoch < current.epoch) throw new Error('stale capture epoch');
+			if (current.started && !current.started.acceptedByRenderer)
+				throw new Error('conflicting capture epoch');
+		}
+		let resolvePrepared!: () => void;
+		let rejectPrepared!: (error: Error) => void;
+		const prepared = new Promise<void>((resolve, reject) => {
+			resolvePrepared = resolve;
+			rejectPrepared = reject;
+		});
+		void prepared.catch(() => undefined);
+		renderer.capture = {
+			epoch,
+			prepared,
+			preparedAccepted: false,
+			resolvePrepared,
+			rejectPrepared,
+		};
+		try {
+			await renderer.page.evaluate(
+				(value) => window.postMessage(value, window.location.origin),
+				{
+					type: 'suite-recorder:prepare-capture',
+					protocol_version: RECORDER_PROTOCOL_VERSION,
+					job,
+					epoch,
+				},
+			);
+			await this.withConfigureTimeout(
+				prepared,
+				'renderer capture prepare timed out',
+			);
+		} catch (error) {
+			const failure =
+				error instanceof Error ? error : new Error('capture prepare failed');
+			rejectPrepared(failure);
+			if (
+				renderer.capture?.epoch === epoch &&
+				!renderer.capture.preparedAccepted
+			)
+				delete renderer.capture;
+			throw failure;
+		}
+	}
+
+	async captureStarted(
+		job: string,
+		generation: number,
+		epoch: number,
+		timestamp: string,
+	): Promise<void> {
+		if (!Number.isSafeInteger(epoch) || epoch < 0)
+			throw new Error('invalid capture epoch');
+		if (!validUtcTimestamp(timestamp))
+			throw new Error('invalid capture start timestamp');
+		const renderer = this.jobs.get(job);
+		if (!renderer || renderer.generation !== generation)
+			throw new Error('renderer generation is unavailable');
+		const capture = renderer.capture;
+		if (!capture || epoch < capture.epoch)
+			throw new Error('stale capture epoch');
+		if (epoch > capture.epoch || !capture.preparedAccepted)
+			throw new Error('conflicting capture epoch');
+		if (capture.started) {
+			if (capture.started.timestamp !== timestamp)
+				throw new Error('conflicting capture timestamp');
+			return capture.started.accepted;
+		}
+		let resolve!: () => void;
+		let reject!: (error: Error) => void;
+		const accepted = new Promise<void>((accept, fail) => {
+			resolve = accept;
+			reject = fail;
+		});
+		void accepted.catch(() => undefined);
+		capture.started = {
+			timestamp,
+			accepted,
+			acceptedByRenderer: false,
+			resolve,
+			reject,
+		};
+		try {
+			await renderer.page.evaluate(
+				(value) => window.postMessage(value, window.location.origin),
+				{
+					type: 'suite-recorder:capture-started',
+					protocol_version: RECORDER_PROTOCOL_VERSION,
+					job,
+					epoch,
+					capture_started_at: timestamp,
+				},
+			);
+			await this.withConfigureTimeout(
+				accepted,
+				'renderer capture start timed out',
+			);
+		} catch (error) {
+			const failure =
+				error instanceof Error ? error : new Error('capture start failed');
+			reject(failure);
+			if (
+				renderer.capture === capture &&
+				capture.started?.timestamp === timestamp &&
+				!capture.started.acceptedByRenderer
+			)
+				delete renderer.capture;
+			throw failure;
+		}
+	}
+
+	async cancelCapture(
+		job: string,
+		generation: number,
+		epoch: number,
+	): Promise<void> {
+		const renderer = this.jobs.get(job);
+		if (
+			!renderer ||
+			renderer.generation !== generation ||
+			renderer.capture?.epoch !== epoch
+		)
+			return;
+		const error = new Error('capture launch aborted');
+		renderer.capture.rejectPrepared(error);
+		renderer.capture.started?.reject(error);
+		delete renderer.capture;
+	}
+
+	async stop(job: string, generation?: number): Promise<void> {
+		const renderer = this.jobs.get(job);
+		if (
+			renderer &&
+			(generation === undefined || renderer.generation === generation)
+		) {
+			this.jobs.delete(job);
+			renderer.rejectConfiguration?.(new Error('renderer stopped'));
+			renderer.capture?.rejectPrepared(new Error('renderer stopped'));
+			renderer.capture?.started?.reject(new Error('renderer stopped'));
+			await renderer.browser.close().catch(() => undefined);
+		}
+		const pending = this.reservations.get(job);
+		if (
+			pending &&
+			(generation === undefined || pending.generation === generation)
+		) {
+			pending.cancel(new Error('renderer reservation was cancelled'));
+			await pending.browser?.close().catch(() => undefined);
+			await pending.settled;
+		}
 	}
 
 	async close(): Promise<void> {
 		this.available = false;
-		await Promise.all([...this.jobs.keys()].map((job) => this.stop(job)));
+		await Promise.all(
+			[...new Set([...this.jobs.keys(), ...this.reservations.keys()])].map(
+				(job) => this.stop(job),
+			),
+		);
 		if (!this.server) return;
 		await new Promise<void>((resolve, reject) =>
 			this.server?.close((error) => (error ? reject(error) : resolve())),
@@ -397,59 +706,279 @@ export class ChromiumRendererBridge implements RendererBridge {
 
 	private receive(
 		job: string,
+		generation: number,
 		value: unknown,
 		resolveReady: (jwk: PublicJwk) => void,
 		rejectReady: (error: Error) => void,
 	): void {
 		if (!value || typeof value !== 'object' || Array.isArray(value)) return;
 		if ('type' in value && value.type === 'suite-recorder:public-key-ready') {
-			if ('publicKey' in value && isPublicJwk(value.publicKey)) {
-				const { kty, crv, x, y } = value.publicKey;
-				resolveReady({ kty, crv, x, y });
-			} else rejectReady(new Error('renderer returned an invalid public JWK'));
+			const publicKey = parseRendererPublicKeyReady(value);
+			if (publicKey) resolveReady(publicKey);
+			else rejectReady(new Error('renderer returned an invalid public JWK'));
 			return;
 		}
-		if (!('job' in value) || value.job !== job || !('type' in value)) return;
+		if (
+			'type' in value &&
+			(value.type === 'suite-recorder:capture-prepared' ||
+				value.type === 'suite-recorder:capture-started-accepted')
+		) {
+			this.receiveCaptureAcknowledgement(job, generation, value);
+			return;
+		}
+		const lifecycle = parseRendererLifecycle(value);
+		if (!lifecycle || lifecycle.job !== job) return;
 		const renderer = this.jobs.get(job);
-		const type = rendererLifecycleType(value.type);
-		if (!type) return;
-		if (type === 'configured') renderer?.resolveConfiguration?.();
-		const reason =
-			'reason' in value && typeof value.reason === 'string'
-				? value.reason.slice(0, 256)
-				: undefined;
-		void this.lifecycleHandler({ job, type, ...(reason ? { reason } : {}) });
+		if (!renderer || renderer.generation !== generation) return;
+		if (lifecycle.type === 'configured') renderer.resolveConfiguration?.();
+		void this.lifecycleHandler({
+			job,
+			generation,
+			type: lifecycle.type,
+			occurredAt: lifecycle.occurredAt,
+			...(lifecycle.reasonCode ? { reason: lifecycle.reasonCode } : {}),
+		});
 	}
 
-	private async workerFailed(job: string, reason: string): Promise<void> {
+	private receiveCaptureAcknowledgement(
+		job: string,
+		generation: number,
+		value: object,
+	): void {
 		const renderer = this.jobs.get(job);
-		if (!renderer) return;
+		if (!renderer || renderer.generation !== generation) return;
+		const capture = renderer.capture;
+		if ('type' in value && value.type === 'suite-recorder:capture-prepared') {
+			const acknowledgement = parseCapturePrepared(value);
+			if (
+				acknowledgement?.job === job &&
+				capture &&
+				acknowledgement.epoch < capture.epoch
+			)
+				return;
+			if (
+				!acknowledgement ||
+				acknowledgement.job !== job ||
+				acknowledgement.epoch !== capture?.epoch
+			) {
+				capture?.rejectPrepared(
+					new Error('invalid capture prepared acknowledgement'),
+				);
+				return;
+			}
+			capture.preparedAccepted = true;
+			capture.resolvePrepared();
+			return;
+		}
+		const acknowledgement = parseCaptureStartedAccepted(value);
+		if (
+			acknowledgement?.job === job &&
+			capture &&
+			acknowledgement.epoch < capture.epoch
+		)
+			return;
+		if (
+			!acknowledgement ||
+			acknowledgement.job !== job ||
+			acknowledgement.epoch !== capture?.epoch ||
+			acknowledgement.captureStartedAt !== capture.started?.timestamp
+		) {
+			capture?.started?.reject(
+				new Error('invalid capture started acknowledgement'),
+			);
+			return;
+		}
+		capture.started.acceptedByRenderer = true;
+		capture.started.resolve();
+	}
+
+	private async withConfigureTimeout(
+		operation: Promise<void>,
+		message: string,
+	): Promise<void> {
+		let timeout: NodeJS.Timeout | undefined;
+		await Promise.race([
+			operation,
+			new Promise<never>((_, reject) => {
+				timeout = setTimeout(
+					() => reject(new Error(message)),
+					this.options.configureTimeoutMs,
+				);
+			}),
+		]).finally(() => clearTimeout(timeout));
+	}
+
+	private async workerFailed(
+		job: string,
+		generation: number,
+		reason: string,
+	): Promise<void> {
+		const renderer = this.jobs.get(job);
+		if (!renderer || renderer.generation !== generation) return;
 		renderer.rejectConfiguration?.(new Error(reason));
-		await this.lifecycleHandler({ job, type: 'failed', reason });
+		await this.lifecycleHandler({ job, generation, type: 'failed', reason });
 	}
 }
 
-function rendererLifecycleType(
-	value: unknown,
-): RendererLifecycleEvent['type'] | undefined {
-	switch (value) {
-		case 'suite-recorder:configuration-accepted':
-			return 'configured';
-		case 'suite-recorder:proof-complete':
-			return 'proof_complete';
-		case 'suite-recorder:join-complete':
-			return 'joined';
-		case 'suite-recorder:capture-ready':
-			return 'capture_ready';
-		case 'suite-recorder:interruption':
-			return 'interrupted';
-		case 'suite-recorder:room-empty':
-			return 'room_empty';
-		case 'suite-recorder:failure':
-			return 'failed';
-		default:
+export function parseRendererPublicKeyReady(value: object): PublicJwk | null {
+	if (
+		!hasExactKeys(value, [
+			'type',
+			'protocol_version',
+			'occurred_at',
+			'publicKey',
+		]) ||
+		!('type' in value) ||
+		value.type !== 'suite-recorder:public-key-ready' ||
+		!('protocol_version' in value) ||
+		value.protocol_version !== RECORDER_PROTOCOL_VERSION ||
+		!('occurred_at' in value) ||
+		!validUtcTimestamp(value.occurred_at) ||
+		!('publicKey' in value) ||
+		!isPublicJwk(value.publicKey)
+	)
+		return null;
+	const { kty, crv, x, y } = value.publicKey;
+	return { kty, crv, x, y };
+}
+
+export function parseRendererLifecycle(value: object):
+	| {
+			job: string;
+			type: RendererLifecycleEvent['type'];
+			occurredAt: string;
+			reasonCode?: string;
+	  }
+	| undefined {
+	if (
+		!('type' in value) ||
+		!('protocol_version' in value) ||
+		value.protocol_version !== RECORDER_PROTOCOL_VERSION ||
+		!('occurred_at' in value) ||
+		!validUtcTimestamp(value.occurred_at) ||
+		!('job' in value) ||
+		typeof value.job !== 'string' ||
+		!value.job
+	)
+		return undefined;
+	const types: Record<string, RendererLifecycleEvent['type']> = {
+		'suite-recorder:configuration-accepted': 'configured',
+		'suite-recorder:proof-complete': 'proof_complete',
+		'suite-recorder:join-complete': 'joined',
+		'suite-recorder:capture-ready': 'capture_ready',
+		'suite-recorder:room-empty': 'room_empty',
+	};
+	const lifecycleType =
+		typeof value.type === 'string' ? types[value.type] : undefined;
+	if (lifecycleType) {
+		if (
+			!hasExactKeys(value, ['type', 'protocol_version', 'occurred_at', 'job'])
+		)
 			return undefined;
+		return {
+			job: value.job,
+			type: lifecycleType,
+			occurredAt: value.occurred_at,
+		};
 	}
+	if (
+		value.type !== 'suite-recorder:interruption' &&
+		value.type !== 'suite-recorder:failure'
+	)
+		return undefined;
+	if (
+		!hasExactKeys(
+			value,
+			['type', 'protocol_version', 'occurred_at', 'job', 'reason_code'],
+			['diagnostic'],
+		) ||
+		!('reason_code' in value) ||
+		typeof value.reason_code !== 'string' ||
+		!RENDERER_REASON_CODES.has(value.reason_code) ||
+		('diagnostic' in value &&
+			(typeof value.diagnostic !== 'string' || value.diagnostic.length > 256))
+	)
+		return undefined;
+	return {
+		job: value.job,
+		occurredAt: value.occurred_at,
+		type:
+			value.type === 'suite-recorder:interruption' ? 'interrupted' : 'failed',
+		reasonCode: value.reason_code,
+	};
+}
+
+export function parseCapturePrepared(
+	value: object,
+): { job: string; epoch: number; occurredAt: string } | undefined {
+	if (
+		!hasExactKeys(value, [
+			'type',
+			'protocol_version',
+			'occurred_at',
+			'job',
+			'epoch',
+		]) ||
+		!('type' in value) ||
+		value.type !== 'suite-recorder:capture-prepared' ||
+		!('protocol_version' in value) ||
+		value.protocol_version !== RECORDER_PROTOCOL_VERSION ||
+		!('occurred_at' in value) ||
+		!validUtcTimestamp(value.occurred_at) ||
+		!('job' in value) ||
+		typeof value.job !== 'string' ||
+		!value.job ||
+		!('epoch' in value) ||
+		!Number.isSafeInteger(value.epoch) ||
+		Number(value.epoch) < 0
+	)
+		return undefined;
+	return {
+		job: value.job,
+		epoch: value.epoch as number,
+		occurredAt: value.occurred_at,
+	};
+}
+
+export function parseCaptureStartedAccepted(value: object):
+	| {
+			job: string;
+			epoch: number;
+			occurredAt: string;
+			captureStartedAt: string;
+	  }
+	| undefined {
+	if (
+		!hasExactKeys(value, [
+			'type',
+			'protocol_version',
+			'occurred_at',
+			'job',
+			'epoch',
+			'capture_started_at',
+		]) ||
+		!('type' in value) ||
+		value.type !== 'suite-recorder:capture-started-accepted' ||
+		!('protocol_version' in value) ||
+		value.protocol_version !== RECORDER_PROTOCOL_VERSION ||
+		!('occurred_at' in value) ||
+		!validUtcTimestamp(value.occurred_at) ||
+		!('job' in value) ||
+		typeof value.job !== 'string' ||
+		!value.job ||
+		!('epoch' in value) ||
+		!Number.isSafeInteger(value.epoch) ||
+		Number(value.epoch) < 0 ||
+		!('capture_started_at' in value) ||
+		!validUtcTimestamp(value.capture_started_at)
+	)
+		return undefined;
+	return {
+		job: value.job,
+		epoch: value.epoch as number,
+		occurredAt: value.occurred_at,
+		captureStartedAt: value.capture_started_at,
+	};
 }
 
 export const TEST_PUBLIC_JWK: PublicJwk = {
@@ -460,11 +989,27 @@ export const TEST_PUBLIC_JWK: PublicJwk = {
 };
 
 export class FakeRendererBridge implements RendererBridge {
-	readonly productionReady = false;
-	readonly grants: Array<{ job: string; grant: string; acceptedAt: string }> =
-		[];
+	readonly productionReady = true;
+	readonly grants: Array<{
+		job: string;
+		grant: string;
+		acceptedAt: string;
+		generation: number;
+	}> = [];
 	readonly stopped = new Set<string>();
-	private readonly workers = new Set<string>();
+	readonly prepared: Array<{ job: string; generation: number; epoch: number }> =
+		[];
+	readonly captureStarts: Array<{
+		job: string;
+		generation: number;
+		epoch: number;
+		timestamp: string;
+	}> = [];
+	private readonly captures = new Map<
+		string,
+		{ generation: number; epoch: number; timestamp?: string }
+	>();
+	private readonly workers = new Map<string, number>();
 	private handler: (event: RendererLifecycleEvent) => Promise<void> =
 		async () => undefined;
 	hasWorker(job: string): boolean {
@@ -474,23 +1019,84 @@ export class FakeRendererBridge implements RendererBridge {
 		this.handler = handler;
 	}
 	async emit(event: RendererLifecycleEvent): Promise<void> {
-		await this.handler(event);
+		const current = this.workers.get(event.job);
+		const generation = event.generation ?? current ?? 0;
+		if (
+			current !== undefined &&
+			current !== generation &&
+			event.type !== 'replacement_ready'
+		)
+			return;
+		if (event.type === 'replacement_ready')
+			this.workers.set(event.job, generation);
+		await this.handler({ ...event, generation });
 	}
 
-	async reserve(command: CommandClaims): Promise<PublicJwk> {
-		this.workers.add(command.job);
+	async reserve(command: CommandClaims, generation = 0): Promise<PublicJwk> {
+		this.workers.set(command.job, generation);
 		return TEST_PUBLIC_JWK;
 	}
 	async deliverGrant(
 		job: string,
 		grant: string,
 		acceptedAt: string,
+		generation: number,
 	): Promise<void> {
-		this.grants.push({ job, grant, acceptedAt });
-		void this.handler({ job, type: 'configured' });
+		if (this.workers.get(job) !== generation)
+			throw new Error('renderer generation is unavailable');
+		this.grants.push({ job, grant, acceptedAt, generation });
+		void this.handler({ job, generation, type: 'configured' });
 	}
-	async stop(job: string): Promise<void> {
+	async prepareCapture(
+		job: string,
+		generation: number,
+		epoch: number,
+	): Promise<void> {
+		if (this.workers.get(job) !== generation)
+			throw new Error('renderer generation is unavailable');
+		const current = this.captures.get(job);
+		if (current) {
+			if (current.generation === generation && current.epoch === epoch) return;
+			if (current.generation === generation && epoch < current.epoch)
+				throw new Error('stale capture epoch');
+		}
+		this.captures.set(job, { generation, epoch });
+		this.prepared.push({ job, generation, epoch });
+	}
+	async captureStarted(
+		job: string,
+		generation: number,
+		epoch: number,
+		timestamp: string,
+	): Promise<void> {
+		const current = this.captures.get(job);
+		if (
+			this.workers.get(job) !== generation ||
+			current?.generation !== generation ||
+			current.epoch !== epoch
+		)
+			throw new Error('capture epoch is unavailable');
+		if (current.timestamp) {
+			if (current.timestamp === timestamp) return;
+			throw new Error('conflicting capture timestamp');
+		}
+		current.timestamp = timestamp;
+		this.captureStarts.push({ job, generation, epoch, timestamp });
+	}
+	async cancelCapture(
+		job: string,
+		generation: number,
+		epoch: number,
+	): Promise<void> {
+		const current = this.captures.get(job);
+		if (current?.generation === generation && current.epoch === epoch)
+			this.captures.delete(job);
+	}
+	async stop(job: string, generation?: number): Promise<void> {
+		if (generation !== undefined && this.workers.get(job) !== generation)
+			return;
 		this.stopped.add(job);
 		this.workers.delete(job);
+		this.captures.delete(job);
 	}
 }
