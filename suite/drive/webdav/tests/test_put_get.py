@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 
 import frappe
@@ -189,8 +190,6 @@ class TestWebDAVPut(IntegrationTestCase):
         response = self._put(f"/dav/Home/{self.base_name}/new.txt", body)
         self.assertEqual(response.status_code, 201)
 
-        import hashlib
-
         expected_hash = hashlib.sha256(body).hexdigest()
         self.assertEqual(response.headers["ETag"], f'"sha256-{expected_hash[:32]}"')
 
@@ -205,6 +204,26 @@ class TestWebDAVPut(IntegrationTestCase):
         self.assertEqual(manager.get_local_path(row.file_url).read_bytes(), body)
         # parent rollup grew
         self.assertEqual(frappe.db.get_value("File", self.base.name, "file_size"), len(body))
+
+    def test_put_create_runs_upload_hooks_after_blob_promotion(self):
+        from unittest.mock import patch
+
+        from suite.drive.webdav import put as put_module
+
+        body = b"hook sees these bytes"
+        observed = []
+
+        def observe(file_name, content_hash):
+            row = frappe.get_doc("File", file_name)
+            observed.append((FileManager().get_local_path(row.file_url).read_bytes(), content_hash))
+
+        with patch.object(put_module, "_run_after_upload_hooks", side_effect=observe) as hook:
+            response = self._put(f"/dav/Home/{self.base_name}/hooked.txt", body)
+            self.assertEqual(response.status_code, 201)
+            hook.assert_not_called()
+            frappe.db.commit()
+
+        self.assertEqual(observed, [(body, hashlib.sha256(body).hexdigest())])
 
     def test_put_rolls_size_up_the_ancestor_chain(self):
         with self.set_user(OWNER):
@@ -277,6 +296,29 @@ class TestWebDAVPut(IntegrationTestCase):
         self.assertTrue(
             frappe.db.exists("Drive Entity Activity Log", {"entity": target.name, "action_type": "edit"})
         )
+
+    def test_put_overwrite_runs_upload_hooks_after_blob_promotion(self):
+        from unittest.mock import patch
+
+        from suite.drive.webdav import put as put_module
+
+        with self.set_user(OWNER):
+            target = write_file_fixture(self.base.name, "hooked.txt", b"before")
+        body = b"after"
+        observed = []
+
+        def observe(file_name, content_hash):
+            row = frappe.get_doc("File", file_name)
+            observed.append((FileManager().get_local_path(row.file_url).read_bytes(), content_hash))
+
+        with patch.object(put_module, "_run_after_upload_hooks", side_effect=observe) as hook:
+            response = self._put(f"/dav/Home/{self.base_name}/hooked.txt", body)
+            self.assertEqual(response.status_code, 204)
+            hook.assert_not_called()
+            frappe.db.commit()
+
+        self.assertEqual(target.name, self._resolve(f"Home/{self.base_name}/hooked.txt").entity.name)
+        self.assertEqual(observed, [(body, hashlib.sha256(body).hexdigest())])
 
     def test_put_succeeds_when_thumbnail_fails(self):
         # thumbnails are cosmetic: once the bytes and metadata are committed
@@ -1033,6 +1075,8 @@ class TestWebDAVPut(IntegrationTestCase):
         # bounded wait must fall through and let the overwrite recreate it
         from unittest.mock import patch
 
+        from suite.drive.webdav import put as put_module
+
         with self.set_user(OWNER):
             target = write_file_fixture(self.base.name, "doc.txt", b"version-one")
         blob_path = FileManager().get_local_path(target.file_url)
@@ -1042,7 +1086,11 @@ class TestWebDAVPut(IntegrationTestCase):
 
         blob_path.unlink()  # the blob is simply gone; nobody is mid-flight
 
-        with patch("time.sleep") as waited, patch("frappe.enqueue") as queued:
+        with (
+            patch("time.sleep") as waited,
+            patch("frappe.enqueue") as queued,
+            patch.object(put_module, "_run_after_upload_hooks") as upload_hook,
+        ):
             frappe.db.commit()  # runs the swap
 
         self.assertEqual(waited.call_count, 3)
@@ -1051,6 +1099,7 @@ class TestWebDAVPut(IntegrationTestCase):
         # the timed-out wait hands a settlement check to a worker — a peer
         # stalled beyond the wait would surface exactly here
         self.assertEqual(queued.call_count, 1)
+        upload_hook.assert_called_once_with(target.name, hashlib.sha256(b"v2!").hexdigest())
 
     def test_put_swap_settlement_finishes_a_delayed_move(self):
         # a mover stalled past the in-request waits commits eventually; the
