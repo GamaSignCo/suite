@@ -23,9 +23,9 @@ def mark_onboarded(timezone: str | None = None) -> None:
     frappe.only_for("System Manager")
 
     if not frappe.is_setup_complete() and uses_suite_setup_wizard():
-        from frappe.desk.page.setup_wizard.setup_wizard import setup_complete
+        from frappe.desk.page.setup_wizard.setup_wizard import complete_app_setup
 
-        setup_complete(build_setup_args(timezone))
+        complete_app_setup(**build_setup_args(timezone))
 
     frappe.db.set_single_value("Suite Settings", "is_onboarded", 1)
 

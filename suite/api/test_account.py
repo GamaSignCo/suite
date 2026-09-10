@@ -34,7 +34,7 @@ class MarkOnboarded(AccountTestBase):
     def setUp(self):
         super().setUp()
         self.engine = self.enterContext(
-            mock.patch("frappe.desk.page.setup_wizard.setup_wizard.setup_complete")
+            mock.patch("frappe.desk.page.setup_wizard.setup_wizard.complete_app_setup")
         )
         self.suite_wizard = self.enterContext(
             mock.patch("suite.api.account.uses_suite_setup_wizard", return_value=True)
@@ -45,7 +45,7 @@ class MarkOnboarded(AccountTestBase):
     def test_runs_engine_when_suite_is_the_wizard_and_setup_is_open(self):
         account.mark_onboarded(timezone="Asia/Kolkata")
         self.frappe.only_for.assert_called_with("System Manager")
-        self.engine.assert_called_once_with({"country": "India"})
+        self.engine.assert_called_once_with(country="India")
         self.frappe.db.set_single_value.assert_called_once_with("Suite Settings", "is_onboarded", 1)
 
     def test_skips_engine_unless_suite_wizard_and_setup_open(self):
