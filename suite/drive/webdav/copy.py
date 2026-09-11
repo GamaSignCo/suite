@@ -22,8 +22,10 @@ from suite.drive.utils.files import FileManager, get_s3_key, get_s3_url, storage
 from suite.drive.webdav import pathmap, perms
 from suite.drive.webdav.conditional import evaluate_preconditions
 from suite.drive.webdav.context import DavContext
-from suite.drive.webdav.errors import BadRequest, Forbidden, NotFoundError, quota_guard
+from suite.drive.webdav.errors import BadRequest, Forbidden, InsufficientStorage, NotFoundError, quota_guard
 from suite.drive.webdav.structure import _resolve_destination
+
+DEFAULT_MAX_COPY_ITEMS = 1000
 
 
 def handle(ctx: DavContext) -> Response:
@@ -73,12 +75,19 @@ def handle(ctx: DavContext) -> Response:
             incoming = source.entity.file_size or 0
         validate_quota(incoming_size=incoming)
 
-    copier = _Copier(ctx.manager, ctx.user, recurse=depth != "0")
+    recurse = depth != "0"
+    copier = _Copier(
+        ctx.manager,
+        ctx.user,
+        recurse=recurse,
+        max_items=_max_copy_items() if source.entity.is_folder and recurse else None,
+    )
     try:
         total = copier.copy(source.entity, dest_parent, dest_name)
         # a failed rollup fails the copy: suppressed, it would commit stale
         # ancestor sizes that no reconciliation repairs (same stance as PUT)
-        apply_file_size_delta(dest_parent.name, total)
+        if total:
+            apply_file_size_delta(dest_parent.name, total)
     except Exception:
         copier.cleanup()
         raise
@@ -87,13 +96,18 @@ def handle(ctx: DavContext) -> Response:
 
 
 class _Copier:
-    def __init__(self, manager: FileManager, user: str, recurse: bool):
+    def __init__(self, manager: FileManager, user: str, recurse: bool, max_items: int | None = None):
         self.manager = manager
         self.user = user
         self.recurse = recurse
+        self.max_items = max_items
+        self.item_count = 0
         self.created_blobs: list[frappe._dict] = []
 
     def copy(self, node: frappe._dict, new_parent: frappe._dict, new_name: str) -> int:
+        self.item_count += 1
+        if self.max_items is not None and self.item_count > self.max_items:
+            raise InsufficientStorage(f"Recursive COPY exceeds the site limit of {self.max_items} items.")
         if node.is_folder:
             return self._copy_folder(node, new_parent, new_name)
         return self._copy_file(node, new_parent, new_name)
@@ -173,6 +187,14 @@ def _subtree_bytes(root_name: str) -> int:
         values={"root": root_name},
     )
     return int(rows[0][0] or 0)
+
+
+def _max_copy_items() -> int:
+    try:
+        configured = int(frappe.conf.get("drive_webdav_max_copy_items", DEFAULT_MAX_COPY_ITEMS))
+    except TypeError, ValueError:
+        return DEFAULT_MAX_COPY_ITEMS
+    return configured if configured > 0 else DEFAULT_MAX_COPY_ITEMS
 
 
 def _timestamp(value) -> float | None:

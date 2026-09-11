@@ -86,6 +86,7 @@ Optional per-site knobs (`site_config.json`):
 |---|---|
 | `drive_webdav_log_level` | Request logging to `logs/suite.drive.webdav.log` (bench and site copy), **on by default at `info`** — one line per request (method, path, status, duration, user, IP, client). `"error"` = 5xx only, `"warning"` = adds 4xx, `"debug"` = adds the protocol headers (Depth, Destination, If, Lock-Token…), `"off"` = disabled. Credentials are never logged. |
 | `drive_webdav_max_upload_size` | Absolute PUT body ceiling in bytes, enforced while spooling (on top of the per-user quota bound). |
+| `drive_webdav_max_copy_items` | Maximum items in a recursive collection COPY, including its root (default: `1000`). Invalid or non-positive values use the default. |
 | `drive_webdav_s3_redirect` | Serve S3-backed GETs as 302s to presigned URLs instead of proxying. Only for deployments whose clients handle cross-host redirects (rclone, Cyberduck — not the Windows mini-redirector). |
 
 ## rclone

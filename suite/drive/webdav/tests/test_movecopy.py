@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import frappe
 from frappe.tests import IntegrationTestCase
 
@@ -180,13 +182,31 @@ class TestWebDAVMoveCopy(IntegrationTestCase):
             len(b"move me") + len(b"deep-data"),
         )
 
-    def test_copy_depth_zero_copies_shell_only(self):
-        response = self._copy(
-            f"/dav/Home/{self.base_name}",
-            f"/dav/Home/{self.base_name}-shell",
-            **{"Depth": "0"},
-        )
+    def test_recursive_copy_accepts_exact_item_limit(self):
+        with patch.dict(frappe.local.conf, {"drive_webdav_max_copy_items": 3}, clear=False):
+            response = self._copy(f"/dav/Home/{self.base_name}", f"/dav/Home/{self.base_name}-limited")
+
         self.assertEqual(response.status_code, 201)
+        self.assertTrue(self._resolve(f"Home/{self.base_name}-limited/sub").exists)
+        self.assertTrue(self._resolve(f"Home/{self.base_name}-limited/b.txt").exists)
+
+    def test_recursive_copy_rejects_item_over_limit(self):
+        with (
+            patch.dict(frappe.local.conf, {"drive_webdav_max_copy_items": 2}, clear=False),
+            self.assertRaisesRegex(InsufficientStorage, "site limit of 2 items"),
+        ):
+            self._copy(f"/dav/Home/{self.base_name}", f"/dav/Home/{self.base_name}-too-many")
+
+    def test_copy_depth_zero_copies_shell_only(self):
+        with patch.object(copy_module, "apply_file_size_delta") as rollup:
+            response = self._copy(
+                f"/dav/Home/{self.base_name}",
+                f"/dav/Home/{self.base_name}-shell",
+                **{"Depth": "0"},
+            )
+
+        self.assertEqual(response.status_code, 201)
+        rollup.assert_not_called()
         self.assertTrue(self._resolve(f"Home/{self.base_name}-shell").is_collection)
         self.assertFalse(self._resolve(f"Home/{self.base_name}-shell/b.txt").exists)
 
