@@ -243,6 +243,23 @@ class TestWebDAVPut(IntegrationTestCase):
         self.assertEqual(frappe.db.get_value("File", sub.name, "file_size"), 3)
         self.assertEqual(frappe.db.get_value("File", self.base.name, "file_size"), 3)
 
+    def test_size_rollup_locks_each_ancestor(self):
+        from unittest.mock import patch
+
+        from suite.drive.utils import apply_file_size_delta
+
+        real_get_value = frappe.db.get_value
+        with patch.object(frappe.db, "get_value", wraps=real_get_value) as get_value:
+            apply_file_size_delta(self.base.name, 1)
+
+        ancestor_reads = [
+            call
+            for call in get_value.call_args_list
+            if len(call.args) >= 3 and call.args[0] == "File" and call.args[2] == "folder"
+        ]
+        self.assertTrue(ancestor_reads)
+        self.assertTrue(all(call.kwargs.get("for_update") for call in ancestor_reads))
+
     def test_put_unreadable_target_hidden_as_404(self):
         # the read-gate must run before preconditions/locks/the 405 collection
         # reply, so an unreadable resource is indistinguishable from an absent one
