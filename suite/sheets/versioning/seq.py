@@ -22,18 +22,29 @@ def allocate(sheet: str, count: int = 1) -> int:
     if count < 1:
         frappe.throw("allocate(count) requires count >= 1")
 
-    _ensure_row(sheet)
-    row = frappe.db.sql(
-        "SELECT next_seq FROM `tabSheet Seq` WHERE name = %s FOR UPDATE",
-        (sheet,),
-        as_dict=True,
-    )
-    first = int(row[0]["next_seq"])
+    first = lock(sheet)
     frappe.db.sql(
         "UPDATE `tabSheet Seq` SET next_seq = next_seq + %s WHERE name = %s",
         (count, sheet),
     )
     return first
+
+
+def lock(sheet: str) -> int:
+    """Lock the sheet's sequence row and return its next sequence."""
+    row = frappe.db.sql(
+        "SELECT next_seq FROM `tabSheet Seq` WHERE name = %s FOR UPDATE",
+        (sheet,),
+        as_dict=True,
+    )
+    if not row:
+        _ensure_row(sheet)
+        row = frappe.db.sql(
+            "SELECT next_seq FROM `tabSheet Seq` WHERE name = %s FOR UPDATE",
+            (sheet,),
+            as_dict=True,
+        )
+    return int(row[0]["next_seq"])
 
 
 def peek(sheet: str) -> int:

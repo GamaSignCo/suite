@@ -80,22 +80,32 @@ class InlineSnapshotFromSave(unittest.TestCase):
 
 
 class IdempotentSave(unittest.TestCase):
-    def test_completed_request_returns_existing_sequence_without_saving_again(self):
+    def test_request_is_rechecked_after_taking_sequence_lock(self):
         with (
             mock.patch.object(save_mod.frappe, "has_permission") as has_permission,
-            mock.patch.object(save_mod.frappe.db, "get_value", return_value=12),
-            mock.patch.object(save_mod, "_update_existing") as update_existing,
+            mock.patch.object(save_mod.seq_mod, "lock") as lock,
+            mock.patch.object(save_mod.frappe.db, "get_value", return_value=12) as get_value,
+            mock.patch.object(save_mod, "_append_ops_and_save") as append_ops,
         ):
-            result = save_mod.save_sheet(
-                title="My Sheet",
-                sheets_data='{"A1":1}',
-                name="sheet_x",
+            result = save_mod._update_existing(
+                "sheet_x",
+                "My Sheet",
+                "ENCODED",
+                10,
+                [],
                 request_id="request-1",
             )
 
-        self.assertEqual(result, {"name": "sheet_x", "head_seq": 12})
+        self.assertEqual(result, ("sheet_x", 12))
         has_permission.assert_called_once_with("Sheet", doc="sheet_x", ptype="write", throw=True)
-        update_existing.assert_not_called()
+        lock.assert_called_once_with("sheet_x")
+        get_value.assert_called_once_with(
+            "Sheet Op Log",
+            {"sheet": "sheet_x", "request_id": "request-1"},
+            "seq",
+            for_update=True,
+        )
+        append_ops.assert_not_called()
 
 
 if __name__ == "__main__":
