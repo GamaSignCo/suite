@@ -465,9 +465,7 @@ def get_attachment(presentation, file_url):
         if source_doc:
             source_file = frappe.get_doc("File", source_doc[0].name)
             source_file.check_permission("read")
-            new_attachment_doc = frappe.copy_doc(source_file)
-            new_attachment_doc.attached_to_name = presentation
-            new_attachment_doc.insert()
+            new_attachment_doc = source_file.create_attachment_copy("Presentation", presentation)
             attachment = new_attachment_doc.name
 
     return attachment
