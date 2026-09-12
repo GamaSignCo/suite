@@ -1,5 +1,5 @@
-import { ref } from 'vue'
-import { useShortcut } from 'frappe-ui'
+import { ref, onMounted, onUnmounted } from 'vue'
+import { useKeyboardShortcut } from 'frappe-ui'
 
 import { useNavigationPanel } from '@/apps/slides/composables/useNavigationPanel'
 import { commandHistory } from '@/apps/slides/stores/historyMeta'
@@ -18,14 +18,19 @@ import {
 } from '@/apps/slides/stores/slide'
 import {
 	resetFocus,
+	exitTextEditing,
+	startTextEditing,
+	focusElementId,
 	addTextElement,
 	pendingShapeType,
+	pendingShapePreset,
 	selectAllElements,
 	activeElementIds,
 	activeElements,
 	deleteElements,
 	duplicateElements,
-	activeElement,
+	isSelectionLocked,
+	toggleLock,
 } from '@/apps/slides/stores/element'
 import {
 	changeSlideInSlideshow,
@@ -34,7 +39,8 @@ import {
 	performPreviousStep,
 } from '@/apps/slides/stores/slideshow'
 
-import { markDirty } from '@/apps/slides/stores/saving'
+import { interactionOffset, commitInteraction } from '@/apps/slides/stores/interaction'
+import { inCropMode, commitCrop, cancelCrop } from '@/apps/slides/stores/imageCrop'
 
 const { toggleNavigationPanel } = useNavigationPanel()
 const { activeEditor, toggleMark } = useTextEditor()
@@ -42,35 +48,32 @@ const { activeEditor, toggleMark } = useTextEditor()
 export const showShortcutsModal = ref(false)
 
 export const useShortcuts = (inReadonlyMode, inSlideShowMode) => {
-	const inEditMode = () => !inReadonlyMode.value && !inSlideShowMode.value
+	const inEditMode = () => !inReadonlyMode.value && !inSlideShowMode.value && !inCropMode.value
 	const inReadonly = () => inReadonlyMode.value && !inSlideShowMode.value
 	const inSlideShow = () => inSlideShowMode.value
 	const hasElements = () => activeElementIds.value.length > 0
 	const hasActiveTextEditor = () => hasElements() && !!activeEditor.value
 
-	const nudge = (key) => {
+	const nudge = (key, step = 1) => {
+		if (isSelectionLocked.value) return
+
 		let dx = 0
 		let dy = 0
 
-		if (key == 'ArrowLeft') dx = -1
-		else if (key == 'ArrowRight') dx = 1
-		else if (key == 'ArrowUp') dy = -1
-		else if (key == 'ArrowDown') dy = 1
+		if (key == 'ArrowLeft') dx = -step
+		else if (key == 'ArrowRight') dx = step
+		else if (key == 'ArrowUp') dy = -step
+		else if (key == 'ArrowDown') dy = step
+
+		interactionOffset.left = dx
+		interactionOffset.top = dy
+		commitInteraction()
 
 		updateSelectionBounds({
 			left: selectionBounds.left + dx,
 			top: selectionBounds.top + dy,
 		})
-
-		activeElements.value.forEach((element) => {
-			element.left += dx
-			element.top += dy
-		})
-
-		markDirty()
 	}
-
-	const isEditorFocused = () => activeEditor.value?.isEditable
 
 	const isPlainInput = (e) => {
 		const target = e?.target
@@ -81,59 +84,61 @@ export const useShortcuts = (inReadonlyMode, inSlideShowMode) => {
 		)
 	}
 
-	const performHistory = (operation) => {
-		if (isEditorFocused()) {
-			if (operation == 'undo' && !activeEditor.value?.can().undo()) {
-				commandHistory.undo()
-			} else if (operation == 'redo' && !activeEditor.value?.can().redo()) {
-				commandHistory.redo()
-			}
-			return
-		}
+	// every editable field except the slide editor keeps its own text undo. this
+	// has to gate the shortcut rather than its handler: a matched shortcut is
+	// preventDefaulted before the handler runs, which would kill the native undo too
+	const ownsNativeUndo = () => {
+		const target = document.activeElement
+		if (!target || target.closest('.ProseMirror')) return false
+		return (
+			target.isContentEditable ||
+			target.tagName == 'INPUT' ||
+			target.tagName == 'TEXTAREA'
+		)
+	}
 
-		if (activeEditor.value?.can()[operation]() && activeElement.value?.type == 'text') {
-			activeEditor.value.commands[operation]()
-			return
-		}
+	const performHistory = (e, operation) => {
+		// an undo mid-composition destroys the IME node
+		if (e.isComposing || activeEditor.value?.view.composing) return
 
-		if (operation == 'undo' && commandHistory.canUndo.value) {
-			if (activeElement.value?.type == 'text') activeElementIds.value = []
-			commandHistory.undo()
-		} else if (operation == 'redo' && commandHistory.canRedo.value) {
-			if (activeElement.value?.type == 'text') activeElementIds.value = []
-			commandHistory.redo()
-		}
+		if (operation == 'undo') commandHistory.undo()
+		else commandHistory.redo()
 	}
 
 	const handleBold = (e) => {
-		if (inEditMode() && hasActiveTextEditor()) toggleMark('bold')
-		else if (inEditMode() || inReadonly()) toggleNavigationPanel(e)
+		if (inEditMode() && hasActiveTextEditor()) {
+			if (!isSelectionLocked.value) toggleMark('bold')
+			return
+		}
+		if (inEditMode() || inReadonly()) toggleNavigationPanel(e)
 	}
 
-	const handleArrowUp = () => {
+	const nudgeStep = (e) => (e?.shiftKey ? 10 : 1)
+
+	const handleArrowUp = (e) => {
 		if (inSlideShow()) return performPreviousStep()
 		if (inReadonly()) return changeSlide(slideIndex.value - 1)
 		if (!inEditMode()) return
-		if (hasElements()) nudge('ArrowUp')
+		if (hasElements()) nudge('ArrowUp', nudgeStep(e))
 		else changeEditorSlide(slideIndex.value - 1)
 	}
 
-	const handleArrowDown = () => {
+	const handleArrowDown = (e) => {
 		if (inSlideShow()) return performNextStep()
 		if (inReadonly()) return changeSlide(slideIndex.value + 1)
 		if (!inEditMode()) return
-		if (hasElements()) nudge('ArrowDown')
+		if (hasElements()) nudge('ArrowDown', nudgeStep(e))
 		else changeEditorSlide(slideIndex.value + 1)
 	}
 
-	const handleArrowLeft = () => {
+	const handleArrowLeft = (e) => {
 		if (inSlideShow()) return performPreviousStep()
-		if (inEditMode() && hasElements()) nudge('ArrowLeft')
+		if (inEditMode() && hasElements()) nudge('ArrowLeft', nudgeStep(e))
 	}
 
-	const handleArrowRight = () => {
+	const handleArrowRight = (e) => {
 		if (inSlideShow()) return performNextStep()
-		if (inEditMode() && hasElements()) nudge('ArrowRight')
+		if (inEditMode() && hasElements()) nudge('ArrowRight', nudgeStep(e))
 	}
 
 	const deleteElementOrSlide = (e) => {
@@ -142,10 +147,50 @@ export const useShortcuts = (inReadonlyMode, inSlideShowMode) => {
 	}
 
 	const addShape = (shapeType) => {
+		pendingShapePreset.value = {}
 		pendingShapeType.value = shapeType
 	}
 
-	useShortcut([
+	// overlays dismiss on Escape only if the event wasn't defaultPrevented,
+	// and matching a shortcut always prevents — so don't match while one is open
+	const hasOpenOverlay = () =>
+		!!document.querySelector('[data-dismissable-layer][data-state="open"]')
+
+	const hasTextCapableSelection = () => {
+		if (activeElements.value.length !== 1) return false
+		const [element] = activeElements.value
+		return element.type === 'text' || (element.type === 'shape' && element.shapeType !== 'line')
+	}
+
+	const canStartTextEditing = () =>
+		inEditMode() &&
+		hasTextCapableSelection() &&
+		!focusElementId.value &&
+		!isSelectionLocked.value &&
+		!hasOpenOverlay()
+
+	// capture phase, so single-letter tool shortcuts don't fire over an editable selection
+	const handleTypeToEdit = (e) => {
+		if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey) return
+		if (e.key === '?') return
+		if (isPlainInput(e) || e.target?.isContentEditable) return
+		if (!canStartTextEditing()) return
+		e.preventDefault()
+		e.stopPropagation()
+		startTextEditing(e.key)
+	}
+
+	onMounted(() => window.addEventListener('keydown', handleTypeToEdit, true))
+	onUnmounted(() => window.removeEventListener('keydown', handleTypeToEdit, true))
+
+	const handleEscape = (e) => {
+		if (isPlainInput(e)) return e.target.blur()
+		if (focusElementId.value) return exitTextEditing()
+		if (e.target?.isContentEditable) return e.target.blur()
+		resetFocus()
+	}
+
+	const shortcuts = [
 		{
 			key: '?',
 			description: 'Show keyboard shortcuts',
@@ -174,11 +219,8 @@ export const useShortcuts = (inReadonlyMode, inSlideShowMode) => {
 			description: 'Undo',
 			group: 'General',
 			allowInInput: true,
-			condition: inEditMode,
-			handler: (e) => {
-				if (isPlainInput(e)) return
-				performHistory('undo')
-			},
+			condition: () => inEditMode() && !ownsNativeUndo(),
+			handler: (e) => performHistory(e, 'undo'),
 		},
 		{
 			key: 'y',
@@ -186,11 +228,8 @@ export const useShortcuts = (inReadonlyMode, inSlideShowMode) => {
 			description: 'Redo',
 			group: 'General',
 			allowInInput: true,
-			condition: inEditMode,
-			handler: (e) => {
-				if (isPlainInput(e)) return
-				performHistory('redo')
-			},
+			condition: () => inEditMode() && !ownsNativeUndo(),
+			handler: (e) => performHistory(e, 'redo'),
 		},
 		{
 			key: 'z',
@@ -199,18 +238,22 @@ export const useShortcuts = (inReadonlyMode, inSlideShowMode) => {
 			description: 'Redo',
 			group: 'General',
 			allowInInput: true,
-			condition: inEditMode,
-			handler: (e) => {
-				if (isPlainInput(e)) return
-				performHistory('redo')
-			},
+			condition: () => inEditMode() && !ownsNativeUndo(),
+			handler: (e) => performHistory(e, 'redo'),
 		},
 
 		{
 			key: 'Enter',
+			description: 'Edit text of selected element',
+			group: 'Edit',
+			condition: canStartTextEditing,
+			handler: () => startTextEditing(),
+		},
+		{
+			key: 'Enter',
 			description: 'Add slide below',
 			group: 'Insert',
-			condition: inEditMode,
+			condition: () => inEditMode() && !canStartTextEditing(),
 			handler: (e) => addEmptySlide(e),
 		},
 		{
@@ -242,6 +285,13 @@ export const useShortcuts = (inReadonlyMode, inSlideShowMode) => {
 			handler: () => addShape('line'),
 		},
 		{
+			key: 'c',
+			description: 'Add connector',
+			group: 'Insert',
+			condition: inEditMode,
+			handler: () => addShape('connector'),
+		},
+		{
 			key: 'a',
 			ctrl: true,
 			description: 'Select all elements',
@@ -253,8 +303,25 @@ export const useShortcuts = (inReadonlyMode, inSlideShowMode) => {
 			key: 'Escape',
 			description: 'Deselect',
 			group: 'Edit',
-			condition: inEditMode,
-			handler: () => resetFocus(),
+			allowInInput: true,
+			condition: () => inEditMode() && !hasOpenOverlay(),
+			handler: handleEscape,
+		},
+		{
+			key: 'Escape',
+			description: 'Exit crop mode',
+			group: 'Edit',
+			allowInInput: true,
+			condition: () => inCropMode.value && !hasOpenOverlay(),
+			handler: () => cancelCrop(),
+		},
+		{
+			key: 'Enter',
+			description: 'Apply crop',
+			group: 'Edit',
+			allowInInput: true,
+			condition: () => inCropMode.value && !hasOpenOverlay(),
+			handler: () => commitCrop(),
 		},
 		{
 			key: 'd',
@@ -282,6 +349,19 @@ export const useShortcuts = (inReadonlyMode, inSlideShowMode) => {
 			handler: deleteElementOrSlide,
 		},
 		{
+			key: 'l',
+			ctrl: true,
+			shift: true,
+			description: 'Lock or unlock element',
+			group: 'Edit',
+			allowInInput: true,
+			condition: inEditMode,
+			handler: (e) => {
+				if (isPlainInput(e)) return
+				toggleLock()
+			},
+		},
+		{
 			key: 'ArrowUp',
 			description: 'Move element',
 			group: 'Edit',
@@ -305,6 +385,38 @@ export const useShortcuts = (inReadonlyMode, inSlideShowMode) => {
 		{
 			key: 'ArrowRight',
 			description: 'Move element',
+			group: 'Edit',
+			condition: inEditMode,
+			handler: handleArrowRight,
+		},
+		{
+			key: 'ArrowUp',
+			shift: true,
+			description: 'Move element by 10px',
+			group: 'Edit',
+			condition: inEditMode,
+			handler: handleArrowUp,
+		},
+		{
+			key: 'ArrowDown',
+			shift: true,
+			description: 'Move element by 10px',
+			group: 'Edit',
+			condition: inEditMode,
+			handler: handleArrowDown,
+		},
+		{
+			key: 'ArrowLeft',
+			shift: true,
+			description: 'Move element by 10px',
+			group: 'Edit',
+			condition: inEditMode,
+			handler: handleArrowLeft,
+		},
+		{
+			key: 'ArrowRight',
+			shift: true,
+			description: 'Move element by 10px',
 			group: 'Edit',
 			condition: inEditMode,
 			handler: handleArrowRight,
@@ -337,7 +449,7 @@ export const useShortcuts = (inReadonlyMode, inSlideShowMode) => {
 			group: 'Format Text',
 			condition: inEditMode,
 			handler: () => {
-				if (hasActiveTextEditor()) toggleMark('italic')
+				if (hasActiveTextEditor() && !isSelectionLocked.value) toggleMark('italic')
 			},
 		},
 		{
@@ -347,7 +459,7 @@ export const useShortcuts = (inReadonlyMode, inSlideShowMode) => {
 			group: 'Format Text',
 			condition: inEditMode,
 			handler: () => {
-				if (hasActiveTextEditor()) toggleMark('underline')
+				if (hasActiveTextEditor() && !isSelectionLocked.value) toggleMark('underline')
 			},
 		},
 
@@ -403,5 +515,18 @@ export const useShortcuts = (inReadonlyMode, inSlideShowMode) => {
 				if (inSlideShow()) performNextStep()
 			},
 		},
-	])
+	]
+
+	useKeyboardShortcut(
+		shortcuts.map(({ key, ctrl, shift, condition, ...shortcut }) => ({
+			...shortcut,
+			combo:
+				key === '?'
+					? 'Shift+Slash'
+					: [ctrl && 'Mod', shift && 'Shift', key === ' ' ? 'Space' : key]
+							.filter(Boolean)
+							.join('+'),
+			enabled: condition,
+		})),
+	)
 }

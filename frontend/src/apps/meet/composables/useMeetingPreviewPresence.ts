@@ -1,9 +1,8 @@
-import { createResource } from "frappe-ui";
+import { useCall } from "frappe-ui";
 import { io, type Socket } from "socket.io-client";
 import { computed, onUnmounted, readonly, ref } from "vue";
 import { session } from "@/boot/session";
 import type {
-	FrappeRequestError,
 	ParticipantJoinedEvent,
 	ParticipantLeftEvent,
 	ParticipantPreview,
@@ -14,6 +13,7 @@ import type {
 
 export function useMeetingPreviewPresence(meetingId: string) {
 	const participants = ref<ParticipantPreview[]>([]);
+	const isCurrentUserPresent = ref(false);
 	const error = ref<string | null>(null);
 	const hasFetchedParticipants = ref(false);
 	let socket: Socket | null = null;
@@ -33,31 +33,33 @@ export function useMeetingPreviewPresence(meetingId: string) {
 			isRefreshing = true;
 
 			console.log("Refreshing preview presence token");
-			await fetchPresenceToken.fetch();
+			await fetchPresenceToken.submit({ meeting_id: meetingId });
 			isRefreshing = false;
 		}, refreshAfter);
 	};
 
-	const fetchPresenceToken = createResource({
-		url: "suite.meet.api.meeting.get_sfu_presence_preview_token",
-		params: { meeting_id: meetingId },
-		auto: false,
+	const fetchPresenceToken = useCall<PresenceTokenResponse, { meeting_id: string }>({
+		url: "/api/v2/method/suite.meet.api.meeting.get_sfu_presence_preview_token",
+		immediate: false,
 		onSuccess(data: PresenceTokenResponse) {
-			if (data && (data.auth_token || data.sfu_url)) {
+			if (data.restricted_preview) {
+				hasFetchedParticipants.value = true;
+				return;
+			}
+
+			if (data.auth_token || data.sfu_url) {
 				connectToSFU(data);
 			} else {
 				error.value = data.error || "Failed to get presence token";
 			}
 		},
-		onError(err: FrappeRequestError) {
-			error.value = err.messages?.length
-				? err.messages[err.messages.length - 1]
-				: "Failed to fetch presence token";
+		onError(err: Error) {
+			error.value = err.message || "Failed to fetch presence token";
 		},
 	});
 
 	if (session.isLoggedIn) {
-		fetchPresenceToken.fetch();
+		fetchPresenceToken.submit({ meeting_id: meetingId });
 	}
 
 	const connectToSFU = (tokenData: PresenceTokenResponse) => {
@@ -131,6 +133,7 @@ export function useMeetingPreviewPresence(meetingId: string) {
 				(response: PresenceParticipantsResponse) => {
 					hasFetchedParticipants.value = true;
 					if (response.success && response.participants) {
+						isCurrentUserPresent.value = !!response.isCurrentUserPresent;
 						participants.value = response.participants.map((p) => ({
 							user_id: p.info.userId || p.user_id || p.id,
 							full_name: p.info.name || p.user_id || p.id,
@@ -188,7 +191,7 @@ export function useMeetingPreviewPresence(meetingId: string) {
 
 	const refresh = (): void => {
 		error.value = null;
-		fetchPresenceToken.fetch();
+		fetchPresenceToken.submit({ meeting_id: meetingId });
 	};
 
 	onUnmounted(() => {
@@ -205,6 +208,7 @@ export function useMeetingPreviewPresence(meetingId: string) {
 
 	return {
 		participants: readonly(participants),
+		isCurrentUserPresent: readonly(isCurrentUserPresent),
 		error: readonly(error),
 		hasFetchedParticipants: readonly(hasFetchedParticipants),
 		refresh,

@@ -107,14 +107,14 @@ function removeTag(tag: string) {
       v-for="item in selectedTags"
       :key="getValue(item)"
       :value="getValue(item)"
-      class="flex min-h-7 items-center gap-1.5 rounded bg-surface-gray-2 px-2 text-base focus:outline-none data-[state=active]:ring-1 data-[state=active]:ring-outline-gray-3"
+      class="flex min-h-7 items-center gap-1.5 rounded-4 bg-surface-gray-2 px-2 text-base focus:outline-none data-[state=active]:ring-1 data-[state=active]:ring-outline-gray-3"
     >
       <RenderIcon :icon="getIcon(item)" />
       <TagsInputItemText class="text-base text-ink-gray-8">{{
         getLabel(item)
       }}</TagsInputItemText>
       <TagsInputItemDelete
-        class="p-0.5 rounded-sm bg-transparent hover:bg-surface-gray-3"
+        class="p-0.5 rounded-1 bg-transparent hover:bg-surface-gray-3"
         @click="removeTag(getValue(item))"
       >
         <span class="lucide-x size-3.5 text-ink-gray-6" aria-hidden="true" />

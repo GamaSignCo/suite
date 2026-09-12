@@ -1,5 +1,16 @@
-import type { Consumer, Producer } from "mediasoup-client/types";
-import type { SFUClient } from "../SFUClient";
+import type {
+	AppData,
+	Consumer,
+	ConsumerOptions,
+	Device,
+	DtlsParameters,
+	Producer,
+	ProducerOptions,
+	RtpCapabilities,
+	Transport,
+	TransportOptions,
+} from "mediasoup-client/types";
+import type { ProducerCloseMetadata, SFUClient } from "../SFUClient";
 import { resolveCodecStrategy } from "./codecStrategy";
 import {
 	DefaultE2EETransformPolicy,
@@ -15,7 +26,7 @@ import {
 
 type Direction = "send" | "recv";
 
-export type IceRestartDirectionResult = "restarted" | "not-needed" | "failed";
+type IceRestartDirectionResult = "restarted" | "not-needed" | "failed";
 
 export type TransportIceRestartResult = Record<
 	Direction,
@@ -50,49 +61,8 @@ type EventHandlers = {
 	onTransportConnectionStateChange?: TransportStateHandler;
 };
 
-type ConsumerParams = {
-	id: string;
-	producerId: string;
-	kind: string;
-	rtpParameters: unknown;
-	isScreen?: boolean;
-	appData?: {
-		type?: string;
-	};
-	senderId?: number;
-};
-
-type RouterCapabilities = {
-	codecs?: Array<{
-		mimeType?: string;
-		mime_type?: string;
-		scalabilityModes?: string[];
-	}>;
-} | null;
-
-type TransportLike = {
-	id: string;
-	connectionState: TransportConnectionState;
-	on: <TArgs extends unknown[]>(
-		event: string,
-		handler: (...args: TArgs) => void,
-	) => void;
-	close: () => void;
-	restartIce: (args: { iceParameters: unknown }) => Promise<void>;
-	produce?: (options: Record<string, unknown>) => Promise<Producer>;
-	consume?: (args: Record<string, unknown>) => Promise<Consumer>;
-	getStats: () => Promise<Map<string, TransportStatReport>>;
-};
-
-type DeviceLike = {
-	loaded: boolean;
-	rtpCapabilities?: {
-		codecs?: Array<{ mimeType: string }>;
-	};
-	load: (args: { routerRtpCapabilities: unknown }) => Promise<void>;
-	canProduce: (kind: string) => boolean;
-	createSendTransport: (args: Record<string, unknown>) => TransportLike;
-	createRecvTransport: (args: Record<string, unknown>) => TransportLike;
+type InsertableStreamRTCConfiguration = Partial<RTCConfiguration> & {
+	encodedInsertableStreams?: boolean;
 };
 
 async function applyScreenShareSenderPreferences(producer: {
@@ -117,18 +87,19 @@ function sleep(ms: number): Promise<void> {
 }
 
 export class TransportManager {
-	sendTransport: TransportLike | null;
-	recvTransport: TransportLike | null;
-	device: DeviceLike | null;
+	sendTransport: Transport | null;
+	recvTransport: Transport | null;
+	device: Device | null;
 	sfuClient: SFUClient | null;
-	routerRtpCapabilities: RouterCapabilities;
+	routerRtpCapabilities: RtpCapabilities | null;
 	activeVideoStrategy: string;
 	eventHandlers: EventHandlers;
 	e2eePolicy: E2EETransformPolicy;
-	private sendTransportCreation: Promise<TransportLike> | null = null;
-	private recvTransportCreation: Promise<TransportLike> | null = null;
+	private sendTransportCreation: Promise<Transport> | null = null;
+	private recvTransportCreation: Promise<Transport> | null = null;
 	private sendTransportGeneration = 0;
 	private recvTransportGeneration = 0;
+	private producerDiscards = new WeakMap<Producer, Promise<void>>();
 
 	constructor(e2eePolicy?: E2EETransformPolicy) {
 		this.sendTransport = null;
@@ -201,26 +172,12 @@ export class TransportManager {
 		return this.sfuClient;
 	}
 
-	private extractRouterRtpCapabilities(response: unknown): RouterCapabilities {
-		if (
-			typeof response === "object" &&
-			response !== null &&
-			"rtpCapabilities" in response
-		) {
-			return (response as { rtpCapabilities: RouterCapabilities })
-				.rtpCapabilities;
-		}
-		return response as RouterCapabilities;
-	}
-
 	async initializeDevice() {
 		if (this.device) return this.device;
 		const { Device } = await import("mediasoup-client");
 		const client = this.getClient();
-		this.device = new Device() as unknown as DeviceLike;
-		const routerCapsResp = await client.getRouterRtpCapabilities();
-		const routerRtpCapabilities =
-			this.extractRouterRtpCapabilities(routerCapsResp);
+		this.device = new Device();
+		const routerRtpCapabilities = await client.getRouterRtpCapabilities();
 		this.routerRtpCapabilities = routerRtpCapabilities;
 
 		await this.device.load({ routerRtpCapabilities });
@@ -240,7 +197,7 @@ export class TransportManager {
 			if (!device) throw new Error("Device failed to initialize");
 			const client = this.getClient();
 			const rawTransportParams = await client.createWebRtcTransport("send");
-			const additionalSettings: Record<string, unknown> = {};
+			const additionalSettings: InsertableStreamRTCConfiguration = {};
 			if (this.e2eePolicy.legacyInsertableStreamsEnabled) {
 				additionalSettings.encodedInsertableStreams = true;
 			}
@@ -274,46 +231,39 @@ export class TransportManager {
 	setupSendTransportHandlers() {
 		if (!this.sendTransport) return;
 		const client = this.getClient();
-		const sendTransport: TransportLike = this.sendTransport;
+		const sendTransport = this.sendTransport;
 		const sendTransportId = sendTransport.id;
 		sendTransport.on(
 			"connect",
 			async (
-				{ dtlsParameters }: { dtlsParameters: unknown },
+				{ dtlsParameters }: { dtlsParameters: DtlsParameters },
 				callback: () => void,
-				errback: (error: unknown) => void,
+				errback: (error: Error) => void,
 			) => {
 				try {
 					await client.connectWebRtcTransport(sendTransportId, dtlsParameters);
 					callback();
 				} catch (error) {
-					errback(error);
+					errback(error instanceof Error ? error : new Error(String(error)));
 				}
 			},
 		);
 
-		sendTransport.on("produce", async (...args: unknown[]) => {
-			const [parameters, callback, errback] = args as [
-				{ rtpParameters: unknown; kind: string; appData: unknown },
-				(result: { id: string }) => void,
-				(error: unknown) => void,
-			];
-			if (!parameters || typeof callback !== "function") return;
-
+		sendTransport.on("produce", async (parameters, callback, errback) => {
 			try {
-				const response = (await client.createProducer(
+				const response = await client.createProducer(
 					sendTransportId,
 					parameters.rtpParameters,
 					parameters.kind,
 					parameters.appData,
-				)) as { id: string };
+				);
 				callback({ id: response.id });
 			} catch (error) {
-				errback(error);
+				errback(error instanceof Error ? error : new Error(String(error)));
 			}
 		});
 
-		sendTransport.on("connectionstatechange", (state: unknown) => {
+		sendTransport.on("connectionstatechange", (state) => {
 			if (state === "failed") {
 				console.error("Send transport failed");
 			}
@@ -333,7 +283,7 @@ export class TransportManager {
 			if (!device) throw new Error("Device failed to initialize");
 			const client = this.getClient();
 			const rawTransportParams = await client.createWebRtcTransport("recv");
-			const additionalSettings: Record<string, unknown> = {};
+			const additionalSettings: InsertableStreamRTCConfiguration = {};
 			if (this.e2eePolicy.legacyInsertableStreamsEnabled) {
 				additionalSettings.encodedInsertableStreams = true;
 			}
@@ -393,24 +343,24 @@ export class TransportManager {
 	setupReceiveTransportHandlers() {
 		if (!this.recvTransport) return;
 		const client = this.getClient();
-		const recvTransport: TransportLike = this.recvTransport;
+		const recvTransport = this.recvTransport;
 		recvTransport.on(
 			"connect",
 			async (
-				{ dtlsParameters }: { dtlsParameters: unknown },
+				{ dtlsParameters }: { dtlsParameters: DtlsParameters },
 				callback: () => void,
-				errback: (error: unknown) => void,
+				errback: (error: Error) => void,
 			) => {
 				try {
 					await client.connectWebRtcTransport(recvTransport.id, dtlsParameters);
 					callback();
 				} catch (error) {
-					errback(error);
+					errback(error instanceof Error ? error : new Error(String(error)));
 				}
 			},
 		);
 
-		recvTransport.on("connectionstatechange", (state: unknown) => {
+		recvTransport.on("connectionstatechange", (state) => {
 			if (state === "failed") {
 				console.error("Receive transport failed");
 			}
@@ -458,10 +408,11 @@ export class TransportManager {
 
 	async createProducer(
 		track: MediaStreamTrack,
-		appData: Record<string, unknown> = {},
+		appData: AppData = {},
 	) {
 		if (!this.sendTransport) await this.createSendTransport();
-		if (!this.device?.canProduce?.(track?.kind || "video"))
+		const kind = track.kind === "audio" ? "audio" : "video";
+		if (!this.device?.canProduce(kind))
 			throw new Error("Unsupported");
 		if (!this.sendTransport?.produce)
 			throw new Error("Send transport is not ready to produce");
@@ -475,7 +426,7 @@ export class TransportManager {
 		});
 
 		const e2eeWantedBeforeProduce = this.e2eePolicy.transformsEnabled;
-		const produceOptions: Record<string, unknown> = {
+		const produceOptions: ProducerOptions = {
 			track,
 			appData: {
 				...safeAppData,
@@ -483,22 +434,19 @@ export class TransportManager {
 			},
 			stopTracks: false,
 		};
-		let senderTransformSetupStarted = false;
+		let senderTransformSetup: Promise<boolean> | null = null;
 		const setupProducerSenderTransform = async (
 			sender: RTCRtpSender | undefined,
 		) => {
-			if (!e2eeWantedBeforeProduce || !sender || senderTransformSetupStarted) {
+			if (!e2eeWantedBeforeProduce || !sender) {
 				return false;
 			}
-			senderTransformSetupStarted = true;
-			const senderId = this.e2eePolicy.ownSenderId;
-			const mediaType = track?.kind ?? "video";
-			return this.e2eePolicy
-				.setupSenderTransform(sender, senderId, mediaType)
-				.catch((error) => {
-					console.warn("Failed to setup E2EE sender transform:", error);
-					return false;
-				});
+			senderTransformSetup ??= this.e2eePolicy.setupSenderTransform(
+				sender,
+				this.e2eePolicy.ownSenderId,
+				track?.kind ?? "video",
+			);
+			return senderTransformSetup;
 		};
 		if (e2eeWantedBeforeProduce) {
 			produceOptions.onRtpSender = setupProducerSenderTransform;
@@ -551,11 +499,22 @@ export class TransportManager {
 			kind: track?.kind,
 			senderId: this.e2eePolicy.ownSenderId,
 		});
-		if (e2eeGate && producer.rtpSender) {
-			await setupProducerSenderTransform(producer.rtpSender);
-		}
 		if (e2eeWantedBeforeProduce) {
-			await this.sfuClient?.resumeProducer?.(producer.id);
+			try {
+				const transformInstalled = senderTransformSetup
+					? await senderTransformSetup
+					: await setupProducerSenderTransform(producer.rtpSender);
+				if (!transformInstalled) {
+					throw new Error("Failed to install E2EE sender transform");
+				}
+				const { resumed } = await this.getClient().resumeProducer(producer.id);
+				if (!resumed) {
+					throw new Error("Failed to resume E2EE producer");
+				}
+			} catch (error) {
+				await this.discardProducer(producer);
+				throw error;
+			}
 		}
 
 		if (safeAppData.type === "screen") {
@@ -569,9 +528,31 @@ export class TransportManager {
 		return producer;
 	}
 
+	discardProducer(
+		producer: Producer,
+		metadata: ProducerCloseMetadata = {},
+	): Promise<void> {
+		const existing = this.producerDiscards.get(producer);
+		if (existing) return existing;
+
+		try {
+			producer.close();
+		} catch {
+			// The producer may already have closed with its transport.
+		}
+		const discard = producer.id && this.sfuClient
+			? this.sfuClient
+					.closeProducer(producer.id, metadata)
+					.then(() => undefined)
+					.catch(() => undefined)
+			: Promise.resolve();
+		this.producerDiscards.set(producer, discard);
+		return discard;
+	}
+
 	async createConsumer(
 		producerId: string,
-		metadata: Record<string, unknown> = {},
+		metadata: { isScreen?: boolean } = {},
 	) {
 		if (!this.device) await this.initializeDevice();
 		if (!this.recvTransport) await this.createReceiveTransport();
@@ -587,7 +568,7 @@ export class TransportManager {
 			recvTransport.id,
 			producerId,
 			device.rtpCapabilities,
-		)) as ConsumerParams;
+		));
 
 		const isScreen = !!(
 			metadata.isScreen ||
@@ -599,7 +580,7 @@ export class TransportManager {
 		let consumer: Consumer | null = null;
 		let firstError: unknown = null;
 		try {
-			const consumeArgs: Record<string, unknown> = {
+			const consumeArgs: ConsumerOptions = {
 				id: rawConsumerParams.id,
 				producerId: rawConsumerParams.producerId,
 				kind: rawConsumerParams.kind,
@@ -728,7 +709,7 @@ export class TransportManager {
 			const transportRtt: number[] = [];
 
 			const processStats = (
-				stats: Map<string, TransportStatReport>,
+				stats: RTCStatsReport | Map<string, TransportStatReport>,
 				preferRemoteInbound: boolean,
 			) => {
 				let remoteRttSum = 0;
@@ -792,8 +773,7 @@ export class TransportManager {
 
 			if (
 				this.sendTransport &&
-				(this.sendTransport.connectionState === "connected" ||
-					this.sendTransport.connectionState === "completed")
+				this.sendTransport.connectionState === "connected"
 			) {
 				const sendStats = await this.sendTransport.getStats();
 				processStats(sendStats, true);
@@ -801,8 +781,7 @@ export class TransportManager {
 
 			if (
 				this.recvTransport &&
-				(this.recvTransport.connectionState === "connected" ||
-					this.recvTransport.connectionState === "completed")
+				this.recvTransport.connectionState === "connected"
 			) {
 				const recvStats = await this.recvTransport.getStats();
 				processStats(recvStats, false);

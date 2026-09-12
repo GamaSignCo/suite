@@ -21,10 +21,11 @@ interface MeetingContext {
 	reactionStore: ReactionStore;
 	lobbyStore: LobbyStore;
 	sfuManager: SFUMeetingManager | null;
-	processedStream: MediaStream | null;
+	processedStream: Ref<MediaStream | null>;
 	isInMeeting: ReturnType<() => import("vue").ComputedRef<boolean>>;
 	onBackgroundEffectsChanged: () => void;
 	networkQuality: Ref<NetworkQuality>;
+	localNetworkQuality: Ref<string>;
 }
 
 const MEETING_CONTEXT_KEY: InjectionKey<MeetingContext> =

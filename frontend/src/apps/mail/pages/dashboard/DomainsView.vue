@@ -59,27 +59,18 @@
 </template>
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { watchDebounced } from '@vueuse/core'
 import {
-	Badge,
-	FeatherIcon,
-	FormControl,
-	ListEmptyState,
-	ListHeader,
-	ListRow,
-	ListRowItem,
-	ListRows,
-	ListView,
-	createResource,
-	usePageMeta,
-} from 'frappe-ui'
+	Badge, FormControl, createResource, usePageMeta } from 'frappe-ui'
+import { Icon as FeatherIcon, ListEmptyState, ListHeader, ListRow, ListRowItem, ListRows, ListView } from 'frappe-ui/experimental'
 
 import { fromNow } from '@/apps/mail/utils/datetime'
 import DashboardLayout from '@/apps/mail/components/DashboardLayout.vue'
 import DashboardListSkeleton from '@/apps/mail/components/DashboardListSkeleton.vue'
 import AddDomainModal from '@/apps/mail/components/Modals/AddDomainModal.vue'
 
-usePageMeta(() => ({ title: __('Domains') }))
+usePageMeta(() => appPageMeta(__('Domains'), 'Mail'))
 
 const showAddDomain = ref(false)
 const search = ref('')

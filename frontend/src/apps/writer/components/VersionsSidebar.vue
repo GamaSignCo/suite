@@ -32,13 +32,16 @@
     </div>
   </div>
   <div class="flex h-full overflow-hidden">
-    <div class="self-stretch w-72 border-e h-full relative">
-      <div class="flex flex-col items-center w-full">
+    <div class="self-stretch w-72 border-e h-full relative flex flex-col">
+      <div class="flex flex-col items-center w-full shrink-0">
         <Tabs
           v-model="tab"
           class="w-full"
           as="div"
-          :tabs="[{ label: 'Automatic' }, { label: 'Manual' }]"
+          :tabs="[
+            { value: 'automatic', label: 'Automatic' },
+            { value: 'manual', label: 'Manual' },
+          ]"
         />
         <Button
           :icon="LucideX"
@@ -47,9 +50,9 @@
           @click="showVersions = false"
         />
       </div>
-      <div class="p-3.5 gap-4 flex flex-col h-full overflow-y-auto">
+      <div class="p-3.5 gap-4 flex flex-col flex-1 min-h-0 overflow-y-auto">
         <Button
-          v-if="tab === 1"
+          v-if="tab === 'manual'"
           :icon="LucidePlus"
           class="absolute right-3 bottom-3"
           variant="outline"
@@ -212,7 +215,7 @@ import LucidePlus from '~icons/lucide/plus'
 import { onKeyDown } from '@vueuse/core'
 import { computed, ref, h, watch, inject } from 'vue'
 import emitter from '@/apps/writer/emitter'
-import { Button, createResource, Tabs, toast, useList } from 'frappe-ui'
+import { Button, createResource, Tabs, toast } from 'frappe-ui'
 import { Editor, EditorContent, RichTextKit } from 'frappe-ui/editor'
 import { clearDialogs, createDialog } from '@/apps/writer/utils/dialogs'
 import NewVersionDialog from './NewVersionDialog.vue'
@@ -250,7 +253,7 @@ function formatDateDDMMYY(dateStr) {
 }
 
 const groupedVersions = computed(() => {
-  if (tab.value === 0) {
+  if (tab.value === 'automatic') {
     const sortedAutoVersions = [...autoVersions.value].sort((a, b) => {
       return new Date(b.title) - new Date(a.title)
     })
@@ -274,7 +277,7 @@ const groupedVersions = computed(() => {
   }
 })
 
-const tab = ref(versions.data.filter((v) => v.manual).length ? 1 : 0)
+const tab = ref(versions.data.filter((v) => v.manual).length ? 'manual' : 'automatic')
 watch(tab, () => (versionPreview.value = null))
 
 const getPrevious = (version) => {

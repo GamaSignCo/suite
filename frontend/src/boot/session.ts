@@ -2,6 +2,12 @@ import { computed, reactive, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { createResource } from 'frappe-ui'
 
+import { clearSlidesUserData } from '@/apps/slides/utils/serviceWorker'
+
+// True when Jinja served the boot globals (window.suite_*); false in the Vite
+// dev server, where callers fetch instead.
+export const hasServerBoot = typeof window.suite_is_onboarded !== 'undefined'
+
 export const getSessionUser = (): string | null => {
   const cookies = new URLSearchParams(document.cookie.split('; ').join('&'))
   let user = cookies.get('user_id')
@@ -69,8 +75,10 @@ export const useSessionStore = defineStore('suite-session', () => {
 
   const logout = createResource({
     url: 'logout',
-    onSuccess() {
+    async onSuccess() {
       user.value = null
+      // the slides worker keeps this user's responses; the next user must not see them
+      await clearSlidesUserData().catch(() => {})
       window.location.reload()
     },
   })
@@ -96,6 +104,7 @@ export function useCurrentUser() {
     isLoggedIn: computed(() => store.isLoggedIn),
     fullName: computed(() => (userResource.data?.full_name as string | undefined) ?? fullName.value),
     imageURL: computed(() => (userResource.data?.avatar as string | undefined) ?? imageURL.value),
+    email: computed(() => (userResource.data?.email as string | undefined) ?? store.user ?? ''),
     systemUser: computed(() =>
       userResource.data
         ? ((userResource.data.roles as string[]) ?? []).includes('System Manager')

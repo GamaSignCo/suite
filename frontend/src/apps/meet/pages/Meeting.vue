@@ -5,7 +5,7 @@
 		data-theme="dark"
 	>
 		<div
-			v-if="!hasConnectionError"
+			v-if="!hasConnectionError && !connectionState.connectionMoved"
 			class="shrink-0 overflow-hidden transition-[height] duration-500 ease-in-out"
 			:class="headerVisible ? 'h-11' : 'h-0'"
 		>
@@ -14,6 +14,12 @@
 				:meetingTitle="previewTitle"
 			>
 				<template #right>
+					<RecordingIndicator
+						v-if="!showPreview && recording.isLive.value && recording.state.value"
+						:recording="recording.state.value"
+						:can-stop="isCurrentUserHost || isCurrentUserCohost"
+						@click="handleRecordingAction"
+					/>
 					<Button
 						v-if="showPreview"
 						size="sm"
@@ -33,13 +39,38 @@
 			</MeetingHeader>
 		</div>
 
+		<div
+			v-if="connectionState.connectionMoved"
+			class="grid flex-1 place-items-center px-5 py-16"
+		>
+			<div class="flex w-full max-w-sm flex-col items-center text-center">
+				<div class="rounded-full bg-surface-gray-2 p-3 text-ink-gray-5">
+					<span class="lucide-monitor-smartphone block size-6" aria-hidden="true" />
+				</div>
+				<h1 class="mt-4 text-2xl-semibold text-ink-gray-9">
+					Meeting moved to another device
+				</h1>
+				<p class="mt-2 text-p-base text-ink-gray-6">
+					Your audio and video have stopped here because you joined from another device.
+				</p>
+				<Button
+					class="mt-6"
+					variant="solid"
+					theme="gray"
+					icon-left="lucide-arrow-left"
+					label="Back to Meet"
+					@click="router.push('/meet')"
+				/>
+			</div>
+		</div>
+
 		<!-- Error state -->
-		<div v-if="hasConnectionError" class="flex-1 flex items-center justify-center">
+		<div v-else-if="hasConnectionError" class="flex-1 flex items-center justify-center">
 			<div class="text-center text-white">
 				<div class="text-red-500 mb-4">
 					<lucide-alert-circle class="w-12 h-12 mx-auto" />
 				</div>
-				<p class="text-xl mb-4">{{ connectionState.connectionError }}</p>
+				<p class="text-lg mb-4">{{ connectionState.connectionError }}</p>
 				<Button @click="resetToPreview" variant="outline" theme="red">Try Again</Button>
 			</div>
 		</div>
@@ -54,7 +85,7 @@
 				:isMicOn="mediaState.isMicOn"
 				:cameraPermissionGranted="mediaState.cameraPermissionGranted"
 				:microphonePermissionGranted="mediaState.microphonePermissionGranted"
-				:isConnecting="connectionState.isConnecting"
+				:isConnecting="isInitializingPreview || sfuConnection.isConnecting.value"
 				:userInitials="currentUser.userInitials.value"
 				:userAvatar="currentUser.userAvatar.value"
 				:currentUserName="
@@ -94,7 +125,7 @@
 								aria-live="polite"
 								data-testid="e2ee-join-pending-state"
 							>
-								<h1 class="text-lg-medium text-ink-gray-8">
+								<h1 class="text-md-medium text-ink-gray-8">
 									{{ e2eeJoinTitle }}
 								</h1>
 								<p class="mt-1 max-w-sm text-p-base text-ink-gray-7">
@@ -135,6 +166,7 @@
 								v-if="activePanel === 'chat'"
 								:open="true"
 								:messages="chatStore.chatMessages"
+								:avatar-by-user="participantAvatars"
 								:user-id="(currentUser.currentUser.value?.user_id as string) || ''"
 								:user-name="
 									(currentUser.currentUser.value?.full_name as string) ||
@@ -145,8 +177,11 @@
 								:isCohost="isCurrentUserCohost"
 								:isGuest="isGuestSession"
 								:hostOnlyChat="chatStore.hostOnlyChat"
+								:pinned-message="chatStore.pinnedMessage"
 								@close="toggleChat"
 								@send="chat.onSendChat"
+								@pin="chat.pinMessage"
+								@unpin="unpinChatMessage"
 							/>
 
 							<!-- People Panel -->
@@ -194,6 +229,9 @@
 						:currentUser="currentUser.currentUser.value"
 						:cameraPermissionGranted="mediaState.cameraPermissionGranted"
 						:microphonePermissionGranted="mediaState.microphonePermissionGranted"
+						:canManageRecording="recording.globalEnabled.value && (isCurrentUserHost || isCurrentUserCohost)"
+						:recordingStatus="recording.state.value?.status"
+						:recordingLoading="recording.startLoading.value || recording.stopLoading.value"
 						@toggle-chat="toggleChat"
 						@toggle-people="togglePeople"
 						@toggle-reactions="toggleReactions($event)"
@@ -207,6 +245,7 @@
 						@end-call="sfuConnection.endCall()"
 						@device-changed="handleDeviceChanged"
 						@visibility-change="isToolbarVisible = $event"
+						@manage-recording="handleRecordingAction"
 					/>
 				</div>
 			</div>
@@ -228,13 +267,25 @@
 			@approve-user="lobby.approveUser"
 			@reject-user="lobby.rejectUser"
 		/>
+
+		<RecordingPreflightDialog
+			v-model:open="recordingDialogOpen"
+			:preflight="recordingPreflight"
+			:confirm="confirmRecordingStart"
+		/>
+		<RecordingStopDialog
+			v-model="recordingStopDialogOpen"
+			:loading="recording.stopLoading.value"
+			@confirm="confirmRecordingStop"
+		/>
 	</div>
 </template>
 
 <script setup lang="ts">
-import { Badge, Button, createResource, frappeRequest, toast } from "frappe-ui";
-import { computed, h, onMounted, onUnmounted, provide, ref, watch } from "vue";
+import { Badge, Button, toast, useCall, useDoc, usePageMeta } from "frappe-ui";
+import { computed, h, onMounted, onUnmounted, provide, ref, toRef, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { submit } from "../utils/request";
 
 import ChatPanel from "../components/ChatPanel.vue";
 import JoinRequestNotifications from "../components/JoinRequestNotifications.vue";
@@ -243,6 +294,9 @@ import MeetAvatar from "../components/MeetAvatar.vue";
 import MeetingLayout from "../components/MeetingLayout.vue";
 import MeetingPreview from "../components/MeetingPreview.vue";
 import MeetingHeader from "../components/MeetingHeader.vue";
+import RecordingIndicator from "../components/RecordingIndicator.vue";
+import RecordingPreflightDialog from "../components/RecordingPreflightDialog.vue";
+import RecordingStopDialog from "../components/RecordingStopDialog.vue";
 import MeetingToolbar from "../components/MeetingToolbar.vue";
 import PeoplePanel from "../components/PeoplePanel.vue";
 import RejectionOverlay from "../components/RejectionOverlay.vue";
@@ -257,11 +311,13 @@ import { useGridLayout } from "../composables/useGridLayout";
 import { useLobby } from "../composables/useLobby";
 import { useLobbyStore } from "../composables/useLobbyStore";
 import { useMediaControls } from "../composables/useMediaControls";
-import { useMediaState } from "../composables/useMediaState";
-import { provideMeetingContext } from "../composables/useMeetingContext";
-import { useMeetingDoc } from "../composables/useMeetingDoc";
 import {
-	type MeetingDocLike,
+	findActiveScreenShare,
+	replaceActiveScreenShare,
+	useMediaState,
+} from "../composables/useMediaState";
+import { provideMeetingContext } from "../composables/useMeetingContext";
+import {
 	useMeetingHandlers,
 } from "../composables/useMeetingHandlers";
 import { useNoiseCancellation } from "../composables/useNoiseCancellation";
@@ -269,6 +325,10 @@ import { useNetworkQuality } from "../composables/useNetworkQuality";
 import { useParticipantStore } from "../composables/useParticipantStore";
 import { useRaiseHand } from "../composables/useRaiseHand";
 import { useRaiseHandStore } from "../composables/useRaiseHandStore";
+import {
+	type RecordingPreflight,
+	useRecording,
+} from "../composables/useRecording";
 import { useReactionStore } from "../composables/useReactionStore";
 import { useReactions } from "../composables/useReactions";
 import { useResponsiveGrid } from "../composables/useResponsiveGrid";
@@ -278,8 +338,6 @@ import {
 } from "../composables/useSFUConnection";
 import {
 	autoHideToolbar,
-	selectedCameraId,
-	selectedMicId,
 	selectedSpeakerId,
 } from "../data/mediaPreferences";
 import {
@@ -287,16 +345,24 @@ import {
 	showStatsForNerds,
 } from "../data/statsPreferences";
 import { session, userResource } from "@/boot/session";
+import { appPageMeta } from "@/utils/documentTitle";
 import { useSocket } from "../socket";
 import { deviceManager } from "../utils/media/DeviceManager";
 import type { Participant } from "../utils/media/ParticipantManager";
-import { usePoll } from "../composables/usePoll.js";
+import { pollKey, usePoll } from "../composables/usePoll.js";
 import { usePollStore } from "../composables/usePollStore.js";
 
 // Router
 const route = useRoute();
 const router = useRouter();
 const meetingId = computed(() => route.params.meetingId as string);
+
+interface MeetingDocument {
+	name: string;
+	title?: string;
+	owner?: string;
+	co_hosts?: { user: string }[];
+}
 
 function redirectToLogin() {
 	const path = window.location.pathname.startsWith("/meet")
@@ -330,36 +396,98 @@ const gridLayout = useGridLayout(mediaState);
 const notifiedLobbyUsers = ref(new Set<string>());
 
 // --- Meeting doc ---
-const {
-	getMeetingDoc,
-	meetingTitle,
-	meetingOwner,
-	isCurrentUserHost,
-	isCurrentUserCohost,
-	meetingCoHosts,
-} = useMeetingDoc();
-const meetingDoc = getMeetingDoc(meetingId.value);
-const previewDetails = createResource({
-	url: "suite.meet.api.meeting.get_public_meeting_preview",
+const meetingDoc = useDoc<MeetingDocument, {
+	approveJoinRequest: (params: { user_id: string }) => unknown;
+	approveAllJoinRequests: () => unknown;
+	rejectJoinRequest: (params: { user_id: string }) => unknown;
+	getWaitingRoomDetails: () => unknown;
+	banGuest: (params: { guest_id: string }) => unknown;
+	promoteToCohost: (params: { user_id: string }) => unknown;
+}>({
+	doctype: "Meet Room",
+	name: meetingId,
+	immediate: session.isLoggedIn,
+	methods: {
+		approveJoinRequest: "approve_join_request",
+		approveAllJoinRequests: "approve_all_join_requests",
+		rejectJoinRequest: "reject_join_request",
+		getWaitingRoomDetails: "get_waiting_room_details",
+		banGuest: "ban_guest",
+		promoteToCohost: "promote_to_cohost",
+	},
+});
+const meetingTitle = computed(
+	() => meetingDoc.doc?.title || meetingDoc.doc?.name || meetingId.value,
+);
+const meetingOwner = computed(() => meetingDoc.doc?.owner || "");
+const meetingCoHosts = computed(
+	() => meetingDoc.doc?.co_hosts?.map((row) => row.user) || [],
+);
+const isCurrentUserHost = computed(
+	() => Boolean(session.user?.sessionUser && session.user.sessionUser === meetingOwner.value),
+);
+const isCurrentUserCohost = computed(
+	() => Boolean(session.user?.sessionUser && meetingCoHosts.value.includes(session.user.sessionUser)),
+);
+const recording = useRecording(meetingId.value);
+const recordingDialogOpen = ref(false);
+const recordingStopDialogOpen = ref(false);
+const recordingPreflight = ref<RecordingPreflight | null>(null);
+
+async function handleRecordingAction() {
+	try {
+		if (recording.isStarting.value) return;
+		if (recording.isLive.value) {
+			if (!isCurrentUserHost.value && !isCurrentUserCohost.value) return;
+			if (recording.state.value?.status !== "Stopping") recordingStopDialogOpen.value = true;
+			return;
+		}
+		recordingPreflight.value = await recording.getPreflight();
+		recordingDialogOpen.value = true;
+	} catch (error) {
+		toast.error(error instanceof Error ? error.message : "Could not manage recording");
+	}
+}
+
+async function confirmRecordingStop() {
+	try {
+		await recording.stop();
+		recordingStopDialogOpen.value = false;
+	} catch (error) {
+		toast.error(error instanceof Error ? error.message : "Could not stop recording");
+	}
+}
+
+async function confirmRecordingStart() {
+	try {
+		await recording.start();
+	} catch (error) {
+		toast.error(error instanceof Error ? error.message : "Could not start recording");
+		throw error;
+	}
+}
+const previewDetails = useCall<{ title?: string }, { meeting_id: string }>({
+	url: "/api/v2/method/suite.meet.api.meeting.get_public_meeting_preview",
 	params: { meeting_id: meetingId.value },
-	auto: !session.isLoggedIn,
+	immediate: !session.isLoggedIn,
+});
+const checkMeetingAccess = useCall<AccessData, { meeting_id: string }>({
+	url: "/api/v2/method/suite.meet.api.meeting.check_meeting_access",
+	immediate: false,
 });
 const previewTitle = computed(
 	() => meetingDoc.doc?.title || previewDetails.data?.title || meetingId.value,
 );
+usePageMeta(() => appPageMeta(previewTitle.value, "Meet"));
 
 watch(
-	() => meetingDoc.get.error,
+	() => meetingDoc.error,
 	(error) => {
 		if (error && !previewDetails.data && !previewDetails.loading) {
-			previewDetails.fetch();
+			void previewDetails.reload();
 		}
 	},
 );
-
-// --- Background effects & noise cancellation ---
-const backgroundEffects = useBackgroundEffects();
-const noiseCancellation = useNoiseCancellation();
 
 // --- Lobby notification conversion ---
 const lobbyUsersForNotifications = computed(() => {
@@ -424,7 +552,9 @@ function getE2EEJoinPendingMessage(detail: {
 const isGuestSession = computed(
 	() =>
 		!session.isLoggedIn &&
-		(!!connectionState.guestAuthToken || lobbyStore.isWaitingForApproval),
+		(!!connectionState.guestAuthToken ||
+			lobbyStore.isWaitingForApproval ||
+			currentUser.currentUser.value?.is_guest === true),
 );
 
 // --- SFU Connection ---
@@ -434,6 +564,7 @@ const sfuConnection = useSFUConnection({
 	mediaState,
 	participantStore,
 	lobbyStore,
+	meetingDoc,
 	gridLayout,
 	meetingId: meetingId.value,
 	notifiedLobbyUsers,
@@ -443,24 +574,39 @@ const sfuConnection = useSFUConnection({
 		}
 	},
 	onHostKickedYou: () => sfuConnection.endCall(),
+	onParticipantConnectionReplaced: () => mediaControls.cleanupLocalMedia(),
 	onScreenShareStarted: (data: SFUScreenShareData) => {
 		const pid = data.participantId;
-		if (!pid) return;
-		const prev = mediaState.activeScreenShareConsumers || [];
-		const filtered = prev.filter((s) => s.participantId !== pid);
-		mediaState.activeScreenShareConsumers = [
-			...filtered,
+		const producerId = data.producerId ?? data.consumer?.producerId;
+		if (!pid || !producerId) return;
+		const replacement = replaceActiveScreenShare(
+			mediaState.activeScreenShareConsumers || [],
 			{
+				source: "remote",
 				participantId: pid,
 				consumerId: data.consumer?.id || "remote-screen",
+				producerId,
 				startedAt: data.startedAt || Date.now(),
 			},
-		];
+		);
+		for (const share of replacement.replaced) {
+			sfuConnection.removeScreenSharePreview(share.consumerId);
+		}
+		mediaState.activeScreenShareConsumers = replacement.shares;
 		if (data.stream instanceof MediaStream) {
 			try {
 				const store = mediaState.screenShareStreams || {};
 				store[pid] = data.stream;
 				mediaState.screenShareStreams = store;
+				void sfuConnection
+					.attachScreenSharePreview(
+						data.consumer?.id || "remote-screen",
+						data.stream,
+						"owned",
+					)
+					.catch((error) =>
+						console.warn("Failed to attach screen share preview:", error),
+					);
 			} catch (err) {
 				console.warn("Failed to store screen share stream:", err);
 			}
@@ -468,19 +614,22 @@ const sfuConnection = useSFUConnection({
 	},
 	onScreenShareStopped: (data: SFUScreenShareData) => {
 		const pid = data.participantId;
+		const producerId = data.producerId ?? data.consumer?.producerId;
+		if (!pid || !producerId) return;
 		const list = mediaState.activeScreenShareConsumers || [];
+		const current = findActiveScreenShare(
+			list,
+			pid,
+			producerId,
+			data.consumerId ?? data.consumer?.id,
+		);
+		if (!current) return;
+		sfuConnection.removeScreenSharePreview(current.consumerId);
 		mediaState.activeScreenShareConsumers = list.filter(
-			(share) => share.participantId !== pid,
+			(share) => share.producerId !== producerId,
 		);
 		const store = mediaState.screenShareStreams || {};
 		if (pid && store[pid]) {
-			const stream = store[pid];
-			const tracks = stream.getTracks();
-			if (tracks) {
-				for (const t of tracks) {
-					t.stop();
-				}
-			}
 			delete store[pid];
 			mediaState.screenShareStreams = store;
 		}
@@ -488,8 +637,36 @@ const sfuConnection = useSFUConnection({
 	onActiveSpeakerChanged: (participantIds: string[]) => {
 		participantStore.activeSpeakerIds = participantIds;
 	},
+	onRecordingState: recording.syncState,
+	onRecordingEnabled: recording.setGlobalEnabled,
+	onCohostPromoted: () => meetingDoc.reload(),
 });
-const { networkQuality } = useNetworkQuality(sfuConnection.sfuManager);
+
+// --- Background effects & noise cancellation ---
+const backgroundEffects = useBackgroundEffects({
+	autoCleanupOnUnmount: false,
+	mediaAttachments: sfuConnection,
+});
+const noiseCancellation = useNoiseCancellation();
+const { networkQuality, downlinkQuality, isTransportFailed } = useNetworkQuality(
+	sfuConnection.sfuManager,
+);
+const localNetworkQuality = computed(() => {
+	if (isTransportFailed.value) return "critical";
+	if (
+		sfuConnection.localNetworkQuality.value === "critical" ||
+		downlinkQuality.value === "critical"
+	) {
+		return "critical";
+	}
+	if (
+		sfuConnection.localNetworkQuality.value === "poor" ||
+		downlinkQuality.value === "poor"
+	) {
+		return "poor";
+	}
+	return "good";
+});
 
 // --- Media Controls ---
 const mediaControls = useMediaControls({
@@ -499,28 +676,10 @@ const mediaControls = useMediaControls({
 	currentUser,
 	sfuClient: sfuConnection.sfuClient,
 	sfuManager: sfuConnection.sfuManager,
+	mediaAttachments: sfuConnection,
 	deviceManager,
 	backgroundEffects,
 	noiseCancellation,
-	toast,
-	mediaPreferences: {
-		micEnabled: ref(false),
-		cameraEnabled: ref(false),
-		selectedCameraId,
-		selectedMicId,
-		selectedSpeakerId,
-		pushToTalkEnabled: ref(false),
-		noiseCancellationEnabled: ref(false),
-		setMicEnabled: (_v: boolean) => {
-			/* handled via mediaState */
-		},
-		setCameraEnabled: (_v: boolean) => {
-			/* handled via mediaState */
-		},
-		setSelectedCameraId: () => {},
-		setSelectedMicId: () => {},
-		setSelectedSpeakerId: () => {},
-	},
 });
 
 import { meetingControls } from "../composables/useKeyboardShortcuts";
@@ -538,7 +697,13 @@ const chat = useChat({
 	chatStore,
 	currentUser,
 	sfuClient: sfuConnection.sfuClient,
+	canPin: () => isCurrentUserHost.value || isCurrentUserCohost.value,
 });
+
+function unpinChatMessage() {
+	const messageId = chatStore.pinnedMessage?.messageId;
+	if (messageId) chat.pinMessage(messageId, "unpin");
+}
 
 // --- Poll ---
 
@@ -566,7 +731,7 @@ const raiseHand = useRaiseHand({
 // --- Lobby ---
 const lobby = useLobby({
 	lobbyStore,
-	meetingId: meetingId.value as string,
+	meetingDoc,
 });
 
 type AccessData = { allow_guest?: boolean; host_only_chat?: boolean };
@@ -582,16 +747,22 @@ provideMeetingContext({
 	reactionStore,
 	lobbyStore,
 	sfuManager: sfuConnection.sfuManager.value,
-	processedStream: mediaState.processedStream,
+	processedStream: toRef(mediaState, "processedStream"),
 	isInMeeting: computed(() => true),
 	onBackgroundEffectsChanged: mediaControls.applyBackgroundEffectsToLocalStream,
 	networkQuality,
+	localNetworkQuality,
 });
 
 // Provide legacy injects for components not yet migrated to useMeetingContext
 provide("setLocalVideoRef", mediaControls.setLocalVideoRef);
 provide("setRemoteVideoRef", mediaControls.setRemoteVideoRef);
-provide("setScreenShareVideoRef", mediaControls.setScreenShareVideoRef);
+provide(
+	"setScreenShareVideoRef",
+	(_consumerId: string, element: HTMLVideoElement | null) => {
+		mediaControls.setScreenShareVideoRef(_consumerId, element);
+	},
+);
 provide("getParticipantName", participantStore.getParticipantName);
 provide("meetingId", meetingId.value);
 provide("sfuManager", sfuConnection.sfuManager);
@@ -605,10 +776,10 @@ provide("hostControls", {
 });
 provide("meetingTitle", computed(() => meetingTitle.value));
 
-provide("poll", poll);
+provide(pollKey, poll);
 
 // --- Computed properties ---
-const isConnecting = computed(() => connectionState.isConnecting);
+const isConnecting = sfuConnection.isConnecting;
 const hasConnectionError = computed(() => !!connectionState.connectionError);
 const isInLobby = computed(() => lobbyStore.isInLobby || false);
 const isWaitingForApproval = computed(
@@ -619,10 +790,6 @@ const showPreview = computed(() => {
 	const isUnauthenticatedGuest = !session.isLoggedIn && !isGuestSession.value;
 	if (isUnauthenticatedGuest) {
 		return true;
-	}
-
-	if (isGuestSession.value) {
-		return false;
 	}
 	if (lobbyStore.isInLobby) {
 		return false;
@@ -678,7 +845,7 @@ watch(
 		connectingToastTimer = setTimeout(() => {
 			connectingToastTimer = null;
 			if (
-				!connectionState.isConnecting ||
+				!sfuConnection.isConnecting.value ||
 				connectionState.isInPreview ||
 				lobbyStore.isWaitingForApproval ||
 				lobbyStore.isInLobby ||
@@ -707,6 +874,15 @@ const participantsForPeoplePanel = computed<Record<string, Participant>>(
 	() => participantStore.participants as Record<string, Participant>,
 );
 
+const participantAvatars = computed(() =>
+	Object.fromEntries(
+		Object.entries(participantsForPeoplePanel.value).map(([userId, participant]) => [
+			userId,
+			participant.avatar,
+		]),
+	),
+);
+
 const { isMobile } = useResponsiveGrid();
 
 const panelWidth = computed(() => {
@@ -721,6 +897,7 @@ const isHandRaised = computed(() => {
 });
 
 // --- Refs ---
+const isInitializingPreview = ref(true);
 const isReactionPickerOpen = ref(false);
 const isFullscreen = ref(false);
 const isToolbarVisible = ref(true);
@@ -742,7 +919,7 @@ const handlers = useMeetingHandlers({
 	sfuConnection,
 	mediaControls,
 	lobby,
-	meetingDoc: meetingDoc as unknown as MeetingDocLike,
+	meetingDoc,
 	meetingId: meetingId.value,
 	isCurrentUserHost,
 	isPeopleOpen,
@@ -868,54 +1045,12 @@ const syncFullscreenState = () => {
 	isFullscreen.value = !!document.fullscreenElement;
 };
 
-const setSinkIdOnVideoElements = async (sinkId: string) => {
-	const videoElements = document.querySelectorAll("video");
-	const promises = [];
-	for (const videoEl of videoElements) {
-		promises.push(
-			(videoEl as HTMLVideoElement).setSinkId(sinkId).catch(() => {}),
-		);
-	}
-
-	if (sfuConnection.sfuManager.value?.videoManager) {
-		for (const [, audioElement] of sfuConnection.sfuManager.value.videoManager
-			.audioElements) {
-			promises.push(audioElement.setSinkId(sinkId).catch(() => {}));
-		}
-	}
-
-	await Promise.all(promises);
-};
-
-const handleE2EENeedsMediaRepublish = async () => {
-	if (!mediaState.isCameraOn && !mediaState.isMicOn) return;
+const handleE2EENeedsMediaRepublish = async (event: Event) => {
+	const detail = (event as CustomEvent).detail as
+		| { needsCamera?: boolean; needsMicrophone?: boolean }
+		| undefined;
 	try {
-		const { stream } = await mediaControls.acquireUserMedia(
-			mediaState.isCameraOn,
-			mediaState.isMicOn,
-		);
-		mediaState.localStream = stream;
-		if (mediaState.isCameraOn) {
-			mediaState.cameraPermissionGranted = true;
-			await mediaControls.applyBackgroundEffectsToLocalStream();
-		}
-		if (mediaState.isMicOn) {
-			mediaState.microphonePermissionGranted = true;
-		}
-		if (mediaState.localVideo) {
-			mediaControls.setLocalVideoRef(mediaState.localVideo);
-		}
-		if (mediaState.localStream && sfuConnection.sfuManager.value) {
-			const videoTracks = mediaState.processedStream
-				? mediaState.processedStream.getVideoTracks()
-				: mediaState.localStream.getVideoTracks();
-			const audioTracks = mediaState.localStream.getAudioTracks();
-			const streamToPublish = new MediaStream([...videoTracks, ...audioTracks]);
-			await sfuConnection.sfuManager.value.publishMedia(streamToPublish, {
-				publishVideo: mediaState.isCameraOn,
-				publishAudio: mediaState.isMicOn,
-			});
-		}
+		await mediaControls.republishMediaAfterE2EE(detail);
 	} catch (error) {
 		console.error(
 			"Failed to republish media after E2EE reconfiguration:",
@@ -953,23 +1088,21 @@ onMounted(async () => {
 	// Check meeting access for unauthenticated users
 	if (!session.isLoggedIn) {
 		try {
-			const accessData = await frappeRequest({
-				url: "suite.meet.api.meeting.check_meeting_access",
-				params: {
-					meeting_id: meetingId.value,
-				},
+			const accessData = await submit(checkMeetingAccess, {
+				meeting_id: meetingId.value,
 			});
 
-			if ((accessData as AccessData).host_only_chat !== undefined) {
-				chatStore.hostOnlyChat = !!(accessData as AccessData).host_only_chat;
+			if (accessData?.host_only_chat !== undefined) {
+				chatStore.hostOnlyChat = !!accessData.host_only_chat;
 			}
-			if (!(accessData as { allow_guest?: boolean }).allow_guest) {
+			if (!accessData?.allow_guest) {
 				const loginUrl = `/login?redirect-to=${encodeURIComponent(`/meet/${meetingId.value}`)}`;
 				window.location.href = loginUrl;
 				return;
 			}
 		} catch (error) {
 			console.error("Failed to check meeting access:", error);
+			isInitializingPreview.value = false;
 			return;
 		}
 	}
@@ -987,7 +1120,7 @@ onMounted(async () => {
 		if (selectedSpeakerId.value) {
 			await mediaControls.applySpeakerDevice();
 		}
-		connectionState.isInPreview = true;
+		isInitializingPreview.value = false;
 		return;
 	}
 
@@ -1005,6 +1138,8 @@ onMounted(async () => {
 	if (selectedSpeakerId.value) {
 		await mediaControls.applySpeakerDevice();
 	}
+
+	isInitializingPreview.value = false;
 
 	// Auto-join if just created
 	if (wasJustCreated) {
@@ -1024,63 +1159,12 @@ onUnmounted(() => {
 	document.removeEventListener("meet:e2ee-join-status", handleE2EEJoinStatus);
 });
 
-// Watch for localVideo element and localStream connection
-watch(
-	[
-		() => mediaState.localVideo,
-		() => mediaState.localStream,
-		() => mediaState.processedStream,
-	],
-	async ([videoElement, stream, _processedStream]) => {
-		if (videoElement && stream) {
-			try {
-				// Prefer processed stream (with background effects) over raw local stream
-				const streamToUse = mediaState.processedStream || stream;
-				const currentStreamId = streamToUse.id;
-				const trackedStreamId = (videoElement as HTMLElement).dataset
-					?.sourceStreamId;
-
-				if (trackedStreamId !== currentStreamId) {
-					const videoTracks = streamToUse.getVideoTracks();
-					if (videoTracks.length > 0) {
-						(videoElement as HTMLVideoElement).srcObject = new MediaStream(
-							videoTracks,
-						);
-					} else {
-						(videoElement as HTMLVideoElement).srcObject = streamToUse;
-					}
-					(videoElement as HTMLElement).dataset.sourceStreamId =
-						currentStreamId;
-					(videoElement as HTMLVideoElement).muted = true;
-					await (videoElement as HTMLVideoElement).play();
-				}
-
-				if (
-					selectedSpeakerId.value &&
-					typeof (videoElement as HTMLVideoElement).setSinkId === "function"
-				) {
-					try {
-						await (videoElement as HTMLVideoElement).setSinkId(
-							selectedSpeakerId.value,
-						);
-					} catch (error) {
-						console.warn("Could not set speaker for local video:", error);
-					}
-				}
-			} catch (error) {
-				console.warn("Could not play local video:", error);
-			}
-		}
-	},
-	{ immediate: true },
-);
-
 watch(selectedSpeakerId, async (newSpeakerId) => {
 	if (
 		newSpeakerId &&
 		deviceManager.isDeviceAvailable(newSpeakerId, "speaker")
 	) {
-		await setSinkIdOnVideoElements(newSpeakerId);
+		await mediaControls.applySpeakerDevice();
 	}
 });
 

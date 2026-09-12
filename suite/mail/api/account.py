@@ -6,12 +6,13 @@ from frappe import _
 from frappe.utils import cint, get_datetime, get_system_timezone, get_url, now_datetime
 from frappe.utils.data import sha256_hash
 
-from suite.mail.api.admin import add_member
 from suite.mail.api.mail import normalize_filter
 from suite.mail.api.utils import get_avatar_url
 from suite.mail.doctype.identity.identity import fetch_identities
+from suite.mail.doctype.mail_account_request.mail_account_request import otp_cache_key
 from suite.mail.doctype.mail_settings.mail_settings import get_signup_domains
 from suite.mail.doctype.participant_identity.participant_identity import fetch_participant_identities
+from suite.mail.doctype.user_account.user_account import is_jmap_account_belongs_to_user
 from suite.mail.stalwart import get_domains
 from suite.mail.utils import get_config, is_stalwart_configured, log_mail_error
 from suite.mail.utils.dns import parse_dns_zone_file
@@ -20,7 +21,7 @@ from suite.mail.utils.user import (
     has_user_settings,
     is_jmap_configured,
 )
-from suite.utils import convert_html_to_text, user_context
+from suite.utils import user_context
 from suite.utils.rate_limiter import dynamic_rate_limit
 from suite.utils.user import is_suite_admin, is_system_manager
 
@@ -46,15 +47,13 @@ def validate_email_assigned(email: str) -> None:
 
 @frappe.whitelist(allow_guest=True)
 @dynamic_rate_limit()
-def signup(
-    username: str,
-    domain: str,
-    email: str,
-    password: str,
-    first_name: str,
-    last_name: str | None = None,
-) -> None:
-    """Create a new Mail Account for signup"""
+def signup(username: str, domain: str, email: str) -> str:
+    """Start a self-serve signup: record the request and email a verification code.
+
+    Nothing is provisioned here. The caller proves ownership of the backup email via
+    `verify_otp`, which releases the request key, and only `create_account` with that
+    key creates the account.
+    """
 
     if not frappe.db.get_single_value("Mail Settings", "allow_signup"):
         frappe.throw(_("Signup is disabled."))
@@ -63,16 +62,18 @@ def signup(
         frappe.throw(_("Domain {0} is not allowed for signup.").format(domain))
 
     with user_context("Administrator"):
-        add_member(
-            username=username,
-            domain=domain,
-            is_admin=False,
-            send_invite=False,
-            backup_email=email,
-            first_name=first_name,
-            last_name=last_name,
-            password=password,
-        )
+        account_request = frappe.new_doc("Mail Account Request")
+        account_request.account = f"{username}@{domain}"
+        account_request.backup_email = email
+        account_request.send_invite = 0
+        # The insert runs elevated, so mark the request as self-serve: an empty
+        # invited_by is what distinguishes a self-signup from an admin invite.
+        account_request.flags.self_signup = True
+        account_request.insert(ignore_permissions=True)
+
+    account_request.set_otp()
+    account_request.send_verification_email()
+    return account_request.name
 
 
 @frappe.whitelist(allow_guest=True)
@@ -91,11 +92,11 @@ def resend_otp(account_request: str) -> None:
 def verify_otp(account_request: str, otp: str) -> str:
     """Verify the OTP and return the request key"""
 
-    otp_hash = frappe.cache.get_value(f"account_request_otp_hash:{account_request}", expires=True)
-    if not otp_hash or otp_hash != frappe.utils.sha256_hash(otp):
+    otp_hash = frappe.cache.get_value(otp_cache_key(account_request), expires=True)
+    if not otp_hash or otp_hash != sha256_hash(otp):
         frappe.throw(_("Invalid OTP. Please try again."))
 
-    frappe.cache.delete_value(f"account_request_otp_hash:{account_request}")
+    frappe.cache.delete_value(otp_cache_key(account_request))
     return frappe.db.get_value("Mail Account Request", account_request, "request_key")
 
 
@@ -202,9 +203,9 @@ def get_user_info() -> dict | None:
             USER.username,
             USER.api_key,
             USER.time_zone,
-            USER_SETTINGS.color_scheme,
             USER_SETTINGS.group_messages_by,
             USER_SETTINGS.show_reading_pane,
+            USER_SETTINGS.undo_send_period,
             USER_SETTINGS.name.as_("user_settings"),
         )
         .where(USER.name == user)
@@ -426,6 +427,7 @@ def send_reset_password_link(user: str) -> str:
 
 
 @frappe.whitelist(allow_guest=True)
+@dynamic_rate_limit()
 def get_user_for_reset_password_key(key: str) -> str:
     """Return the user for a reset password key"""
 
@@ -434,6 +436,7 @@ def get_user_for_reset_password_key(key: str) -> str:
 
 
 @frappe.whitelist()
+@dynamic_rate_limit()
 def create_mail_import(
     account: str,
     format: Literal["eml", "jmap", "mbox", "maildir", "maildir-nested"],
@@ -456,6 +459,7 @@ def create_mail_import(
 
 
 @frappe.whitelist()
+@dynamic_rate_limit()
 def create_mail_export(
     account: str,
     format: Literal["jmap", "mbox", "maildir", "maildir-nested"],
@@ -483,6 +487,7 @@ def create_mail_export(
 
 
 @frappe.whitelist()
+@dynamic_rate_limit()
 def create_calendar_import(
     account: str,
     format: Literal["ics", "jmap"],
@@ -504,6 +509,7 @@ def create_calendar_import(
 
 
 @frappe.whitelist()
+@dynamic_rate_limit()
 def create_calendar_export(
     account: str,
     format: Literal["ics", "jmap"],
@@ -549,6 +555,7 @@ def normalize_calendar_filter(filter: dict) -> dict:
 
 
 @frappe.whitelist()
+@dynamic_rate_limit()
 def create_contacts_import(
     account: str,
     format: Literal["vcf", "jmap"],
@@ -570,6 +577,7 @@ def create_contacts_import(
 
 
 @frappe.whitelist()
+@dynamic_rate_limit()
 def create_contacts_export(
     account: str,
     format: Literal["jmap", "vcf"],
@@ -619,6 +627,12 @@ def is_push_notification_relay_enabled() -> bool:
 def get_quota(account: str) -> dict:
     """Return quota usage for the user"""
 
+    # The Quota rows are read straight out of the local table, which bypasses permissions,
+    # and this endpoint never reaches a JMAP service that would resolve ownership on the
+    # way — so the account has to be established as the caller's here. Same omission as
+    # get_mailboxes had.
+    is_jmap_account_belongs_to_user(account, raise_exception=True)
+
     result = {
         "disk_quota": 0,
         "used_quota": 0,
@@ -659,5 +673,5 @@ def set_signature(identity: str, signature: str) -> None:
 
     doc = frappe.get_doc("Identity", identity)
     doc.html_signature = signature
-    doc.text_signature = convert_html_to_text(signature)
+    doc.set_text_signature()
     doc.db_update()

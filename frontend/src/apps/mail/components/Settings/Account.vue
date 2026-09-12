@@ -87,9 +87,14 @@
 			:options="ON_MARK_AS_JUNK_OPTIONS"
 		/>
 
+		<!-- Read-only, so it sits after the settings rather than ahead of them; the
+		     sidebar shows this meter only once the account is nearly full. -->
+		<h2 class="text-base-semibold text-ink-gray-8">{{ __('Storage') }}</h2>
+		<StorageMeter :used-percentage :label :limited="isLimited" />
+
 		<ErrorMessage :message="jmapAccount.save.error" />
 
-		<Dialog v-model="showMoveToInbox" :options="moveToInboxOptions" />
+		<Dialog v-model:open="showMoveToInbox" v-bind="moveToInboxOptions" />
 		</div>
 	</template>
 	</AppSettingsBody>
@@ -109,6 +114,8 @@ import {
 } from 'frappe-ui'
 import AppSettingsHeader from '@/components/settings/AppSettingsHeader.vue'
 import AppSettingsBody from '@/components/settings/AppSettingsBody.vue'
+import StorageMeter from '@/components/StorageMeter.vue'
+import { useQuota } from '@/apps/mail/composables/useQuota'
 
 import { raiseToast } from '@/apps/mail/utils'
 import { useScreenSize } from '@/apps/mail/utils/composables'
@@ -117,6 +124,7 @@ import { userStore } from '@/apps/mail/stores/user'
 import type { Identity, MailboxData } from '@/apps/mail/types'
 
 const { isMobile } = useScreenSize()
+const { isLimited, usedPercentage, label } = useQuota()
 const user = inject('$user')
 // Read store.accountId live in makeParams; destructuring would snapshot the
 // unwrapped value and miss account switches while this component stays mounted.

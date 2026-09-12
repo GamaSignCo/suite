@@ -17,6 +17,19 @@ from suite.drive.utils.files import FileManager
 
 @frappe.whitelist()
 def sync_preview(json: bool = True):
+    """
+    List files present on disk but not yet registered in Drive.
+
+    Admin-only: these files have no `File` record yet, so there is no share or
+    folder permission to filter them by - the listing exposes the raw storage
+    tree (paths, sizes, mtimes) of everything staged under the site folder.
+    """
+    if not is_drive_site_admin():
+        frappe.throw(
+            "You do not have permission to view files on disk.",
+            frappe.PermissionError,
+        )
+
     manager = FileManager()
     files = manager.fetch_new_files()
     sorted_files = sorted(files.items(), key=lambda p: len(p[0].parts))

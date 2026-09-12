@@ -1,7 +1,9 @@
 <template>
-	<div class="absolute left-0 top-0 h-full w-full bg-black">
+	<div
+		class="absolute left-0 top-0 h-full w-full overflow-clip bg-black"
+		:class="{ 'slideshow-hide-cursor': cursorHidden }"
+	>
 		<div
-			ref="slideContainer"
 			class="flex h-screen w-full items-center justify-center"
 			:style="slideContainerStyles"
 		>
@@ -62,9 +64,9 @@
 </template>
 
 <script setup>
-import { computed, onActivated, onDeactivated, ref, useTemplateRef, watch, provide } from 'vue'
-import { useRouter } from 'vue-router'
-import { useShortcut } from 'frappe-ui'
+import { computed, onActivated, onDeactivated, ref, watch, provide } from 'vue'
+import { toast, useKeyboardShortcut, usePageMeta } from 'frappe-ui'
+import { appPageMeta } from '@/utils/documentTitle'
 
 import SlideElement from '@/apps/slides/components/SlideElement.vue'
 import SlideshowEndScreen from '@/apps/slides/components/SlideshowEndScreen.vue'
@@ -73,6 +75,11 @@ import FadeElementTransition from '@/apps/slides/components/FadeElementTransitio
 import {
 	inSlideShowMode,
 	showSlideshowEndScreen,
+	requestFullscreen,
+	exitFullscreen,
+	requestWakeLock,
+	releaseWakeLock,
+	releaseVideoWarmers,
 	endSlideShow,
 	prefetchNextSlide,
 	changeSlideInSlideshow,
@@ -80,13 +87,15 @@ import {
 	performPreviousStep,
 } from '@/apps/slides/stores/slideshow'
 
-import { applyReverseTransition, initPresentationDoc, inReadonlyMode } from '@/apps/slides/stores/presentation'
+import {
+	applyReverseTransition,
+	initPresentationDoc,
+	inReadonlyMode,
+	pageTitle,
+} from '@/apps/slides/stores/presentation'
 import { currentSlide, setSlideIndex, slideIndex, slides } from '@/apps/slides/stores/slide'
 import { resetFocus } from '@/apps/slides/stores/element'
-
-const slideContainerRef = useTemplateRef('slideContainer')
-
-const router = useRouter()
+import { getTransitionKey } from '@/apps/slides/stores/transition'
 
 const props = defineProps({
 	presentationId: {
@@ -112,11 +121,9 @@ const clipPath = computed(() => {
 	return `inset(${inset}px 0px ${inset}px 0px)`
 })
 
-const getElementKey = (element) => {
-	return element.refId || element.id
-}
+const getElementKey = (element) => getTransitionKey(element)
 
-const slideCursor = ref('none')
+const cursorHidden = ref(true)
 
 const prevSlide = computed(() => {
 	if (slideIndex.value == 0) return null
@@ -139,8 +146,8 @@ const slideStyles = computed(() => {
 	const baseStyles = {
 		width: '960px',
 		height: '540px',
+		overflow: 'hidden',
 		backgroundColor: currentSlide.value?.background || '#ffffff',
-		cursor: slideCursor.value,
 	}
 
 	if (prevSlide.value?.transition == 'Magic Move') {
@@ -259,24 +266,36 @@ const slideLeave = (el, done) => {
 	done()
 }
 
+const CURSOR_IDLE_DELAY = 3000
 let cursorTimer = null
 
 const resetCursorVisibility = () => {
-	slideCursor.value = 'auto'
+	cursorHidden.value = false
 	clearTimeout(cursorTimer)
 	cursorTimer = setTimeout(() => {
-		slideCursor.value = 'none'
-	}, 4000)
+		cursorHidden.value = true
+	}, CURSOR_IDLE_DELAY)
+}
+
+const stopCursorTracking = () => {
+	clearTimeout(cursorTimer)
+	document.removeEventListener('mousemove', resetCursorVisibility)
+	cursorHidden.value = true
 }
 
 const handleFullScreenChange = () => {
 	if (document.fullscreenElement) {
-		slideContainerRef.value?.addEventListener('mousemove', resetCursorVisibility)
 		inSlideShowMode.value = true
+		requestWakeLock()
 	} else {
-		slideContainerRef.value?.removeEventListener('mousemove', resetCursorVisibility)
-		endSlideShow()
+		stopCursorTracking()
+		if (inSlideShowMode.value) endSlideShow()
 	}
+}
+
+// the lock is dropped when the tab is hidden
+const handleVisibilityChange = () => {
+	if (document.visibilityState === 'visible' && inSlideShowMode.value) requestWakeLock()
 }
 
 const slideContainerStyles = computed(() => {
@@ -287,23 +306,15 @@ const slideContainerStyles = computed(() => {
 })
 
 const initFullscreenMode = async () => {
-	const container = slideContainerRef.value
-	if (!container) return
-
-	const fullscreenMethods = [
-		container.requestFullscreen,
-		container.webkitRequestFullscreen, // Safari
-		container.msRequestFullscreen, // IE
-		container.mozRequestFullScreen, // Firefox
-	]
-
-	const fullscreenMethod = fullscreenMethods.find((method) => method)
-
-	if (fullscreenMethod) {
-		fullscreenMethod.call(container).catch((e) => {
-			router.replace({ name: 'slides-editor' })
-		})
+	// fullscreen is requested on the click that starts the slideshow, so the
+	// change event fires before this component is around to hear it
+	if (!document.fullscreenElement && !(await requestFullscreen())) {
+		toast.error('Could not enter fullscreen mode')
+		endSlideShow()
+		return
 	}
+
+	handleFullScreenChange()
 }
 
 const loadPresentation = async () => {
@@ -316,11 +327,16 @@ const updateWindowSize = () => {
 	windowHeight.value = window.innerHeight
 }
 
+usePageMeta(() => appPageMeta(pageTitle(), 'Slides'))
+
 onActivated(() => {
+	document.title = pageTitle()
 	resetFocus()
 	loadPresentation()
 	initFullscreenMode()
 	document.addEventListener('fullscreenchange', handleFullScreenChange)
+	document.addEventListener('visibilitychange', handleVisibilityChange)
+	document.addEventListener('mousemove', resetCursorVisibility)
 	window.addEventListener('resize', updateWindowSize)
 
 	// Initial prefetch of next slide
@@ -331,7 +347,17 @@ onActivated(() => {
 
 onDeactivated(() => {
 	document.removeEventListener('fullscreenchange', handleFullScreenChange)
+	document.removeEventListener('visibilitychange', handleVisibilityChange)
 	window.removeEventListener('resize', updateWindowSize)
+	stopCursorTracking()
+	releaseWakeLock()
+	releaseVideoWarmers()
+
+	// leaving by any route other than endSlideShow would strand the editor in fullscreen
+	if (inSlideShowMode.value) {
+		inSlideShowMode.value = false
+		exitFullscreen()
+	}
 })
 
 watch(
@@ -349,19 +375,25 @@ watch(
 provide('inReadonlyMode', inReadonlyMode)
 provide('inSlideShowMode', inSlideShowMode)
 
-useShortcut([
-	{ key: 'ArrowRight', description: 'Next step', group: 'Slideshow', handler: performNextStep },
-	{ key: 'ArrowDown', description: 'Next step', group: 'Slideshow', handler: performNextStep },
-	{ key: ' ', description: 'Next step', group: 'Slideshow', handler: performNextStep },
-	{ key: 'PageDown', description: 'Next step', group: 'Slideshow', handler: performNextStep },
-	{ key: 'ArrowLeft', description: 'Previous step', group: 'Slideshow', handler: performPreviousStep },
-	{ key: 'ArrowUp', description: 'Previous step', group: 'Slideshow', handler: performPreviousStep },
-	{ key: 'PageUp', description: 'Previous step', group: 'Slideshow', handler: performPreviousStep },
-	{ key: 'F5', description: 'Restart', group: 'Slideshow', handler: () => changeSlideInSlideshow(0) },
+useKeyboardShortcut([
+	{ combo: 'ArrowRight', description: 'Next step', group: 'Slideshow', handler: performNextStep },
+	{ combo: 'ArrowDown', description: 'Next step', group: 'Slideshow', handler: performNextStep },
+	{ combo: 'Space', description: 'Next step', group: 'Slideshow', handler: performNextStep },
+	{ combo: 'PageDown', description: 'Next step', group: 'Slideshow', handler: performNextStep },
+	{ combo: 'ArrowLeft', description: 'Previous step', group: 'Slideshow', handler: performPreviousStep },
+	{ combo: 'ArrowUp', description: 'Previous step', group: 'Slideshow', handler: performPreviousStep },
+	{ combo: 'PageUp', description: 'Previous step', group: 'Slideshow', handler: performPreviousStep },
+	{ combo: 'F5', description: 'Restart', group: 'Slideshow', handler: () => changeSlideInSlideshow(0) },
 ])
 </script>
 
 <style>
+/* has to beat the cursor elements set on themselves */
+.slideshow-hide-cursor,
+.slideshow-hide-cursor * {
+	cursor: none !important;
+}
+
 .forward-transition .textElement span {
 	transition-property: all;
 	transition-duration: var(--transition-duration);

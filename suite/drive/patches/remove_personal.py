@@ -5,6 +5,10 @@ import frappe
 
 
 def execute():
+    if not frappe.db.table_exists("Drive Team"):
+        # Site never had the legacy Drive schema — nothing to migrate.
+        return
+
     print(
         "This migration to a beta release might CORRUPT your data. Do NOT run this before taking a complete backup. You have two minutes left to cancel this deployment. "
     )

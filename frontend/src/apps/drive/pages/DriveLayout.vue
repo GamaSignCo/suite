@@ -1,17 +1,33 @@
 <template>
   <FrappeUIProvider>
-    <div
-      v-if="isLoggedIn || $route.meta.allowGuest"
-      class="flex flex-col sm:flex-row h-full"
-    >
-      <Sidebar v-if="normalView" />
-      <div id="dropzone" class="flex flex-col flex-1 overflow-hidden bg-surface-base relative">
+    <template v-if="isLoggedIn || $route.meta.allowGuest">
+      <div v-if="$route.name === 'drive-Signup'" id="dropzone" class="h-full">
         <router-view :key="$route.fullPath" v-slot="{ Component }">
           <component :is="Component" />
         </router-view>
       </div>
-      <BottomBar v-if="!inIframe && isLoggedIn" class="w-full sm:hidden" />
-    </div>
+      <!-- Keep sticky page chrome below dialogs portalled to body. -->
+      <DesktopShell v-else-if="isDesktop" :scroll="shellScroll" class="isolate">
+        <template v-if="normalView" #sidebar>
+          <Sidebar />
+        </template>
+        <div id="dropzone" class="relative flex min-h-full flex-col bg-surface-base" :class="{ 'h-full': !shellScroll }">
+          <router-view :key="$route.fullPath" v-slot="{ Component }">
+            <component :is="Component" />
+          </router-view>
+        </div>
+      </DesktopShell>
+      <MobileShell v-else class="isolate">
+        <div id="dropzone" class="relative flex min-h-full flex-col bg-surface-base" :class="{ 'h-full': !shellScroll }">
+          <router-view :key="$route.fullPath" v-slot="{ Component }">
+            <component :is="Component" />
+          </router-view>
+        </div>
+        <template v-if="!inIframe && isLoggedIn" #nav>
+          <BottomBar />
+        </template>
+      </MobileShell>
+    </template>
     <router-view v-else :key="$route.fullPath" v-slot="{ Component }">
       <component :is="Component" />
     </router-view>
@@ -31,10 +47,12 @@ import FileUploader from '@/apps/drive/components/FileUploader.vue'
 import { useSessionStore } from '@/boot/session'
 import { ref, computed, onMounted, provide } from 'vue'
 import { sidebarCollapsed, shareView } from '@/apps/drive/data/prefs'
-import { onKeyDown } from '@vueuse/core'
+import { onKeyDown, useMediaQuery } from '@vueuse/core'
 import emitter from '@/apps/drive/emitter'
+import { useEmitter } from '@/apps/drive/utils/useEmitter'
+import { isModKey } from '@/apps/drive/utils/files'
 import { initSocket } from '@/apps/drive/socket'
-import { FrappeUIProvider } from 'frappe-ui'
+import { DesktopShell, FrappeUIProvider, MobileShell } from 'frappe-ui'
 import { useRoute } from 'vue-router'
 import { setupTheme } from '@/utils/setupTheme'
 
@@ -43,13 +61,15 @@ provide('emitter', emitter)
 provide('socket', initSocket())
 
 const route = useRoute()
+const isDesktop = useMediaQuery('(min-width: 768px)')
+const shellScroll = computed(() => route.meta.shellScroll !== false)
 const inIframe = window.self !== window.top
 provide('inIframe', inIframe)
 
 const showSearchPopup = ref(false)
 const isLoggedIn = computed(() => useSessionStore().isLoggedIn)
 const normalView = computed(() => !inIframe && isLoggedIn.value)
-emitter.on('showSearchPopup', (data) => {
+useEmitter('showSearchPopup', (data) => {
   showSearchPopup.value = data
 })
 
@@ -90,10 +110,15 @@ onKeyDown((e) => {
         e.preventDefault()
       }
     }
-    if (e.key == 'k') {
-      showSearchPopup.value = true
-      e.preventDefault()
-    }
+  }
+
+  // Ctrl+K on Windows/Linux, Cmd+K on Mac - same convention as Mail's search
+  // shortcut (`HeaderActions.vue`). Not nested under the `e.metaKey` branch
+  // above: on Windows/Linux `metaKey` is the literal Windows key, which this
+  // never bound, so Ctrl+K did nothing there until now.
+  if (isModKey(e) && e.key.toLowerCase() == 'k') {
+    showSearchPopup.value = true
+    e.preventDefault()
   }
 })
 </script>

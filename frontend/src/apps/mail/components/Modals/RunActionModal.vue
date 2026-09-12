@@ -1,6 +1,6 @@
 <template>
-	<Dialog v-model="show" :options="dialogOptions">
-		<template #body-content>
+	<Dialog v-model:open="show" v-bind="dialogOptions">
+		<template #default>
 			<div class="space-y-4">
 				<template v-for="field in fields" :key="field.name">
 					<!-- A set-valued input (e.g. the recipients): one row per entry. -->
@@ -50,7 +50,7 @@
 				<div v-if="result">
 					<label class="text-ink-gray-5 mb-1 block text-xs">{{ __('Result') }}</label>
 					<pre
-						class="bg-surface-gray-2 max-h-[45vh] overflow-auto rounded p-4 text-xs whitespace-pre-wrap"
+						class="bg-surface-gray-2 max-h-[45vh] overflow-auto rounded-4 p-4 text-xs whitespace-pre-wrap"
 						>{{ result }}</pre
 					>
 				</div>
@@ -61,7 +61,8 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Button, Dialog, ErrorMessage, FeatherIcon, FormControl, createResource } from 'frappe-ui'
+import { Button, Dialog, ErrorMessage, FormControl, createResource } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
 
 import { raiseToast } from '@/apps/mail/utils'
 

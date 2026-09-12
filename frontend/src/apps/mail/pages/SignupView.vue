@@ -46,6 +46,26 @@
 			required
 		/>
 
+		<template v-else-if="route.query.step === '4'">
+			<FormControl
+				v-model="otp"
+				:label="__('Verification Code')"
+				:description="__('Enter the code sent to {0}.', [user.email])"
+				placeholder="123456"
+				autocomplete="one-time-code"
+				class="w-full"
+				required
+			/>
+			<button
+				class="text-left text-base text-ink-gray-6 hover:underline"
+				type="button"
+				:disabled="resendOtp.loading"
+				@click="resendOtp.submit()"
+			>
+				{{ __('Resend code') }}
+			</button>
+		</template>
+
 		<template v-else>
 			<FormControl
 				v-model="user.first_name"
@@ -64,11 +84,15 @@
 			/>
 		</template>
 
-		<ErrorMessage :message="validateUsername.error || signup.error" />
+		<ErrorMessage
+			:message="validateUsername.error || signup.error || verifyOtp.error || createAccount.error"
+		/>
 		<Button
 			variant="solid"
-			:label="route.query.step === '3' ? __('Sign Up') : __('Next')"
-			:loading="validateUsername.loading || signup.loading"
+			:label="
+				route.query.step === '4' ? __('Verify') : route.query.step === '3' ? __('Sign Up') : __('Next')
+			"
+			:loading="validateUsername.loading || signup.loading || verifyOtp.loading || createAccount.loading"
 			type="submit"
 		/>
 		<Button
@@ -87,7 +111,8 @@
 <script setup lang="ts">
 import { reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Button, ErrorMessage, FeatherIcon, FormControl, createResource } from 'frappe-ui'
+import { Button, ErrorMessage, FormControl, createResource } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
 
 import { sessionStore } from '@/apps/mail/stores/session'
 
@@ -96,6 +121,8 @@ const route = useRoute()
 const { login } = sessionStore()
 
 const usernameVerified = ref(false)
+const accountRequest = ref('')
+const otp = ref('')
 
 const user = reactive({
 	first_name: '',
@@ -131,15 +158,43 @@ const validateUsername = createResource({
 	},
 })
 
+// Signup only records the request and emails a verification code; the account is
+// created after the code is verified (verify_otp releases the request key).
 const signup = createResource({
 	url: 'suite.mail.api.account.signup',
-	makeParams: () => ({ ...user }),
+	makeParams: () => ({ username: user.username, domain: user.domain, email: user.email }),
+	onSuccess: (name: string) => {
+		accountRequest.value = name
+		router.push({ query: { step: '4' } })
+	},
+})
+
+const resendOtp = createResource({
+	url: 'suite.mail.api.account.resend_otp',
+	makeParams: () => ({ account_request: accountRequest.value }),
+})
+
+const verifyOtp = createResource({
+	url: 'suite.mail.api.account.verify_otp',
+	makeParams: () => ({ account_request: accountRequest.value, otp: otp.value }),
+	onSuccess: (requestKey: string) =>
+		createAccount.submit({
+			request_key: requestKey,
+			first_name: user.first_name,
+			last_name: user.last_name,
+			password: user.password,
+		}),
+})
+
+const createAccount = createResource({
+	url: 'suite.mail.api.account.create_account',
 	onSuccess: () => login.submit({ usr: `${user.username}@${user.domain}`, pwd: user.password }),
 })
 
 const next = () => {
 	if (route.query.step === '1') validateUsername.submit()
 	else if (route.query.step === '3') signup.submit()
+	else if (route.query.step === '4') verifyOtp.submit()
 	else router.push({ query: { step: Number(route.query.step || 0) + 1 } })
 }
 
@@ -147,6 +202,12 @@ watch(
 	() => route.query.step,
 	(step) => {
 		switch (step) {
+			case '4':
+				if (!accountRequest.value) {
+					router.replace({ query: { step: '3' } })
+					break
+				}
+			// fallthrough
 			case '3':
 				if (!user.email) {
 					router.replace({ query: { step: '2' } })

@@ -15,6 +15,7 @@ from suite.mail.doctype.user_account.user_account import (
     get_user_personal_jmap_account,
 )
 from suite.mail.utils import get_config, get_messages_directory
+from suite.mail.utils.dt import from_utc_z
 from suite.mail.utils.logger import get_outbound_logger
 from suite.utils.rate_limiter import dynamic_rate_limit
 
@@ -82,8 +83,9 @@ def send(
     is_newsletter: bool = False,
     save_as_draft: bool = False,
     priority: str | None = None,
+    send_at: str | None = None,
 ) -> str:
-    """Send Mail."""
+    """Send Mail. `send_at` (UTC `...Z`) schedules delivery via FUTURERELEASE."""
 
     ctx = {
         "req_id": random_string(10),
@@ -113,6 +115,7 @@ def send(
             priority=priority,
             in_reply_to=in_reply_to,
             save_as_draft=save_as_draft,
+            send_at=from_utc_z(send_at),
             destroy_after_submit=False,
             delivery_mode="Batch" if is_newsletter else "Enqueue",
         )

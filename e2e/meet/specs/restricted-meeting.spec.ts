@@ -2,7 +2,7 @@ import { test, expect, joinFromPreview, appUrl } from "../fixtures/test";
 
 const lobbyTransitionTimeout = process.env.CI ? 60_000 : 30_000;
 
-test.describe("Restricted meeting", () => {
+test.describe("Restricted meeting", { tag: "@meet-group-1" }, () => {
 	test("guest waits for approval and host can admit from people panel", async ({
 		hostPage,
 		createMeeting,
@@ -66,13 +66,19 @@ test.describe("Restricted meeting", () => {
 			.locator("[data-testid^='join-request-']")
 			.filter({ hasText: guestName });
 		await expect(joinRequest).toBeVisible({ timeout: lobbyTransitionTimeout });
-		await joinRequest.getByRole("button", { name: "Deny" }).click();
+		await expect(async () => {
+			await joinRequest.getByRole("button", { name: "Deny" }).click();
+		}).toPass({ timeout: lobbyTransitionTimeout });
 		await expect(joinRequest).toHaveCount(0, {
 			timeout: lobbyTransitionTimeout,
 		});
+		await expect(
+			guest.page.getByText("Your join request was denied by the meeting host"),
+		).toBeVisible({ timeout: lobbyTransitionTimeout });
 
 		await guest.page.goto(appUrl(`/meet/${meetingId}`));
 		await expect(guest.page.getByRole("heading", { name: "Ready to join?" })).toBeVisible();
+		await guest.page.getByPlaceholder("John Doe").fill(guestName);
 		await guest.page.getByRole("button", { name: "Join Meeting" }).click();
 
 		await expect(

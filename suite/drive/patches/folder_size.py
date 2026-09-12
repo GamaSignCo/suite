@@ -11,6 +11,10 @@ def scan(folder):
 
 
 def execute():
+    if not frappe.db.table_exists("Drive File"):
+        # Site never had the legacy Drive schema — nothing to migrate.
+        return
+
     roots = frappe.get_list("Drive File", {"folder": ""}, pluck="name")
     for root in roots:
         scan(root)

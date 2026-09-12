@@ -1,42 +1,26 @@
 <template>
 	<AppSettingsHeader :title="__('Profile')" />
 	<AppSettingsBody>
-		<div v-if="user?.doc" class="space-y-6">
-			<section class="space-y-6">
-				<FileUploader
-					file-types="image/png,image/jpeg,image/jpg"
-					:validate-file="validateAvatarFile"
-					@success="onAvatarUploaded"
-				>
-					<template #default="{ openFileSelector, uploading, error }">
-						<div class="flex items-center gap-4">
-							<div>
-								<Dropdown
-									v-if="user.doc.user_image"
-									:options="avatarMenuOptions(openFileSelector)"
-									placement="right"
-								>
-									<button
-										type="button"
-										class="flex rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-outline-gray-3"
-										:aria-label="__('Profile picture options')"
-										:disabled="uploading || user.setValue.loading"
-									>
-										<Avatar
-											:image="user.doc.user_image"
-											:label="displayName"
-											size="3xl"
-											class="!h-16 !w-16"
-										/>
-									</button>
-								</Dropdown>
+		<div v-if="user?.doc" class="flex flex-col gap-6">
+			<FileUploader
+				file-types="image/png,image/jpeg,image/jpg"
+				:private="false"
+				:validate-file="validateAvatarFile"
+				@success="onAvatarUploaded"
+			>
+				<template #default="{ openFileSelector, uploading, error }">
+					<div class="flex items-center gap-4">
+						<div>
+							<Dropdown
+								v-if="user.doc.user_image"
+								:options="avatarMenuOptions(openFileSelector)"
+								align="end"
+							>
 								<button
-									v-else
 									type="button"
 									class="flex rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-outline-gray-3"
-									:aria-label="__('Upload profile picture')"
+									:aria-label="__('Profile picture options')"
 									:disabled="uploading || user.setValue.loading"
-									@click="openFileSelector"
 								>
 									<Avatar
 										:image="user.doc.user_image"
@@ -45,57 +29,70 @@
 										class="!h-16 !w-16"
 									/>
 								</button>
-							</div>
-							<div class="min-w-0">
-								<div class="text-3xl-semibold text-ink-gray-8 truncate">
-									{{ displayName }}
-								</div>
-								<p class="text-base text-ink-gray-6 truncate">
-									{{ uploading ? __('Uploading…') : user.doc.email || userId }}
-								</p>
-								<ErrorMessage v-if="error" class="mt-1" :message="error" />
-							</div>
+							</Dropdown>
+							<button
+								v-else
+								type="button"
+								class="flex rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-outline-gray-3"
+								:aria-label="__('Upload profile picture')"
+								:disabled="uploading || user.setValue.loading"
+								@click="openFileSelector"
+							>
+								<Avatar
+									:image="user.doc.user_image"
+									:label="displayName"
+									size="3xl"
+									class="!h-16 !w-16"
+								/>
+							</button>
 						</div>
-					</template>
-				</FileUploader>
+						<div class="flex min-w-0 flex-col gap-1">
+							<div class="text-xl-semibold text-ink-gray-8 truncate">
+								{{ displayName }}
+							</div>
+							<p class="text-base text-ink-gray-6 truncate">
+								{{ uploading ? __('Uploading…') : user.doc.email || userId }}
+							</p>
+							<ErrorMessage v-if="error" :message="error" />
+						</div>
+					</div>
+				</template>
+			</FileUploader>
 
-				<div class="grid gap-6 sm:grid-cols-2">
-					<FormControl
-						v-model="user.doc.first_name"
-						:label="__('First name')"
-						variant="outline"
-						class="w-full"
-						autocomplete="given-name"
-						:disabled="user.setValue.loading"
-						@blur="saveName"
-					/>
-					<FormControl
-						v-model="user.doc.last_name"
-						:label="__('Last name')"
-						variant="outline"
-						class="w-full"
-						autocomplete="family-name"
-						:disabled="user.setValue.loading"
-						@blur="saveName"
-					/>
-				</div>
-			</section>
-
-			<div class="divide-y divide-outline-gray-1">
-				<SettingsRow
-					:title="__('Password')"
-					:description="__('Manage password and account access')"
-				>
-					<Button :label="__('Update Password')" @click="showPasswordDialog = true" />
-				</SettingsRow>
+			<div class="grid gap-6 sm:grid-cols-2">
+				<FormControl
+					v-model="user.doc.first_name"
+					:label="__('First name')"
+					variant="outline"
+					class="w-full"
+					autocomplete="given-name"
+					:disabled="user.setValue.loading"
+					@blur="saveName"
+				/>
+				<FormControl
+					v-model="user.doc.last_name"
+					:label="__('Last name')"
+					variant="outline"
+					class="w-full"
+					autocomplete="family-name"
+					:disabled="user.setValue.loading"
+					@blur="saveName"
+				/>
 			</div>
+
+			<SettingsRow
+				:title="__('Password')"
+				:description="__('Manage password and account access')"
+			>
+				<Button :label="__('Update Password')" @click="showPasswordDialog = true" />
+			</SettingsRow>
 
 			<slot />
 		</div>
 	</AppSettingsBody>
 
-	<Dialog v-model="showPasswordDialog" :options="passwordDialogOptions">
-		<template #body-content>
+	<Dialog v-model:open="showPasswordDialog" v-bind="passwordDialogOptions">
+		<template #default>
 			<form class="space-y-4" @submit.prevent>
 				<!-- Capture username here so Chrome doesn't fill profile last name -->
 				<input

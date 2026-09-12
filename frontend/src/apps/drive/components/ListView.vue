@@ -1,22 +1,19 @@
 <template>
   <List
-    class="relative select-none pt-3 flex flex-col flex-1 min-h-0 list-row-px-3"
+    class="relative select-none pt-3 list-row-px-5 sm:list-row-px-3"
     :columns="columnTracks"
     :row-height="40"
     divider="inset"
   >
-    <!-- Header is inside the scroll container so it shares the rows' width -->
-    <div
-      ref="scrollContainer"
-      class="flex-1 min-h-0 overflow-y-auto px-2 isolate [scrollbar-gutter:stable]"
-    >
-      <ListHeader class="group sticky top-0 z-10 bg-surface-base">
+    <div class="px-0 sm:px-2 isolate [scrollbar-gutter:stable]">
+      <ListHeader class="group sticky top-12 z-10 bg-surface-base">
         <ListHeaderCell>
           <Checkbox
             class="shrink-0"
             :class="selectAllState.some ? '' : 'invisible group-hover:visible'"
             :model-value="selectAllState.all"
             :indeterminate="selectAllState.some && !selectAllState.all"
+            :aria-label="__('Select all visible items')"
             @click.stop="toggleSelectAll"
           />
         </ListHeaderCell>
@@ -26,7 +23,7 @@
             <span class="block size-3.5" :class="sortIcon(direction)" />
           </template>
         </ListHeaderCellSort>
-        <ListHeaderCellSort :direction="directionFor('owner')" @click="toggleSort('owner', __('Owner'))">
+        <ListHeaderCellSort class="hidden sm:flex" :direction="directionFor('owner')" @click="toggleSort('owner', __('Owner'))">
           {{ __('Owner') }}
           <template #suffix="{ direction }">
             <span class="block size-3.5" :class="sortIcon(direction)" />
@@ -38,7 +35,7 @@
             <span class="block size-3.5" :class="sortIcon(direction)" />
           </template>
         </ListHeaderCellSort>
-        <ListHeaderCellSort :direction="directionFor('file_size')" @click="toggleSort('file_size', __('Size'))">
+        <ListHeaderCellSort class="hidden sm:flex" :direction="directionFor('file_size')" @click="toggleSort('file_size', __('Size'))">
           {{ __('Size') }}
           <template #suffix="{ direction }">
             <span class="block size-3.5" :class="sortIcon(direction)" />
@@ -49,9 +46,9 @@
       <template v-if="folderContents">
         <NoFilesSection v-if="!formattedRows.length" description="Nothing found - try something else?" />
         <template v-else-if="formattedRows[0]?.group">
-          <ListGroup v-for="group in formattedRows" :key="group.group" :label="group.group" class="mt-3 first:mt-0">
+          <ListGroup v-for="group in groupedItems" :key="group.group" :label="group.group" class="mt-3 first:mt-0">
             <DriveListRow
-              :items="flattenRows(group.rows)"
+              :items="group.items"
               :context-menu="contextMenu"
               :selections
               :toggle-selection="toggleSelection"
@@ -76,16 +73,16 @@
           <ListCell />
           <ListCell>
             <div class="h-[16px] w-[16px] shrink-0 mr-2">
-              <Skeleton class="h-[16px] w-[16px] rounded-sm" />
+              <Skeleton class="h-[16px] w-[16px] rounded-1" />
             </div>
-            <Skeleton class="h-3.5 w-40 rounded" />
+            <Skeleton class="h-3.5 w-40 rounded-4" />
           </ListCell>
-          <ListCell>
+          <ListCell class="hidden sm:flex">
             <Skeleton class="size-5 shrink-0 mr-2 rounded-full" />
-            <Skeleton class="h-3 w-16 rounded" />
+            <Skeleton class="h-3 w-16 rounded-4" />
           </ListCell>
-          <ListCell><Skeleton class="h-3 w-20 rounded" /></ListCell>
-          <ListCell><Skeleton class="h-3 w-12 rounded" /></ListCell>
+          <ListCell><Skeleton class="h-3 w-20 rounded-4" /></ListCell>
+          <ListCell class="hidden sm:flex"><Skeleton class="h-3 w-12 rounded-4" /></ListCell>
           <ListCell />
         </ListRow>
       </template>
@@ -95,8 +92,8 @@
     :close="() => (rowEvent = false)" :action-items="dropdownActionItems(selectedRow)" :event="rowEvent" />
 </template>
 <script setup>
-import { List, ListHeader, ListHeaderCell, ListHeaderCellSort, ListGroup, ListRow, ListCell } from 'frappe-ui/list'
-import { Checkbox, Skeleton, onOutsideClickDirective as vOnOutsideClick } from 'frappe-ui'
+import { List, ListCell, ListGroup, ListHeader, ListHeaderCell, ListHeaderCellSort, ListRow } from 'frappe-ui/list'
+import { Checkbox, Skeleton, vOnOutsideClick } from 'frappe-ui'
 import { activeEntity, setActiveEntity } from '@/apps/drive/data/selection'
 import { computed, ref, watch } from 'vue'
 import ContextMenu from '@/apps/drive/components/ContextMenu.vue'
@@ -124,9 +121,6 @@ const sortOrder = defineModel('sortOrder')
 const selectedRow = ref(null)
 
 const rowEvent = ref(null)
-
-const scrollContainer = ref(null)
-defineExpose({ scrollEl: scrollContainer })
 
 // Sort state lives on `sortOrder` (shared with the toolbar's sort control on
 // grid view); clicking a header toggles direction on repeat-click of the same
@@ -166,6 +160,14 @@ const formattedRows = computed(() => {
 
 const columnTracks = useListColumns()
 
+// Flattened once per group, so a re-render doesn't rebuild every group's rows.
+const groupedItems = computed(() =>
+  formattedRows.value.map(({ group, rows }) => ({
+    group,
+    items: flattenRows(rows),
+  }))
+)
+
 const visibleItems = computed(() => flattenRows(formattedRows.value))
 // Collapsing hides rows that may be selected — drop them from the selection so
 // the toolbar can't act on rows nobody can see.
@@ -185,12 +187,14 @@ watch(sortOrder, () => refreshExpanded(sortOrder.value), { deep: true })
 const lastSelectedName = ref(null)
 const flatRows = computed(() =>
   (formattedRows.value[0]?.group
-    ? formattedRows.value.flatMap((g) => flattenRows(g.rows))
+    ? groupedItems.value.flatMap((g) => g.items)
     : visibleItems.value
   )
     .filter((i) => i.row)
     .map((i) => i.row)
 )
+const visibleNames = computed(() => flatRows.value.map(({ name }) => name))
+defineExpose({ visibleNames })
 function toggleSelection(row, event) {
   if (event?.shiftKey && lastSelectedName.value) {
     const names = flatRows.value.map((r) => r.name)
@@ -212,14 +216,17 @@ function toggleSelection(row, event) {
 }
 
 const selectAllState = computed(() => {
-  const names = flatRows.value.map((r) => r.name)
-  const count = names.filter((n) => selections.value.has(n)).length
+  const names = flatRows.value.map(({ name }) => name)
+  const count = names.filter((name) => selections.value.has(name)).length
   return { all: names.length > 0 && count === names.length, some: count > 0 }
 })
+
 function toggleSelectAll() {
-  selections.value = selectAllState.value.all
-    ? new Set()
-    : new Set(flatRows.value.map((r) => r.name))
+  const names = flatRows.value.map(({ name }) => name)
+  const next = new Set(selections.value)
+  if (selectAllState.value.all) names.forEach((name) => next.delete(name))
+  else names.forEach((name) => next.add(name))
+  selections.value = next
 }
 
 const setActive = (entityName) => {
@@ -257,7 +264,7 @@ const contextMenu = (event, row) => {
 
 </script>
 <style>
-/* Match the inset row dividers — frappe-ui always spans this 1 / -1 */
+/* Keep the header divider aligned with the inset row dividers. */
 [data-slot='list-header-border'] {
   grid-column: 2 / -1;
 }

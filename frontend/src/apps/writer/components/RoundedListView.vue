@@ -24,13 +24,11 @@
               label: 'Grid',
               value: 'grid',
               icon: LucideGrid,
-              hideLabel: true,
             },
             {
               label: 'List',
               value: 'list',
               icon: LucideList,
-              hideLabel: true,
             },
           ]"
         />
@@ -54,7 +52,7 @@
               "
             >
               <div
-                class="aspect-[37/50] cursor-pointer overflow-hidden rounded-md dark:bg-gray-900 border border-gray-50 dark:border-outline-gray-1 px-2.5 py-1 shadow-lg transition-shadow hover:shadow-xl"
+                class="aspect-[37/50] cursor-pointer overflow-hidden rounded-4 dark:bg-gray-900 border border-gray-50 dark:border-outline-gray-1 px-2.5 py-1 shadow-lg transition-shadow hover:shadow-xl"
               >
                 <div class="overflow-hidden text-ellipsis whitespace-nowrap">
                   <div
@@ -77,7 +75,7 @@
               @click="
                 $router.push({ name: 'writer-document', params: { id: row.name } })
               "
-              class="group flex flex-col gap-2 md:flex-row p-3 md:items-center md:justify-between hover:bg-surface-gray-1 rounded cursor-pointer my-px -mx-3"
+              class="group flex flex-col gap-2 md:flex-row p-3 md:items-center md:justify-between hover:bg-surface-gray-1 rounded-4 cursor-pointer my-px -mx-3"
             >
               <p
                 class="text-base-medium text-ink-gray-8 truncate md:w-1/2 overflow-clip"

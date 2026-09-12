@@ -98,7 +98,7 @@
 							{{ __('Default Signature') }}
 						</label>
 						<TextEditor
-							editor-class="prose-sm min-h-[8rem] border rounded-b-lg border-t-0 p-2 max-w-none border-outline-gray-2"
+							editor-class="prose-sm min-h-[8rem] border rounded-b-6 border-t-0 p-2 max-w-none border-outline-gray-2"
 							:extensions="[CustomParagraphExtension]"
 							:fixed-menu="buttons"
 							:placeholder="__('Write your signature here')"
@@ -110,8 +110,8 @@
 			</div>
 
 			<Dialog
-				v-model="showDialog"
-				:options="{
+				v-model:open="showDialog"
+			 v-bind="{
 					title: isAddReplyTo ? __('New Reply To') : __('New Bcc'),
 					actions: [
 						{
@@ -123,7 +123,7 @@
 					],
 				}"
 			>
-				<template #body-content>
+				<template #default>
 					<FormControl
 						v-model="email"
 						:label="__('Email')"
@@ -144,8 +144,8 @@
 	</template>
 
 	<Dialog
-		v-model="showAddIdentityDialog"
-		:options="{
+		v-model:open="showAddIdentityDialog"
+	 v-bind="{
 			title: __('New Identity'),
 			actions: [
 				{
@@ -158,7 +158,7 @@
 			],
 		}"
 	>
-		<template #body-content>
+		<template #default>
 			<FormControl
 				v-model="newEmail"
 				:label="__('Email')"
@@ -181,18 +181,12 @@
 <script setup lang="ts">
 import { inject, ref, watch } from 'vue'
 import {
-	Button,
-	Dialog,
-	FormControl,
-	TextEditor,
-	createDocumentResource,
-	createResource,
-	useList,
-} from 'frappe-ui'
+	Button, Dialog, FormControl, createDocumentResource, createResource, useList } from 'frappe-ui'
+import { TextEditor } from 'frappe-ui/experimental'
 import AppSettingsHeader from '@/components/settings/AppSettingsHeader.vue'
 import AppSettingsBody from '@/components/settings/AppSettingsBody.vue'
 
-import { convertHtmlToText, raiseToast } from '@/apps/mail/utils'
+import { raiseToast } from '@/apps/mail/utils'
 import { useScreenSize, useTextEditorButtons } from '@/apps/mail/utils/composables'
 import { CustomParagraphExtension } from '@/apps/mail/utils/text-editor'
 import { userStore } from '@/apps/mail/stores/user'
@@ -229,10 +223,9 @@ const getIdentity = () =>
 		},
 	})
 
-const save = () => {
-	identity.value.doc.text_signature = convertHtmlToText(identity.value.doc.html_signature)
-	identity.value.save.submit()
-}
+// text_signature is derived server-side on save (Identity.validate), so the two forms of the
+// signature stay the same signature rather than one being a flattened trace of the other.
+const save = () => identity.value.save.submit()
 
 const identity = ref(getIdentity())
 const savedSignature = ref('')

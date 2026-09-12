@@ -3,12 +3,23 @@ import { resolve } from "node:path";
 
 const baseURL = process.env.BASE_URL ?? "http://localhost:8098";
 const isCI = !!process.env.CI;
+const meetGroup = process.env.MEET_E2E_GROUP;
+
+if (meetGroup && !["1", "2", "3"].includes(meetGroup)) {
+	throw new Error(`Invalid MEET_E2E_GROUP: ${meetGroup}`);
+}
 
 export default defineConfig({
 	testDir: "./specs",
-	// Calls share a local SFU, so run serially; CI shards jobs independently.
-	fullyParallel: !isCI,
+	fullyParallel: true,
 	forbidOnly: isCI,
+	grep:
+		meetGroup === "1"
+			? /@meet-group-1/
+			: meetGroup === "2"
+				? /@meet-group-2/
+				: undefined,
+	grepInvert: meetGroup === "3" ? /@meet-group-[12]/ : undefined,
 	outputDir: resolve(__dirname, "test-results"),
 	retries: isCI ? 2 : 0,
 	workers: 1,
@@ -30,7 +41,7 @@ export default defineConfig({
 			],
 	use: {
 		baseURL,
-		trace: "on-first-retry",
+		trace: "retain-on-failure",
 		video: "on-first-retry",
 		screenshot: "only-on-failure",
 		viewport: { width: 1440, height: 900 },
@@ -55,6 +66,24 @@ export default defineConfig({
 				permissions: ["camera", "microphone"],
 			},
 		},
+		...(!isCI
+			? [
+					{
+						name: "firefox",
+						use: {
+							...devices["Desktop Firefox"],
+							launchOptions: {
+								firefoxUserPrefs: {
+									"media.peerconnection.ice.obfuscate_host_addresses": false,
+									"media.navigator.permission.disabled": true,
+									"media.navigator.streams.fake": true,
+									"media.autoplay.default": 0,
+								},
+							},
+						},
+					},
+				]
+			: []),
 	],
 	globalSetup: "./global-setup.ts",
 });

@@ -9,11 +9,10 @@
 		@update:query="search"
 	>
 		<template #item-prefix="{ item, query }">
-			<Avatar :image="item.image" :label="item.label || query" size="sm" />
+			<Avatar :image="item.image" :label="item.label || query" size="lg" />
 		</template>
 		<template #item-label="{ item }">
-			<div class="truncate">{{ item.display_name || item.email }}</div>
-			<div v-if="item.display_name" class="text-ink-gray-5 truncate text-xs">{{ item.email }}</div>
+			<ContactOption :contact="item" />
 		</template>
 		<template #item-create="{ query }"> {{ query }} </template>
 	</Combobox>
@@ -24,6 +23,7 @@ import { computed, ref, watch } from 'vue'
 import { useDebounceFn } from '@vueuse/core'
 import { Avatar, Combobox, createResource } from 'frappe-ui'
 
+import ContactOption from '@/apps/mail/components/Controls/ContactOption.vue'
 import { userStore } from '@/apps/mail/stores/user'
 
 // Self-contained contact-autocomplete combobox: searches contacts as you type (Avatar + name over email)

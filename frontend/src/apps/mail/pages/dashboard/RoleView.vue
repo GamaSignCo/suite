@@ -5,7 +5,7 @@
 				<template #icon><ShieldCheck class="h-5 w-5" /></template>
 				<template #actions>
 					<Button :label="__('Edit')" @click="showEdit = true" />
-					<Dropdown :options="dropdownOptions" :button="{ icon: 'more-horizontal' }" />
+					<Dropdown :options="dropdownOptions" :button="{ icon: 'lucide-more-horizontal' }" />
 				</template>
 			</DashboardDetailHeader>
 
@@ -52,10 +52,11 @@
 		</template>
 	</DashboardLayout>
 	<EditRoleModal v-if="role.data" v-model="showEdit" :role="role.data" @reload="role.reload()" />
-	<Dialog v-model="showDelete" :options="deleteDialogOptions" />
+	<Dialog v-model:open="showDelete" v-bind="deleteDialogOptions" />
 </template>
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { useRouter } from 'vue-router'
 import { Button, Dialog, Dropdown, MultiSelect, createResource, usePageMeta } from 'frappe-ui'
 
@@ -78,7 +79,7 @@ type RoleData = {
 const { roleId } = defineProps<{ roleId: string }>()
 const router = useRouter()
 
-usePageMeta(() => ({ title: (role.data as RoleData | undefined)?.description || roleId }))
+usePageMeta(() => appPageMeta((role.data as RoleData | undefined)?.description || roleId, 'Mail'))
 
 const showEdit = ref(false)
 const showDelete = ref(false)
@@ -160,14 +161,14 @@ const deleteDialogOptions = computed(() => ({
 	title: __('Delete Role'),
 	message: __('Are you sure you want to delete this role? This action cannot be undone.'),
 	size: 'xl',
-	icon: { name: 'alert-triangle', appearance: 'warning' },
+	icon: { name: 'lucide-alert-triangle', theme: 'amber' },
 	actions: [{ label: __('Confirm'), variant: 'solid', theme: 'red', onClick: deleteRole.submit }],
 }))
 
 const dropdownOptions = computed(() => [
 	{
 		group: '',
-		items: [{ label: __('Delete'), icon: 'trash-2', onClick: () => (showDelete.value = true) }],
+		options: [{ label: __('Delete'), icon: 'lucide-trash-2', onClick: () => (showDelete.value = true) }],
 	},
 ])
 </script>

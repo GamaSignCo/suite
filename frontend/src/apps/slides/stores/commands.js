@@ -1,7 +1,25 @@
-import { findElement } from '@/apps/slides/stores/element'
 import { slidesLength } from '@/apps/slides/stores/presentation'
+import { cloneObj } from '@/apps/slides/utils/helpers'
+
+// object values are cloned per assignment so elements never share one
+// reference, and a command's snapshots can't be mutated from outside
+const cloneValue = (value) => (typeof value === 'object' && value !== null ? cloneObj(value) : value)
 
 const findSlide = (state, slideId) => state.find((s) => s.clientId === slideId)
+
+const findElement = (state, slideId, elementId) =>
+	findSlide(state, slideId)?.elements.find((el) => el.id === elementId)
+
+// lock protects the element, not the editor's cross-slide bookkeeping
+const LOCK_EXEMPT_PROPERTIES = ['locked', 'zIndex', 'refId']
+
+const isBlockedByLock = (command, state) => {
+	if (command.key === 'batch') return command.commands.some((c) => isBlockedByLock(c, state))
+	if (!command.elementIds || command.bypassLock) return false
+	if (LOCK_EXEMPT_PROPERTIES.includes(command.property)) return false
+
+	return command.elementIds.some((id) => findElement(state, command.slideId, id)?.locked)
+}
 
 const addElement = (state, slideId, element) => {
 	const slide = findSlide(state, slideId)
@@ -32,6 +50,8 @@ const addElementCommand = ({ slideId, element }) => ({
 
 const removeElementCommand = ({ slideId, element }) => ({
 	key: 'removeElement',
+	slideId,
+	elementIds: [element.id],
 	jumpToSlideId: slideId,
 	jumpToElementIds: [element.id],
 	focusElementId: element.type === 'text' ? element.id : null,
@@ -46,7 +66,8 @@ const removeElementCommand = ({ slideId, element }) => ({
 
 const editElements = (state, slideId, elementIds, property, value) => {
 	elementIds.forEach((elementId) => {
-		findElement(state, slideId, elementId)[property] = value
+		const element = findElement(state, slideId, elementId)
+		if (element) element[property] = cloneValue(value)
 	})
 }
 
@@ -57,19 +78,34 @@ const editElementCommand = ({
 	oldValue,
 	newValue,
 	skipJumpOnExecute,
-}) => ({
-	key: 'editElement',
-	jumpToSlideId: slideId,
-	jumpToElementIds: elementIds,
-	skipJumpOnExecute,
-	debug: `Edit ${property} of element ${elementIds} on slide ${slideId} to ${newValue}`,
-	execute(state) {
-		editElements(state, slideId, elementIds, property, newValue)
-	},
-	undo(state) {
-		editElements(state, slideId, elementIds, property, oldValue)
-	},
-})
+	coalesceKey,
+	bypassLock,
+}) => {
+	return {
+		key: 'editElement',
+		slideId,
+		elementIds,
+		property,
+		oldValue: cloneValue(oldValue),
+		newValue: cloneValue(newValue),
+		coalesceKey,
+		bypassLock,
+		jumpToSlideId: slideId,
+		jumpToElementIds: elementIds,
+		skipJumpOnExecute,
+		debug: `Edit ${property} of element ${elementIds} on slide ${slideId} to ${newValue}`,
+		coalesceWith(incoming) {
+			this.newValue = incoming.newValue
+			this.debug = incoming.debug
+		},
+		execute(state) {
+			editElements(state, slideId, elementIds, property, this.newValue)
+		},
+		undo(state) {
+			editElements(state, slideId, elementIds, property, this.oldValue)
+		},
+	}
+}
 
 const addSlide = (state, index, slide) => {
 	state.splice(index, 0, slide)
@@ -116,20 +152,25 @@ const removeSlideCommand = ({ slide, index, slideIndex }) => ({
 
 const editSlide = (state, slideId, property, value) => {
 	const slide = state.find((s) => s.clientId === slideId)
-	if (slide) slide[property] = value
+	if (slide) slide[property] = cloneValue(value)
 }
 
-const editSlideCommand = ({ slideId, property, oldValue, newValue }) => ({
-	key: 'editSlide',
-	jumpToSlideId: slideId,
-	debug: `Edit ${property} of slide ${slideId} to ${newValue}`,
-	execute(state) {
-		editSlide(state, slideId, property, newValue)
-	},
-	undo(state) {
-		editSlide(state, slideId, property, oldValue)
-	},
-})
+const editSlideCommand = ({ slideId, property, oldValue, newValue }) => {
+	oldValue = cloneValue(oldValue)
+	newValue = cloneValue(newValue)
+
+	return {
+		key: 'editSlide',
+		jumpToSlideId: slideId,
+		debug: `Edit ${property} of slide ${slideId} to ${newValue}`,
+		execute(state) {
+			editSlide(state, slideId, property, newValue)
+		},
+		undo(state) {
+			editSlide(state, slideId, property, oldValue)
+		},
+	}
+}
 
 const moveSlide = (state, fromIndex, toIndex) => {
 	const [movedSlide] = state.splice(fromIndex, 1)
@@ -152,13 +193,33 @@ const reorderSlidesCommand = ({ oldIndex, newIndex }) => ({
 	},
 })
 
-const batchCommand = ({ slideId, elementIds, focusElementId, commands, skipJumpOnExecute }) => ({
+const batchCommand = ({
+	slideId,
+	elementIds,
+	focusElementId,
+	commands,
+	skipJumpOnExecute,
+	coalesceKey,
+}) => ({
 	key: 'batch',
+	commands,
+	coalesceKey,
 	jumpToSlideId: slideId,
 	jumpToElementIds: elementIds,
 	focusElementId: focusElementId,
 	skipJumpOnExecute,
 	debug: 'Batch edit',
+	// history pops a burst that folds back to where it started, so the batch
+	// reports the leading command's values as its own
+	get oldValue() {
+		return commands[0]?.oldValue
+	},
+	get newValue() {
+		return commands[0]?.newValue
+	},
+	coalesceWith(incoming) {
+		commands.forEach((c, i) => c.coalesceWith(incoming.commands[i]))
+	},
 	execute: (state) => {
 		commands.forEach((c) => c.execute(state))
 	},
@@ -179,4 +240,5 @@ export {
 	editSlideCommand,
 	reorderSlidesCommand,
 	batchCommand,
+	isBlockedByLock,
 }

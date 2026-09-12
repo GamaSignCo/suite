@@ -38,6 +38,10 @@ Frappe Suite brings seven collaboration products into one Frappe app. Keep files
 | [Mail](https://github.com/frappe/mail) | Manage email in a modern client |
 | [Calendar](https://github.com/frappe/calendar_app) | Plan events and manage schedules |
 
+## Deploying Mail Servers
+
+Provisioning Stalwart mail servers (Mail Cluster, Mail Server, Server Deployment, Server Job, Ansible plays, DNS Records) lives in the separate [Suite Cloud](https://github.com/frappe/suite_cloud) app. Suite only needs the server URL and admin credentials in Mail Settings to talk to a Stalwart server. Sites that deployed servers through Suite keep their data: update Suite, run `bench --site yoursite migrate`, then `bench --site yoursite install-app suite_cloud`. Installing it adopts the existing records and copies the root domain, DNS provider and timeouts that Mail Settings used to hold.
+
 ## Under the Hood
 
 - [**Frappe Framework**](https://github.com/frappe/frappe): Provides the database, authentication, permissions, realtime events, and APIs shared by Drive, Writer, Sheets, Slides, Meet, Mail, and Calendar.
@@ -45,6 +49,57 @@ Frappe Suite brings seven collaboration products into one Frappe app. Keep files
 - [**Yjs**](https://github.com/yjs/yjs): Keeps documents in Writer and spreadsheets in Sheets synchronized during realtime collaboration.
 - [**Hocuspocus**](https://github.com/ueberdosis/hocuspocus): Runs the collaboration server used for realtime spreadsheet editing in Sheets.
 - [**mediasoup**](https://github.com/versatica/mediasoup): Powers Meet's WebRTC selective forwarding unit for group video calls.
+
+## Migrating from the Standalone Apps
+
+Frappe Suite ships the same modules and DocTypes as the standalone apps, so it cannot be installed on a site that still has any of them — installation aborts with a message listing the conflicting apps. To move an existing site to Suite:
+
+1. **Take a backup of the site**, including files.
+2. **Uninstall all the standalone apps** (Drive, Writer, Sheets, Slides, Meet, Mail, Calendar). Uninstalling deletes each app's data on the site, which is why the backup comes first.
+3. **Install Frappe Suite.**
+4. **Restore the backup.** Suite uses the same tables, so the restored data is picked up as-is.
+
+The same steps apply to sites hosted on [Frappe Cloud](https://frappecloud.com): download a backup from the site dashboard (**Backups**), remove the standalone apps from the **Apps** tab, install Frappe Suite, and then restore the backup from **Backups → Restore**.
+
+### Migrating with bench
+
+```bash
+# 1. Back up the site along with its public and private files
+bench --site yoursite backup --with-files
+
+# 2. Uninstall every standalone app present on the site
+#    (run only the lines for the apps your site actually has)
+bench --site yoursite uninstall-app drive
+bench --site yoursite uninstall-app writer
+bench --site yoursite uninstall-app sheets
+bench --site yoursite uninstall-app slides
+bench --site yoursite uninstall-app meet
+bench --site yoursite uninstall-app mail
+bench --site yoursite uninstall-app calendar_app
+
+# 3. Install Frappe Suite
+bench get-app https://github.com/frappe/suite
+bench --site yoursite install-app suite
+
+# 4. Restore the backup taken in step 1
+bench --site yoursite restore sites/yoursite/private/backups/<timestamp>-database.sql.gz \
+	--with-public-files sites/yoursite/private/backups/<timestamp>-files.tar \
+	--with-private-files sites/yoursite/private/backups/<timestamp>-private-files.tar
+```
+
+The restored database still lists the standalone apps as installed, so point the site at Suite and migrate:
+
+```bash
+bench --site yoursite remove-from-installed-apps drive
+bench --site yoursite remove-from-installed-apps writer
+bench --site yoursite remove-from-installed-apps sheets
+bench --site yoursite remove-from-installed-apps slides
+bench --site yoursite remove-from-installed-apps meet
+bench --site yoursite remove-from-installed-apps mail
+bench --site yoursite remove-from-installed-apps calendar_app
+bench --site yoursite install-app suite
+bench --site yoursite migrate
+```
 
 ## Development Setup
 

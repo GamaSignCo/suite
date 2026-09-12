@@ -2,31 +2,37 @@
 	<!-- Compose FAB — floats above the bar, right thumb zone. Both the FAB and the
 	     bar step aside while a thread is open: the thread's own reply actions own
 	     the bottom edge there (the modals below stay mounted regardless). Hidden in
-	     search results and the screener too — composing isn't part of those tasks. -->
+	     search results, the screener and the profile page too — composing isn't part of
+	     those tasks. -->
 	<Button
 		v-if="
 			!isThreadOpen &&
+			!keyboardOpen &&
 			!isMobileSelectionActive &&
 			!isSearchRoute &&
 			!showSearchModal &&
-			!screenerActive
+			!screenerActive &&
+			!profileActive
 		"
 		variant="solid"
 		class="fixed bottom-[calc(5rem+env(safe-area-inset-bottom))] right-4 z-10 !h-14 !w-14 !rounded-full shadow-lg"
 		:aria-label="__('Compose')"
-		@click="showSendModal = true"
+		@click="openCompose"
 	>
 		<template #icon>
-			<FeatherIcon name="edit" class="h-6 w-6" />
+			<FeatherIcon name="square-pen" class="h-6 w-6" />
 		</template>
 	</Button>
 
 	<!-- Bottom tab bar — Raven-inspired: translucent bar with a hairline top border
 	     and faint upward shadow; lucide icons, tint-only active state. -->
 	<!-- Stays mounted during selection mode — the selection action bar overlays it at
-	     identical geometry, so the layout never shifts. -->
+	     identical geometry, so the layout never shifts. Steps aside for the on-screen
+	     keyboard, though: the shell is sized in dvh and the keyboard shrinks that, so a
+	     bar left mounted rides up and sits on top of the keyboard (worst in search, where
+	     the field is focused the whole time). -->
 	<nav
-		v-if="!isThreadOpen"
+		v-if="!isThreadOpen && !keyboardOpen"
 		class="bg-surface-base/80 z-10 shrink-0 border-t pb-[env(safe-area-inset-bottom)] shadow-[0_-2px_5px_rgba(0,0,0,0.03)] backdrop-blur-lg"
 	>
 		<div class="flex h-15 items-stretch">
@@ -57,48 +63,52 @@
 				<Icon name="search" :class="iconClass(searchActive)" />
 				<span :class="labelClass(searchActive)">{{ __('Search') }}</span>
 			</button>
-			<!-- Profile is a sheet over the current surface (search included), not a navigation —
-			     it must not dismiss the search overlay. -->
-			<button :class="tabClass(isProfileSheetOpen)" @click="openProfileSheet">
-				<Avatar :label="activeAccountName" size="md" class="shrink-0" />
-				<span :class="labelClass(isProfileSheetOpen)">{{ __('Profile') }}</span>
+			<!-- The tab stands for the person, so it carries their photo when there is one
+			     and falls back to the active account's initial. A photo has no stroke to
+			     thicken the way the other icons do, so selection draws a ring instead —
+			     `ring-current` at the 1.5px they stroke at, and no offset, so it reads as
+			     the avatar's own edge rather than a halo. -->
+			<button :class="tabClass(profileActive)" @click="openProfile">
+				<Avatar
+					:label="activeAccountName"
+					:image="user.data?.user_image"
+					size="md"
+					class="size-5.5 shrink-0"
+					:class="profileActive && 'ring-[1.5px] ring-current'"
+				/>
+				<span :class="labelClass(profileActive)">{{ __('Profile') }}</span>
 			</button>
 		</div>
 	</nav>
 
-	<SendMail v-model="showSendModal" />
 	<SearchModal v-model="showSearchModal" />
 	<MobileFolderSheet />
-	<MobileProfileSheet />
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, inject, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Avatar, Button, FeatherIcon } from 'frappe-ui'
-import { Icon } from 'frappe-ui/icons'
+import { Avatar, Button } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
+import { Icon } from 'frappe-ui/experimental'
 
 import { getIcon, getMailboxName } from '@/apps/mail/utils'
-import {
-	useFolderSheet,
-	useMobileSelection,
-	useProfileSheet,
-} from '@/apps/mail/utils/composables'
+import { useFolderSheet, useKeyboardOpen, useMobileSelection } from '@/apps/mail/utils/composables'
 import { userStore } from '@/apps/mail/stores/user'
+import { openComposePage } from '@/apps/mail/composables/composeHandoff'
 import SearchModal from '@/apps/mail/components/Modals/SearchModal.vue'
-import SendMail from '@/apps/mail/components/SendMail.vue'
 import MobileFolderSheet from '@/apps/mail/components/mobile/MobileFolderSheet.vue'
-import MobileProfileSheet from '@/apps/mail/components/mobile/MobileProfileSheet.vue'
 
 import type { MailboxData } from '@/apps/mail/types'
 
 const route = useRoute()
 const router = useRouter()
 const store = userStore()
+const user = inject('$user') as { data: Record<string, any> }
 const { mailboxes, allInboxesUnread } = store
 const { openFolderSheet } = useFolderSheet()
-const { isProfileSheetOpen, openProfileSheet } = useProfileSheet()
 const { isMobileSelectionActive } = useMobileSelection()
+const keyboardOpen = useKeyboardOpen()
 
 const activeAccountName = computed(
 	() => store.userResource?.data?.accounts?.find((a) => a.id === store.accountId)?._name ?? '',
@@ -113,8 +123,11 @@ const currentFolder = computed(() => {
 	return mailbox ? { label: getMailboxName(mailbox), icon: getIcon(mailbox) } : null
 })
 
-const showSendModal = ref(false)
 const showSearchModal = ref(false)
+
+// Compose is a route now, not an overlay, so the back gesture closes it and the composer owns a
+// whole screen to lay itself out in rather than floating over this one.
+const openCompose = () => openComposePage(router, store.accountId)
 
 const MAIL_ROUTES = ['mail-mailbox', 'mail-all-inboxes']
 const isThreadOpen = computed(() => !!route.params.threadID)
@@ -126,8 +139,12 @@ const isSearchRoute = computed(
 const mailActive = computed(
 	() => MAIL_ROUTES.includes(route.name as string) && !isSearchRoute.value,
 )
-const screenerActive = computed(() => route.name === 'mail-screener')
+// Either screener route: with a sender open the tab is still the screener's.
+const screenerActive = computed(() =>
+	['mail-screener', 'mail-screener-sender'].includes(route.name as string),
+)
 const searchActive = computed(() => showSearchModal.value || isSearchRoute.value)
+const profileActive = computed(() => route.name === 'mail-profile')
 
 // The Search tab is a navigation like the others: it lands on the search page (so tab
 // selection stays route-driven — an overlay over a mail route read as two active tabs),
@@ -167,6 +184,19 @@ const openScreener = () => {
 	router.push({ name: 'mail-screener', params: { accountId: store.accountId } })
 }
 
+// Profile is a route now, not a sheet over the current surface — so it dismisses the
+// search overlay on the way, like every other navigating tab. Re-tapping it pops back
+// to the root of its own stack: the open settings sub-page is a query on this route,
+// so dropping the query closes it.
+const openProfile = () => {
+	showSearchModal.value = false
+	if (profileActive.value) {
+		if (route.query.tab) router.replace({ query: {} })
+		return
+	}
+	router.push({ name: 'mail-profile', params: { accountId: store.accountId } })
+}
+
 const screeningEnabled = computed(
 	() =>
 		!!store.userResource?.data?.accounts?.find((a) => a.id === store.accountId)
@@ -203,21 +233,27 @@ const mailUnreadCount = computed(() => {
 // icon's corner rather than sitting on the glyph strokes; bordered to read
 // against the translucent bar.
 const dotClass =
-	'bg-surface-red-6 absolute -right-1.5 -top-1 block size-2.5 rounded-full border border-[var(--surface-base)]'
+	'bg-surface-red-6 absolute -right-1 -top-1 block size-2 rounded-full border border-[var(--surface-base)]'
 
-// Active/inactive contrast rides two channels: ink (9 vs 4 — dropping inactive
-// to 3 read as more disparity but tipped into illegible) and weight (stroke
-// 1.75 vs 1.5, semibold vs medium), so the active tab pops without any label
-// going faint.
+// Active/inactive contrast rides two channels: ink (9 vs 5) and weight (stroke
+// 1.75 vs 1.5, semibold vs medium), so the active tab pops without the rest
+// going faint. Inactive sits at 5, not the 4 used for meta text elsewhere —
+// at 4 the whole bar read as disabled rather than as three tappable tabs.
 const tabClass = (active: boolean) =>
 	[
 		'flex flex-1 flex-col items-center justify-center gap-1',
-		active ? 'text-ink-gray-9' : 'text-ink-gray-4',
+		active ? 'text-ink-gray-9' : 'text-ink-gray-5',
 	].join(' ')
 
 const iconClass = (active: boolean) =>
 	['h-6 w-6 shrink-0', active ? '[stroke-width:1.75]' : '[stroke-width:1.5]'].join(' ')
 
+// 11px sits below the type scale's floor (text-xs is 12), so it's spelled out —
+// along with the 0.02em the scale's own tokens carry, which an arbitrary size
+// doesn't bring with it.
 const labelClass = (active: boolean) =>
-	['text-xs !leading-3', active ? '!font-semibold' : '!font-medium'].join(' ')
+	[
+		'text-[11px] tracking-[0.02em] !leading-3',
+		active ? '!font-semibold' : '!font-medium',
+	].join(' ')
 </script>

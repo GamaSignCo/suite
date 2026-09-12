@@ -27,6 +27,12 @@ import type { Thread } from '@/apps/mail/types'
 /** Rows per window. Fetches ask for one more, to detect whether further rows exist without a total. */
 export const PAGE_LENGTH = 25
 
+// Windows one fill episode may pull before it gives up (see topUpIfShort). Far more than any viewport
+// needs — the cap only catches the case where the fill can never succeed: every window absorbed into
+// the trailing stack row, which adds no height, so the sentinel stays in view and the list would walk
+// the whole mailbox 25 threads at a time.
+const MAX_FILL_WINDOWS = 20
+
 // How long a row optimistically removed by an action stays suppressed. The server keeps returning it
 // until the mutation lands, so a refresh or append in that window would put it back.
 const REMOVAL_SUPPRESSION_MS = 15000
@@ -45,13 +51,33 @@ export const mergeByReceivedAt = (fresh: Thread[], loaded: Thread[]): Thread[] =
 	return [...merged, ...fresh.slice(f), ...loaded.slice(l)]
 }
 
+/**
+ * Re-derives the loaded rows from the newest window: a thread in both takes the server's copy, since
+ * a reply into an already-loaded thread changes that row (another message, a newer received_at, unread
+ * again) without ever arriving as a new one. Rows past the window keep their loaded copy — the window
+ * says nothing about them.
+ *
+ * The result is re-sorted: a thread that just got a reply carries a newer received_at than the loaded
+ * list was ordered by, and belongs further up. The sort is stable, so untouched rows keep their order.
+ */
+export const refreshLoadedThreads = (
+	loaded: Thread[],
+	freshWindow: Thread[],
+	threadKey: (thread: Thread) => string,
+): Thread[] => {
+	const updated = new Map(freshWindow.map((thread) => [threadKey(thread), thread]))
+	return loaded
+		.map((thread) => updated.get(threadKey(thread)) ?? thread)
+		.sort((a, b) => (a.received_at === b.received_at ? 0 : a.received_at > b.received_at ? -1 : 1))
+}
+
 /** The shape of a reset resource this reads and writes — createResource satisfies it. */
-export interface ThreadListResource {
+interface ThreadListResource {
 	data?: Thread[]
 	loading: boolean
 }
 
-export interface PaginatedThreadsOptions {
+interface PaginatedThreadsOptions {
 	/** The active reset resource. A getter, since the search view swaps which one is active. */
 	resource: () => ThreadListResource
 	/** Triggers the append fetch. Its onSuccess must hand the rows to `appendThreads`. */
@@ -68,6 +94,13 @@ export interface PaginatedThreadsOptions {
 	 * merged view keys by account + thread id, since one thread id can recur across accounts.
 	 */
 	threadKey?: (thread: Thread) => string
+	/**
+	 * How far the viewport fill has gotten, in units the reader can see — the views pass the count of
+	 * threads their rendered rows stand for (see useListRows' visibleThreadCount). Pixel height (the
+	 * fallback) cannot tell progress from a dead end: a window absorbed into existing stack rows adds
+	 * no height but is progress, while one landing in a collapsed date group adds none and is not.
+	 */
+	fillProgress?: () => number
 }
 
 export const usePaginatedThreads = ({
@@ -76,6 +109,7 @@ export const usePaginatedThreads = ({
 	openThreadID,
 	onEdgeThread,
 	threadKey = (thread: Thread) => thread.thread_id,
+	fillProgress,
 }: PaginatedThreadsOptions) => {
 	const container = useTemplateRef<HTMLElement>('mailList')
 	const sentinel = useTemplateRef<HTMLElement>('loadMoreSentinel')
@@ -100,8 +134,14 @@ export const usePaginatedThreads = ({
 
 	const list = () => resource().data ?? []
 
-	/** The loaded threads' ids, in list order — what the reading pane pages through. */
-	const threadIDs = computed(() => list().map((thread: Thread) => thread.thread_id))
+	/**
+	 * The loaded threads' ids, in list order — what the reading pane pages through.
+	 *
+	 * In `threadKey` space, which is the thread id itself for a single-account list and the
+	 * account-qualified key for a merged one: two accounts can hold the same thread id, and paging
+	 * that walks bare ids there lands on whichever duplicate comes first.
+	 */
+	const threadIDs = computed(() => list().map(threadKey))
 
 	/** Whether any fetch is in flight. Gates the Refresh affordance and a new refresh. */
 	const isFetching = computed(() => resource().loading || loadingMore.value)
@@ -160,8 +200,9 @@ export const usePaginatedThreads = ({
 
 	/**
 	 * Called when a first-window fetch resolves. Two modes:
-	 * - refresh: keep the loaded rows, prepend only threads not already loaded (new mail), and hold
-	 *   the reader's scroll position (re-anchored by the height the prepended rows added).
+	 * - refresh: keep the loaded rows, merge in threads not already loaded and refresh the ones that
+	 *   are (new mail arrives both ways), and hold the reader's scroll position (re-anchored by the
+	 *   height the merge added above them).
 	 * - reset: reveal the fresh first window and scroll to top (mailbox switch, filter, undo, …).
 	 * Either way, cancel any pending edge navigation.
 	 */
@@ -192,11 +233,15 @@ export const usePaginatedThreads = ({
 				(thread: Thread) =>
 					!existing.has(threadKey(thread)) && !recentlyRemoved.has(threadKey(thread)),
 			)
+			// Threads already loaded are filtered out of `fresh` above, so a reply into one of them
+			// would be dropped on the floor — re-derive those rows from the window instead. Keeping
+			// the snapshot's copy is what left replies invisible until a hard reload.
+			const loaded = refreshLoadedThreads(refreshSnapshot, freshWindow, threadKey)
 			// Date-merge rather than blind prepend. A prepend assumes everything in the newest window
 			// that isn't loaded yet is newer than everything that is — true for one account, false for
 			// the merged list, where a second account's newest mail can be older than the first's oldest
 			// loaded row and would otherwise open a stale date group above today's.
-			resource().data = mergeByReceivedAt(fresh, refreshSnapshot)
+			resource().data = mergeByReceivedAt(fresh, loaded)
 			// Keep the reader where they were: shift scroll by the height the merge added above them. If
 			// they were already at the top, leave them there so the new mail is visible.
 			nextTick(() => {
@@ -241,48 +286,76 @@ export const usePaginatedThreads = ({
 	// True while the sentinel is in view.
 	const sentinelVisible = ref(false)
 
-	// The height the list had reached the last time we topped it up, so a fill that adds nothing can be
-	// detected. Reset at the start of each fill episode.
-	let lastFillHeight = 0
+	// How far the fill had gotten (see fillProgress) the last time we topped it up, so a fill that
+	// adds nothing visible can be detected, and how many windows this episode has pulled. Both reset
+	// at the start of each fill episode.
+	let lastFillProgress = 0
+	let fillWindows = 0
 
 	useIntersectionObserver(
 		sentinel,
 		([entry]) => {
 			const entering = !!entry?.isIntersecting && !sentinelVisible.value
 			sentinelVisible.value = !!entry?.isIntersecting
-			if (entering) lastFillHeight = 0
+			if (entering) {
+				lastFillProgress = 0
+				fillWindows = 0
+			}
 			if (sentinelVisible.value) loadMore()
 		},
 		{ root: container },
 	)
 
 	/**
-	 * Rescues the one case the observer cannot: the rendered list is too short to scroll, so the
-	 * sentinel can never leave and re-enter the viewport to fire again — infinite scroll would die with
-	 * nothing left to scroll. A window of 25 threads can collapse to a single stack row, so filling the
-	 * viewport can take several of them.
+	 * Rescues the case the observer cannot: the sentinel is already in view and stays there, so it
+	 * never leaves and re-enters to fire again — infinite scroll would die with the viewport unfilled.
+	 * A window of 25 threads can collapse to a single stack row (or vanish into an existing one), so
+	 * filling the viewport can take several of them.
 	 *
-	 * Both guards are load-bearing. Stop once the list can scroll, because from there the user's own
-	 * scrolling drives the observer. And stop if a window added no height: its rows landed somewhere
-	 * they cannot be seen (a collapsed date group), so further windows would be just as invisible —
-	 * without this, collapsing a large group turns into a stampede that walks the entire mailbox 25
-	 * threads at a time.
+	 * What normally ends an episode is the sentinel leaving the viewport — the fill worked. Two guards
+	 * cover the fills that can't:
 	 *
-	 * Call it from a watcher on the RENDERED rows, not on the loaded threads: a fill is judged by the
-	 * height the rows took, and rows also come and go as stacks and date groups fold. That watcher must
-	 * be declared below the rows it watches — `watch` evaluates its source at setup, and reading a
+	 * Progress, the caller's fillProgress metric and NOT pixel height: a window absorbed into existing
+	 * stack rows adds no height yet is real progress, and height-based stopping stranded exactly the
+	 * incident-heavy inboxes that stack hardest, with the sentinel in view but nothing left to re-fire
+	 * it. A window that advances nothing landed somewhere unrenderable (a collapsed date group), so
+	 * further windows would be too. Appends normally extend the last date group, which can't be
+	 * collapsed, so this mostly guards rows arriving out of order.
+	 *
+	 * And the episode's window budget, for the fill that makes progress forever without ever filling:
+	 * every window absorbed into the trailing stack row is invisible height-wise, so absent a cap an
+	 * alerting inbox would walk itself end to end. The reader can still scroll and re-arm the observer.
+	 *
+	 * Call it from a watcher on the RENDERED rows, not on the loaded threads: rows come and go as
+	 * stacks and date groups fold, and each change can move the sentinel. That watcher must be
+	 * declared below the rows it watches — `watch` evaluates its source at setup, and reading a
 	 * `<script setup>` computed from above its declaration is a temporal-dead-zone crash.
 	 */
+	// Whether the sentinel is inside the container's viewport RIGHT NOW, measured — not the observer
+	// flag, which is stale at nextTick (observer callbacks land after render): a fill that pushed the
+	// sentinel below the fold would read as still-visible and chain an unwanted extra window onto
+	// every ordinary scroll-to-bottom load.
+	const sentinelInView = () => {
+		const el = container.value
+		const s = sentinel.value
+		if (!el || !s) return false
+		const c = el.getBoundingClientRect()
+		const r = s.getBoundingClientRect()
+		return r.top < c.bottom && r.bottom > c.top
+	}
+
 	const topUpIfShort = () => {
-		if (!sentinelVisible.value || !hasMore.value) return
+		if (!sentinelVisible.value || !hasMore.value || fillWindows >= MAX_FILL_WINDOWS) return
 
 		nextTick(() => {
-			const el = container.value
-			if (!el || !sentinelVisible.value) return
+			if (!sentinelInView()) return
 
-			const grew = el.scrollHeight > lastFillHeight
-			lastFillHeight = el.scrollHeight
-			if (el.scrollHeight <= el.clientHeight && grew) loadMore()
+			const progress = fillProgress ? fillProgress() : (container.value?.scrollHeight ?? 0)
+			const grew = progress > lastFillProgress
+			lastFillProgress = progress
+			if (!grew) return
+			fillWindows++
+			loadMore()
 		})
 	}
 

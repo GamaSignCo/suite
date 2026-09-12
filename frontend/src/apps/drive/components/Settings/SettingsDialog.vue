@@ -1,5 +1,5 @@
 <template>
-  <UiSettingsDialog v-model="open" v-model:tab="activeTab" size="5xl">
+  <UiSettingsDialog v-model:open="open" v-model:tab="activeTab" size="5xl">
     <template #title>{{ __('Settings') }}</template>
     <SettingsSidebar>
       <SettingsNavGroup
@@ -36,13 +36,15 @@ import {
   SettingsPanel,
   SettingsSidebar,
 } from 'frappe-ui'
-import { isAdmin } from '@/apps/drive/resources/permissions'
+import { isAdmin, webdavConfig } from '@/apps/drive/resources/permissions'
 import ProfileSettings from '@/apps/drive/components/Settings/ProfileSettings.vue'
 import PreferencesSettings from '@/apps/drive/components/Settings/PreferencesSettings.vue'
 import StorageSettings from './StorageSettings.vue'
 import UserListSettings from './UserListSettings.vue'
+import WebDAVSettings from './WebDAVSettings.vue'
 import LucideCloudCog from '~icons/lucide/cloud-cog'
 import LucideChartBar from '~icons/lucide/chart-bar'
+import LucideHardDrive from '~icons/lucide/hard-drive'
 import LucideSlidersHorizontal from '~icons/lucide/sliders-horizontal'
 import LucideUser from '~icons/lucide/user'
 import LucideUserPlus from '~icons/lucide/user-plus'
@@ -81,6 +83,14 @@ const allGroups = [
         icon: LucideChartBar,
         component: markRaw(StorageSettings),
       },
+      {
+        label: 'WebDAV',
+        value: 'webdav',
+        icon: LucideHardDrive,
+        component: markRaw(WebDAVSettings),
+        // hidden while the server withholds the config (feature off, not admin)
+        condition: () => webdavConfig.data && Object.keys(webdavConfig.data).length > 0,
+      },
     ],
   },
   {
@@ -97,6 +107,7 @@ const allGroups = [
   },
 ]
 if (!isAdmin.data) isAdmin.fetch()
+if (!webdavConfig.data) webdavConfig.fetch()
 
 const emit = defineEmits(['update:modelValue'])
 const props = defineProps({
@@ -110,7 +121,7 @@ const tabGroups = computed(() =>
     .filter((group) => !group.adminOnly || isAdmin.data?.is_admin)
     .map((group) => ({
       label: group.label,
-      items: group.items,
+      items: group.items.filter((tab) => !tab.condition || tab.condition()),
     }))
     .filter((group) => group.items.length > 0),
 )

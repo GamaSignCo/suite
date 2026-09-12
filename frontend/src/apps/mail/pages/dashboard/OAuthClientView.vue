@@ -8,7 +8,7 @@
 				<template #icon><KeyRound class="h-5 w-5" /></template>
 				<template #actions>
 					<Button :label="__('Edit')" @click="showEdit = true" />
-					<Dropdown :options="dropdownOptions" :button="{ icon: 'more-horizontal' }" />
+					<Dropdown :options="dropdownOptions" :button="{ icon: 'lucide-more-horizontal' }" />
 				</template>
 			</DashboardDetailHeader>
 
@@ -80,12 +80,14 @@
 	<EditOAuthClientModal v-if="client.data" v-model="showEdit" :client="client.data" @reload="client.reload()" />
 	<AddOAuthContactsModal v-model="showAddContacts" :client-id="clientId" @reload="client.reload()" />
 	<AddOAuthRedirectUrisModal v-model="showAddRedirectUris" :client-id="clientId" @reload="client.reload()" />
-	<Dialog v-model="showDelete" :options="deleteDialogOptions" />
+	<Dialog v-model:open="showDelete" v-bind="deleteDialogOptions" />
 </template>
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { useRouter } from 'vue-router'
-import { Button, Dialog, Dropdown, FeatherIcon, createResource, usePageMeta } from 'frappe-ui'
+import { Button, Dialog, Dropdown, createResource, usePageMeta } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
 
 import KeyRound from '~icons/lucide/key-round'
 
@@ -102,7 +104,7 @@ import AddOAuthRedirectUrisModal from '@/apps/mail/components/Modals/AddOAuthRed
 const { clientId } = defineProps<{ clientId: string }>()
 const router = useRouter()
 
-usePageMeta(() => ({ title: client.data?.client_id || clientId }))
+usePageMeta(() => appPageMeta(client.data?.client_id || clientId, 'Mail'))
 
 const showEdit = ref(false)
 const showAddContacts = ref(false)
@@ -172,14 +174,14 @@ const deleteDialogOptions = computed(() => ({
 	title: __('Delete OAuth Client'),
 	message: __('Are you sure you want to delete this OAuth client? This action cannot be undone.'),
 	size: 'xl',
-	icon: { name: 'alert-triangle', appearance: 'warning' },
+	icon: { name: 'lucide-alert-triangle', theme: 'amber' },
 	actions: [{ label: __('Confirm'), variant: 'solid', theme: 'red', onClick: deleteClient.submit }],
 }))
 
 const dropdownOptions = computed(() => [
 	{
 		group: '',
-		items: [{ label: __('Delete'), icon: 'trash-2', onClick: () => (showDelete.value = true) }],
+		options: [{ label: __('Delete'), icon: 'lucide-trash-2', onClick: () => (showDelete.value = true) }],
 	},
 ])
 </script>

@@ -1,4 +1,99 @@
-export type SFUScope = "presence-preview" | "full";
+export type SFUScope = 'presence-preview' | 'full' | 'recording';
+
+export interface RecordingJoinRequest {
+	roomId: string;
+}
+
+export interface RecordingProofChallenge {
+	protocol_version: 1;
+	jti: string;
+	socket_id: string;
+	nonce: string;
+	issued_at: number;
+	expires_at: number;
+}
+
+export interface RecordingProofRequest {
+	protocol_version: 1;
+	signature: string;
+}
+
+export interface RecorderStageParticipant {
+	participant_id: string;
+	name: string;
+	avatar?: string;
+	audio_enabled: boolean;
+	video_enabled: boolean;
+}
+
+export interface RecorderStageProducer {
+	producer_id: string;
+	participant_id: string;
+	kind: 'audio' | 'video';
+	paused: boolean;
+	is_screen: boolean;
+	observed_at: string;
+}
+
+export interface RecorderStageSnapshot {
+	protocol_version: 1;
+	room_id: string;
+	cursor: number;
+	observed_at: string;
+	participants: RecorderStageParticipant[];
+	producers: RecorderStageProducer[];
+	raised_hands: Record<string, string>;
+	active_speaker_ids: string[];
+}
+
+export type RecorderStageProjectionPayload =
+	| { type: 'participant_joined'; participant: RecorderStageParticipant }
+	| { type: 'participant_updated'; participant: RecorderStageParticipant }
+	| { type: 'participant_left'; participant_id: string }
+	| { type: 'producer_created'; producer: RecorderStageProducer }
+	| { type: 'producer_updated'; producer_id: string; paused: boolean }
+	| {
+			type: 'producer_closed';
+			producer_id: string;
+			participant_id: string;
+			is_screen: boolean;
+	  }
+	| {
+			type: 'media_control';
+			participant_id: string;
+			action: MediaControlAction;
+	  }
+	| { type: 'active_speaker'; participant_ids: string[] }
+	| { type: 'hand_raised'; participant_id: string; raised: boolean }
+	| { type: 'reaction'; from_user: string; reaction: string }
+	| {
+			type: 'chat_message';
+			message_id: string;
+			message: string;
+			from_user: string;
+			from_name: string;
+	  };
+
+export interface RecorderStageProjectionEvent {
+	protocol_version: 1;
+	room_id: string;
+	cursor: number;
+	observed_at: string;
+	payload: RecorderStageProjectionPayload;
+}
+
+export type RecordingProjectionSnapshotResponse =
+	| { success: true; snapshot: RecorderStageSnapshot }
+	| { success: false; error: string };
+
+export type RecordingProofResponse =
+	| { protocol_version: 1; success: true }
+	| {
+			protocol_version: 1;
+			success: false;
+			reason_code: 'invalid_proof';
+			diagnostic?: string;
+	  };
 
 export interface UserData {
 	name: string;
@@ -33,31 +128,79 @@ export interface PreviewParticipantInfo {
 	};
 }
 
-export type MediaControlAction = "mute" | "unmute" | "video_off" | "video_on";
+export type MediaControlAction = 'mute' | 'unmute' | 'video_off' | 'video_on';
 
 export type HostControlAction =
-	| "mute_participant"
-	| "kick_participant"
-	| "lower_hand";
+	| 'mute_participant'
+	| 'kick_participant'
+	| 'ban_participant'
+	| 'lower_hand';
+
+export type ProducerCloseReason =
+	| 'user-click'
+	| 'track-ended'
+	| 'publish-failed'
+	| 'cleanup';
+
+export type ProducerCloseSource = 'screen-share';
+
+export interface ProducerCloseTrackSettings {
+	aspectRatio?: number;
+	autoGainControl?: boolean;
+	channelCount?: number;
+	deviceId?: string;
+	displaySurface?: string;
+	echoCancellation?: boolean;
+	facingMode?: string;
+	frameRate?: number;
+	groupId?: string;
+	height?: number;
+	latency?: number;
+	logicalSurface?: boolean;
+	noiseSuppression?: boolean;
+	restrictOwnAudio?: boolean;
+	sampleRate?: number;
+	sampleSize?: number;
+	screenPixelRatio?: number;
+	suppressLocalAudioPlayback?: boolean;
+	width?: number;
+}
+
+export interface ProducerCloseDetails {
+	trackId?: string;
+	trackReadyState?: 'live' | 'ended';
+	trackSettings?: ProducerCloseTrackSettings;
+	message?: string;
+}
 
 export interface ScreenShareData {
 	streamId?: string;
-	kind?: "video";
+	kind?: 'video';
 	isScreen?: boolean;
-	reason?: string;
-	source?: string;
+	reason?: ProducerCloseReason;
+	source?: ProducerCloseSource;
 	producerId?: string;
-	details?: Record<string, unknown>;
-	[key: string]: unknown;
+	details?: ProducerCloseDetails;
+	startedAt?: number;
+	stoppedAt?: number;
 }
 
 export interface ChatMessage {
 	roomId: string;
+	messageId: string;
 	message: string;
 	fromUser: string;
 	fromName: string;
 	timestamp: string;
 	clientId?: string;
+}
+
+export interface PinnedChatMessage {
+	messageId: string;
+	message: string;
+	fromUser: string;
+	fromName: string;
+	timestamp: string;
 }
 
 export interface ReactionMessage {
@@ -71,7 +214,7 @@ export interface ReactionMessage {
 export interface ParticipantJoinedEvent {
 	roomId: string;
 	participantId: string;
-	userData: UserData;
+	userData: UserData | Pick<UserData, 'name' | 'avatar'>;
 }
 
 export interface ParticipantLeftEvent {
@@ -79,7 +222,7 @@ export interface ParticipantLeftEvent {
 	participantId: string;
 }
 
-export type ProducerKind = "audio" | "video";
+export type ProducerKind = 'audio' | 'video';
 
 export interface ProducerCreatedEvent {
 	roomId: string;
@@ -95,9 +238,9 @@ export interface ProducerClosedEvent {
 	producerId: string;
 	participantId: string;
 	isScreen: boolean;
-	reason?: string;
-	source?: string;
-	details?: Record<string, unknown>;
+	reason?: ProducerCloseReason;
+	source?: ProducerCloseSource;
+	details?: ProducerCloseDetails;
 }
 
 export interface ConsumerClosedEvent {
@@ -126,6 +269,7 @@ export interface ScreenShareStartedEvent {
 
 export interface ScreenShareStoppedEvent {
 	participantId: string;
+	producerId: string;
 	timestamp: string;
 	reason?: string;
 }
@@ -146,7 +290,7 @@ export interface AuthExpiredEvent {
 
 export interface NetworkQualityUpdateEvent {
 	participantId: string;
-	quality: "good" | "poor" | "critical";
+	quality: 'good' | 'poor' | 'critical';
 }
 
 export interface HandRaisedEvent {
@@ -156,7 +300,7 @@ export interface HandRaisedEvent {
 }
 
 export interface ExistingRaisedHandsEvent {
-	hands: Record<string, boolean>;
+	hands: Record<string, string>;
 }
 
 export interface UpdateTokenRequest {
@@ -168,7 +312,7 @@ export interface MediaState {
 	video_enabled: boolean;
 }
 
-export type E2EEMode = "insertable-streams" | "none";
+export type E2EEMode = 'insertable-streams' | 'none';
 
 export interface E2EECapability {
 	supported: boolean;
@@ -181,15 +325,105 @@ export interface E2EESessionMetadata {
 	ecdhPublicKey?: string;
 }
 
+export type E2eeEpochEnvelope =
+	| E2eeEpochKeyPackageRequest
+	| E2eeEpochGenesisRequest
+	| E2eeEpochKeyPackage
+	| E2eeEpochCommitRequest
+	| E2eeEpochCommit
+	| E2eeEpochWelcome
+	| E2eeEpochAck
+	| E2eeEpochResyncRequest
+	| E2eeEpochJoinStatus;
+
+export type E2eeEpochKeyPackageRequest = {
+	type: 'key-package-request';
+	epochNumber: number;
+	reason: 'enable' | 'join' | 'reconnect';
+};
+
+export type E2eeEpochGenesisRequest = {
+	type: 'genesis-request';
+	epochNumber: 1;
+	message: string;
+};
+
+export type E2eeEpochKeyPackage = {
+	type: 'key-package';
+	fromParticipantId: string;
+	fromSenderId: number;
+	epochNumber: number;
+	reason?: 'enable' | 'join' | 'reconnect';
+	keyPackage: string;
+};
+
+export type E2eeEpochCommitRequest = {
+	type: 'commit-request';
+	epochNumber: number;
+	nextEpochNumber: number;
+	membershipDeltaId: string;
+	membershipDeltaHash: string;
+	rosterHash: string;
+	committerSenderId: number;
+	joiningSenderIds: number[];
+	removedSenderIds?: number[];
+};
+
+export type E2eeEpochCommit = {
+	type: 'commit';
+	fromParticipantId: string;
+	fromSenderId: number;
+	previousEpochNumber: number;
+	epochNumber: number;
+	membershipDeltaId: string;
+	membershipDeltaHash: string;
+	rosterHash: string;
+	mlsCommit: string;
+};
+
+export type E2eeEpochWelcome = {
+	type: 'welcome';
+	fromParticipantId: string;
+	fromSenderId: number;
+	toParticipantId: string;
+	toSenderId: number;
+	epochNumber: number;
+	mlsWelcome: string;
+};
+
+export type E2eeEpochAck = {
+	type: 'ack';
+	fromParticipantId: string;
+	fromSenderId: number;
+	epochNumber: number;
+};
+
+export type E2eeEpochResyncRequest = {
+	type: 'resync-request';
+	fromParticipantId: string;
+	fromSenderId: number;
+	knownEpochNumber?: number;
+};
+
+export type E2eeEpochJoinStatus = {
+	type: 'join-status';
+	status: 'pending' | 'failed';
+	reason?: 'waiting-for-admitter' | 'waiting-for-host';
+	epochNumber: number;
+	message: string;
+};
+
 export interface JoinRoomRequest {
 	roomId: string;
+	connectionId?: string;
+	conflictId?: string;
 	userData: UserData;
 	mediaState: MediaState;
 	e2ee?: E2EESessionMetadata;
 }
 
 export interface CreateWebRtcTransportRequest {
-	direction: "send" | "recv";
+	direction: 'send' | 'recv';
 	encryptionEnabled?: boolean;
 }
 
@@ -203,7 +437,7 @@ export interface HostControlRequest {
 }
 
 export interface ScreenShareRequest {
-	action: "start_share" | "stop_share";
+	action: 'start_share' | 'stop_share';
 	shareData?: ScreenShareData;
 }
 
@@ -230,32 +464,4 @@ export interface RaiseHandRequest {
 
 export interface LeaveRoomRequest {
 	roomId?: string;
-}
-
-export interface PresenceTokenResponse {
-	auth_token?: string;
-	sfu_url?: string;
-	sfu_port?: number;
-	error?: string;
-}
-
-export interface PresenceParticipant extends PreviewParticipantInfo {
-	user_id?: string;
-	info: PreviewParticipantInfo["info"] & {
-		userId?: string;
-		audio_enabled?: boolean;
-		video_enabled?: boolean;
-		is_guest?: boolean;
-	};
-}
-
-export interface PresenceParticipantsResponse {
-	success: boolean;
-	participants?: PresenceParticipant[];
-	error?: string;
-}
-
-export interface PresenceJoinResponse {
-	success: boolean;
-	error?: string;
 }

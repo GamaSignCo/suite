@@ -36,7 +36,7 @@
         </div>
       </div>
       <div v-if="commentsPainted && comments._map.size" class="hidden md:block absolute top-4 right-4">
-        <Dropdown :options="commentFilterOptions" placement="right">
+        <Dropdown :options="commentFilterOptions" align="end">
           <Button :icon="LucideMessageSquareQuote" variant="outline" />
         </Dropdown>
       </div>
@@ -294,6 +294,7 @@ const editorStyle = computed(() => ({
 const uploadFunction = (file) => {
   const fileUpload = useFileUpload()
   return fileUpload.upload(file, {
+    private: false,
     params: { file_id: props.file.doc.name },
     upload_endpoint: `/api/method/suite.writer.api.embed.add`,
   })

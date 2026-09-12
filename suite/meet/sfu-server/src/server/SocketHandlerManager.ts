@@ -1,7 +1,12 @@
 import type { Server } from 'socket.io';
+import type { SFUConfig } from '../config';
 import type { MediasoupManager } from '../mediasoup/MediasoupManager';
 import type { Telemetry } from '../telemetry/Telemetry';
-import type { ClientToServerEvents, ServerToClientEvents } from '../types';
+import type {
+	ClientToServerEvents,
+	RecordingProofRequest,
+	ServerToClientEvents,
+} from '../types';
 import { loggers } from '../utils/logger';
 import { RateLimiter } from '../utils/rateLimiter';
 import type { AuthManager } from './AuthManager';
@@ -25,7 +30,13 @@ import { registerRoomJoinHandlers } from './handlers/RoomJoinHandlers';
 import { registerRoomQueryHandlers } from './handlers/RoomQueryHandlers';
 import { registerScreenShareHandlers } from './handlers/ScreenShareHandlers';
 import { registerWebRtcTransportHandlers } from './handlers/WebRtcTransportHandlers';
+import { ParticipantConnectionLifecycle } from './ParticipantConnectionLifecycle';
+import type { RecordingGrantManager } from './RecordingGrantManager';
+import { RoomLifecycleCoordinator } from './RoomLifecycleCoordinator';
 import { RoomRegistry } from './RoomRegistry';
+
+const RECORDING_PROOF_TIMEOUT_MS = 10_000;
+const RECORDING_PROOF_KEYS = ['protocol_version', 'signature'] as const;
 
 export class SocketHandlerManager {
 	private io: Server<ClientToServerEvents, ServerToClientEvents>;
@@ -34,6 +45,8 @@ export class SocketHandlerManager {
 	private registry: RoomRegistry;
 	private rateLimiter: RateLimiter;
 	private e2eeEpochRelay: E2EEEpochRelay;
+	private roomLifecycle: RoomLifecycleCoordinator;
+	private participantConnections: ParticipantConnectionLifecycle;
 	private telemetry: Telemetry;
 	private registerHandlers: ((socket: import('socket.io').Socket) => void)[];
 	private idleExpirySweep: NodeJS.Timeout | null = null;
@@ -44,7 +57,9 @@ export class SocketHandlerManager {
 		authManager: AuthManager,
 		telemetry: Telemetry,
 		roster: E2eeRosterStore,
+		private readonly runtime: SFUConfig['runtime'],
 		coordinatorPersistence?: E2eeCoordinatorPersistence,
+		private readonly recordingGrantManager?: RecordingGrantManager,
 	) {
 		this.io = io;
 		this.mediasoup = mediasoup;
@@ -59,18 +74,35 @@ export class SocketHandlerManager {
 			coordinatorPersistence,
 			this.rateLimiter,
 			telemetry,
+			this.runtime.bypassRateLimits,
 		);
 		this.e2eeEpochRelay.setRoster(roster);
+		this.roomLifecycle = new RoomLifecycleCoordinator(
+			this.registry,
+			this.e2eeEpochRelay,
+			roster,
+			this.mediasoup,
+		);
+		this.participantConnections = new ParticipantConnectionLifecycle(
+			this.registry,
+			this.roomLifecycle,
+			this.mediasoup,
+			this.e2eeEpochRelay,
+			roster,
+		);
 
 		const deps: HandlerDeps = {
 			io,
 			registry: this.registry,
+			roomLifecycle: this.roomLifecycle,
 			mediasoup,
 			authManager,
 			rateLimiter: this.rateLimiter,
 			e2eeEpochRelay: this.e2eeEpochRelay,
 			e2eeRoster: roster,
+			participantConnections: this.participantConnections,
 			telemetry,
+			runtime: this.runtime,
 		};
 
 		this.registerHandlers = [
@@ -91,6 +123,38 @@ export class SocketHandlerManager {
 			registerDisconnectHandlers(deps),
 			registerErrorHandlers(deps),
 		];
+
+		this.mediasoup.onProducerClosed((event) => {
+			this.registry.emitProducerClosed(event.roomId, {
+				participantId: event.participantId,
+				producerId: event.producerId,
+				isScreen: event.isScreen,
+				reason: event.reason,
+				source: event.source,
+				details: event.details,
+			});
+			for (const removed of event.removedConsumers) {
+				const targetSocket = Array.from(this.io.sockets.sockets.values()).find(
+					(socket) =>
+						socket.peerId === removed.peerId &&
+						socket.roomId === removed.roomId,
+				);
+				if (targetSocket) {
+					targetSocket.emit('consumer_closed', {
+						consumerId: removed.consumerId,
+					});
+				} else {
+					this.registry.emitToFullAccessParticipants(
+						event.roomId,
+						'consumer_closed',
+						{
+							consumerId: removed.consumerId,
+							peerId: removed.peerId,
+						},
+					);
+				}
+			}
+		});
 
 		this.mediasoup.onNetworkQualityUpdate((roomId, peerId, quality) => {
 			this.registry.emitToFullAccessParticipants(
@@ -127,7 +191,35 @@ export class SocketHandlerManager {
 		});
 
 		this.io.on('connection', (socket) => {
-			socket.use((_packet, next) => {
+			let challenge =
+				socket.scope === 'recording' &&
+				socket.recordingClaims &&
+				this.recordingGrantManager
+					? this.recordingGrantManager.createChallenge(
+							socket.recordingClaims,
+							socket.id,
+						)
+					: undefined;
+			let proofTimeout: NodeJS.Timeout | undefined;
+			const clearProofTimeout = () => {
+				if (proofTimeout) clearTimeout(proofTimeout);
+				proofTimeout = undefined;
+			};
+			if (challenge) {
+				proofTimeout = setTimeout(() => {
+					proofTimeout = undefined;
+					if (!socket.recordingProofComplete) socket.disconnect(true);
+				}, RECORDING_PROOF_TIMEOUT_MS);
+				proofTimeout.unref();
+				socket.once('disconnect', clearProofTimeout);
+			}
+			socket.use((packet, next) => {
+				if (socket.scope === 'recording' && !socket.recordingProofComplete) {
+					if (packet[0] !== 'recording:proof') {
+						socket.disconnect(true);
+						return;
+					}
+				}
 				if (this.authManager.isTokenExpired(socket)) {
 					this.telemetry.authEvents.inc({
 						stage: 'expiry',
@@ -135,15 +227,52 @@ export class SocketHandlerManager {
 						outcome: 'failure',
 					});
 					this.authManager.triggerTokenExpiry(socket, 'middleware_guard');
-					return;
+					if (packet[0] !== 'auth:update_token') return;
 				}
 				next();
 			});
 
+			if (challenge && this.recordingGrantManager) {
+				const manager = this.recordingGrantManager;
+				socket.once('recording:proof', async (data, callback) => {
+					try {
+						const claims = socket.recordingClaims;
+						if (!claims || !challenge || !isRecordingProofRequest(data))
+							throw new Error('Invalid recording proof');
+						const expiresAt = await manager.verifyProofAndConsume(
+							claims,
+							challenge,
+							data.signature,
+							socket.id,
+						);
+						this.registry.activateRecorder(
+							socket,
+							claims.recording_id,
+							claims.recorder_job_id,
+						);
+						socket.recordingProofComplete = true;
+						clearProofTimeout();
+						socket.tokenExpiresAt = expiresAt * 1000;
+						challenge = undefined;
+						callback({ protocol_version: 1, success: true });
+					} catch (error) {
+						clearProofTimeout();
+						callback({
+							protocol_version: 1,
+							success: false,
+							reason_code: 'invalid_proof',
+							diagnostic: (error as Error).message.slice(0, 256),
+						});
+						socket.disconnect(true);
+					}
+				});
+				socket.emit('recording:challenge', challenge);
+			}
+
 			for (const register of this.registerHandlers) {
 				register(socket);
 			}
-			this.e2eeEpochRelay.setup(socket);
+			if (socket.scope !== 'recording') this.e2eeEpochRelay.setup(socket);
 		});
 
 		this.idleExpirySweep = setInterval(
@@ -171,9 +300,26 @@ export class SocketHandlerManager {
 	}
 
 	stop(): void {
+		this.roomLifecycle.stop();
 		if (this.idleExpirySweep) {
 			clearInterval(this.idleExpirySweep);
 			this.idleExpirySweep = null;
 		}
 	}
+}
+
+export function isRecordingProofRequest(
+	value: unknown,
+): value is RecordingProofRequest {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+	const keys = Object.keys(value);
+	return (
+		keys.length === RECORDING_PROOF_KEYS.length &&
+		RECORDING_PROOF_KEYS.every((key) => keys.includes(key)) &&
+		'protocol_version' in value &&
+		value.protocol_version === 1 &&
+		'signature' in value &&
+		typeof value.signature === 'string' &&
+		value.signature.length > 0
+	);
 }

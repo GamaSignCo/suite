@@ -7,7 +7,7 @@
 			>
 				<template #icon><FileKey2 class="h-5 w-5" /></template>
 				<template #actions>
-					<Dropdown :options="dropdownOptions" :button="{ icon: 'more-horizontal' }" />
+					<Dropdown :options="dropdownOptions" :button="{ icon: 'lucide-more-horizontal' }" />
 				</template>
 			</DashboardDetailHeader>
 			<div class="grid grid-cols-1 gap-5 lg:grid-cols-2">
@@ -63,12 +63,14 @@
 			</div>
 		</template>
 	</DashboardLayout>
-	<Dialog v-model="showDelete" :options="deleteDialogOptions" />
+	<Dialog v-model:open="showDelete" v-bind="deleteDialogOptions" />
 </template>
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { useRouter } from 'vue-router'
-import { Dialog, Dropdown, FeatherIcon, Tooltip, createResource, usePageMeta } from 'frappe-ui'
+import { Dialog, Dropdown, Tooltip, createResource, usePageMeta } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
 
 import FileKey2 from '~icons/lucide/file-key-2'
 
@@ -100,7 +102,7 @@ const router = useRouter()
 
 const showDelete = ref(false)
 
-usePageMeta(() => ({ title: (signature.data as DkimData | undefined)?.selector || signatureId }))
+usePageMeta(() => appPageMeta((signature.data as DkimData | undefined)?.selector || signatureId, 'Mail'))
 
 const signature = createResource({
 	url: 'suite.mail.api.admin.get_dkim_signature',
@@ -148,14 +150,14 @@ const deleteDialogOptions = computed(() => ({
 	title: __('Delete DKIM Signature'),
 	message: __('Are you sure you want to delete this DKIM signature? This action cannot be undone.'),
 	size: 'xl',
-	icon: { name: 'alert-triangle', appearance: 'warning' },
+	icon: { name: 'lucide-alert-triangle', theme: 'amber' },
 	actions: [{ label: __('Confirm'), variant: 'solid', theme: 'red', onClick: deleteSignature.submit }],
 }))
 
 const dropdownOptions = computed(() => [
 	{
 		group: '',
-		items: [{ label: __('Delete'), icon: 'trash-2', onClick: () => (showDelete.value = true) }],
+		options: [{ label: __('Delete'), icon: 'lucide-trash-2', onClick: () => (showDelete.value = true) }],
 	},
 ])
 </script>

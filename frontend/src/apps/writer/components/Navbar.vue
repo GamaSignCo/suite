@@ -3,33 +3,33 @@
     id="navbar"
     ondragstart="return false;"
     ondrop="return false;"
-    class="bg-surface-base border-b pr-3 py-2.5 h-12 flex items-center justify-between"
+    class="relative z-10 flex h-12 shrink-0 items-center justify-between border-b border-outline-elevation-1 bg-surface-elevation-1 px-3"
   >
-    <div class="pl-4 pr-1">
+    <div class="flex min-w-0 items-center gap-2">
       <Dropdown
-        v-if="$route.name !== 'writer-home'"
-        :options="[
-          {
-            label: 'Back to Home',
-            icon: LucideChevronLeft,
-            route: { name: 'writer-home' },
-          },
-        ]"
+        :options="navbarMenuOptions"
+        :offset="16"
       >
-        <WriterLogo class="size-7 cursor-pointer" />
+        <template #default="{ open }">
+          <div class="flex cursor-pointer items-center gap-2">
+            <WriterLogo class="size-7" />
+            <LucideChevronUp v-if="open" class="size-4 stroke-[1.5] text-ink-gray-7" />
+            <LucideChevronDown v-else class="size-4 stroke-[1.5] text-ink-gray-7" />
+          </div>
+        </template>
       </Dropdown>
-      <WriterLogo v-else class="size-7" />
+      <slot name="breadcrumbs">
+        <EditableBreadcrumbs
+          v-if="route.name !== 'writer-home'"
+          :items="formattedCrumbs"
+          :entity="file?.doc || null"
+          class="select-none truncate max-w-[80%]"
+        />
+      </slot>
     </div>
-    <slot name="breadcrumbs">
-      <EditableBreadcrumbs
-        :items="formattedCrumbs"
-        :entity="file?.doc || null"
-        class="select-none truncate max-w-[80%]"
-      />
-    </slot>
 
-    <div class="ml-auto flex items-center gap-3">
-      <div id="navbar-content" class="flex gap-3" />
+    <div class="ml-auto flex items-center gap-2">
+      <div id="navbar-content" class="flex gap-2" />
       <slot name="content" />
       <Button
         v-if="isOffline"
@@ -83,7 +83,7 @@
       <Dropdown
         v-else-if="fileActions.length"
         :options="fileActions"
-        placement="right"
+        align="end"
         :button="{
           variant: 'ghost',
           icon: LucideMoreHorizontal,
@@ -91,6 +91,17 @@
         }"
       />
     </div>
+    <!-- Kept out of the navbar DOM: the rename field is meant to be the only <input> in there, and e2e locates it as such. -->
+    <Teleport to="body">
+      <input
+        ref="docxInputRef"
+        name="docx-import"
+        type="file"
+        accept=".docx"
+        style="display: none"
+        @change="onImportDocx"
+      />
+    </Teleport>
     <Dialogs v-model="dialog" :docs="file?.doc && [file]" />
   </nav>
 </template>
@@ -98,8 +109,11 @@
 import { Button, Dropdown } from 'frappe-ui'
 import EditableBreadcrumbs from '@/apps/drive/components/EditableBreadcrumbs.vue'
 import { getFileLink } from '@/apps/drive/sdk'
+import { toggleFav } from '@/apps/drive/resources/files'
 
 import { useSessionStore } from '@/boot/session'
+import { useAppSwitcher } from '@/composables/useAppSwitcher'
+import { useThemeMenuOption } from '@/composables/useThemeMenuOption'
 import emitter from '@/apps/writer/emitter'
 import { ref, computed, inject, h } from 'vue'
 import { createDocument, apps } from '@/apps/writer/resources/'
@@ -108,6 +122,9 @@ import Dialogs from '@/apps/writer/components/Dialogs.vue'
 import { dynamicList } from '@/apps/writer/utils/'
 import { downloadZippedHTML, downloadMD } from '@/apps/writer/utils'
 import { downloadDocxFromHtml } from '../utils/docxexporter'
+import { importDocx } from '../utils/docximporter'
+import { orderedTabs } from '@/apps/writer/extensions/tabs'
+import { createDialog } from '@/apps/writer/utils/dialogs'
 
 import LucideUsers from '~icons/lucide/users'
 import LucideBuilding2 from '~icons/lucide/building-2'
@@ -122,6 +139,7 @@ import LucideTrash from '~icons/lucide/trash'
 import LucideMoreHorizontal from '~icons/lucide/more-horizontal'
 import LucideShare2 from '~icons/lucide/share-2'
 import LucideDownload from '~icons/lucide/download'
+import LucideUpload from '~icons/lucide/upload'
 import LucidePlus from '~icons/lucide/plus'
 import LucideLink from '~icons/lucide/link'
 import LucideArrowLeftRight from '~icons/lucide/arrow-left-right'
@@ -134,7 +152,8 @@ import LucideHistory from '~icons/lucide/history'
 import LucideLayoutTemplate from '~icons/lucide/layout-template'
 import LucideMarkdown from '~icons/lucide/pilcrow'
 import LucideWifiOff from '~icons/lucide/wifi-off'
-import LucideChevronLeft from '~icons/lucide/chevron-left'
+import LucideChevronUp from '~icons/lucide/chevron-up'
+import LucideChevronDown from '~icons/lucide/chevron-down'
 
 import WriterLogo from './WriterLogo.vue'
 import { useRoute } from 'vue-router'
@@ -163,13 +182,70 @@ const showTemplates = defineModel('showTemplates')
 const isLoggedIn = computed(() => useSessionStore().isLoggedIn)
 const dialog = inject('dialog', ref(''))
 const editor = inject('editor', null)
+const docxInputRef = ref(null)
+
+const exportDocx = () => {
+  if (!editor.value) return
+  const filename = `${props.file.doc.file_name}.docx`
+  const settings = props.document?.doc?.settings
+  const tabs = orderedTabs(editor.value.state.doc)
+
+  if (tabs.length <= 1) {
+    downloadDocxFromHtml(editor.value.getHTML(), filename, settings)
+    return
+  }
+
+  createDialog({
+    title: 'Export DOCX',
+    message: 'This document has multiple tabs. Export just the current tab, or all of them?',
+    actions: [
+      {
+        label: 'All Tabs',
+        variant: 'outline',
+        onClick: ({ close }) => {
+          downloadDocxFromHtml(editor.value.getHTML(), filename, settings)
+          close()
+        },
+      },
+      {
+        label: 'Current Tab',
+        variant: 'solid',
+        onClick: ({ close }) => {
+          downloadDocxFromHtml(editor.value.commands.getCurrentTabHTML(), filename, settings)
+          close()
+        },
+      },
+    ],
+  })
+}
 
 const route = useRoute()
+const sessionStore = useSessionStore()
+const appsMenuOption = useAppSwitcher('writer')
+const themeMenuOption = useThemeMenuOption()
+const navbarMenuOptions = computed(() => [
+  {
+    group: '',
+    options: [appsMenuOption.value],
+  },
+  {
+    group: '',
+    options: [
+      themeMenuOption,
+      ...(sessionStore.isLoggedIn
+        ? [
+            {
+              label: 'Log out',
+              icon: 'lucide-log-out',
+              onClick: () => sessionStore.logout.submit(),
+            },
+          ]
+        : []),
+    ],
+  },
+])
 const formattedCrumbs = computed(() => {
-  const ORIG =
-    route.name === 'writer-home'
-      ? { label: 'Writer', href: '/writer' }
-      : { label: 'Drive', href: '/drive' }
+  const ORIG = { label: 'Writer', href: '/writer' }
   if (!props.breadcrumbs.length) return [ORIG]
   return [
     ORIG,
@@ -188,9 +264,9 @@ const fileActions = computed(() =>
   props.document?.doc?.settings
     ? [
         {
-          group: true,
+          group: '',
           hideLabel: true,
-          items: [
+          options: [
             {
               label: __('Share'),
               icon: LucideShare2,
@@ -213,9 +289,9 @@ const fileActions = computed(() =>
           ],
         },
         {
-          group: true,
+          group: '',
           hideLabel: true,
-          items: [
+          options: [
             {
               label: __('Move'),
               icon: LucideArrowLeftRight,
@@ -238,9 +314,18 @@ const fileActions = computed(() =>
               icon: LucideStar,
               onClick: () => {
                 props.file.doc.is_favourite = true
-                toggleFav.submit({ entities: [props.file.doc] })
+                toggleFav.submit(
+                  {
+                    entities: [{ name: props.file.doc.name, is_favourite: true }],
+                  },
+                  {
+                    onError: () => {
+                      props.file.doc.is_favourite = false
+                    },
+                  }
+                )
               },
-              isEnabled: () => !props.file.doc.is_favourite,
+              isEnabled: () => isLoggedIn.value && !props.file.doc.is_favourite,
             },
             {
               label: __('Unfavourite'),
@@ -248,16 +333,25 @@ const fileActions = computed(() =>
               color: 'stroke-amber-500 fill-amber-500',
               onClick: () => {
                 props.file.doc.is_favourite = false
-                toggleFav.submit({ entities: [props.file.doc] })
+                toggleFav.submit(
+                  {
+                    entities: [{ name: props.file.doc.name, is_favourite: false }],
+                  },
+                  {
+                    onError: () => {
+                      props.file.doc.is_favourite = true
+                    },
+                  }
+                )
               },
-              isEnabled: () => props.file.doc.is_favourite,
+              isEnabled: () => isLoggedIn.value && props.file.doc.is_favourite,
             },
           ],
         },
         {
-          group: true,
+          group: '',
           hideLabel: true,
-          items: dynamicList([
+          options: dynamicList([
             {
               label: 'View',
               icon: LucideView,
@@ -303,13 +397,7 @@ const fileActions = computed(() =>
                 {
                   label: 'DOCX',
                   icon: LucideFileText,
-                  onClick: () => {
-                    downloadDocxFromHtml(
-                      editor.getHTML(),
-                      `${file.doc.file_name}.docx`,
-                      props.document?.doc?.settings,
-                    )
-                  },
+                  onClick: () => exportDocx(),
                 },
                 {
                   label: 'Folder',
@@ -336,6 +424,18 @@ const fileActions = computed(() =>
               ],
             },
             {
+              label: 'Import',
+              icon: LucideUpload,
+              cond: props.file.doc.write,
+              submenu: [
+                {
+                  label: 'DOCX',
+                  icon: LucideFileText,
+                  onClick: () => docxInputRef.value?.click(),
+                },
+              ],
+            },
+            {
               icon: LucideHistory,
               label: 'Versions',
               cond: props.file.doc.write,
@@ -350,9 +450,9 @@ const fileActions = computed(() =>
           ]),
         },
         {
-          group: true,
+          group: '',
           hideLabel: true,
-          items: [
+          options: [
             {
               onClick: () => clearCache(),
               label: 'Clear Cache',
@@ -370,11 +470,18 @@ const fileActions = computed(() =>
       ].map((k) => {
         return {
           ...k,
-          items: k.items.filter((l) => !l.isEnabled || l.isEnabled()),
+          options: k.options.filter((l) => !l.isEnabled || l.isEnabled()),
         }
       })
     : [],
 )
+
+const onImportDocx = async (e) => {
+  const file = e.target.files?.[0]
+  e.target.value = ''
+  if (!file) return
+  await importDocx(file, { editor, currentFileId: props.file.doc.name })
+}
 
 // Utility functions for doc
 const clearCache = () => {

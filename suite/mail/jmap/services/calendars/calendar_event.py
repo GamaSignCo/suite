@@ -276,10 +276,16 @@ class CalendarEventService(CalendarsService):
 
             if method_responses := response.get("methodResponses"):
                 result["parsed"].update(method_responses[0][1].get("parsed", {}))
-                if not_found := method_responses[0][1].get("notFound", {}):
-                    result["notFound"].update(not_found)
-                if not_parsable := method_responses[0][1].get("notParsable", {}):
-                    result["notParsable"].update(not_parsable)
+                # The server reports notFound/notParsable as blob-id arrays; keep the
+                # dict shape callers read (.keys()) by keying the ids.
+                if not_found := method_responses[0][1].get("notFound"):
+                    result["notFound"].update(
+                        dict.fromkeys(not_found) if isinstance(not_found, list) else not_found
+                    )
+                if not_parsable := method_responses[0][1].get("notParsable"):
+                    result["notParsable"].update(
+                        dict.fromkeys(not_parsable) if isinstance(not_parsable, list) else not_parsable
+                    )
 
         return result
 
@@ -424,6 +430,98 @@ class CalendarEventService(CalendarsService):
 
         return result
 
+    def set_instance_participation_status(
+        self,
+        id: str,
+        recurrence_id: str,
+        participant_uid: str,
+        participation_status: str,
+        send_scheduling_messages: bool = False,
+    ) -> dict:
+        """Patches one participant's participationStatus on a single occurrence of a series.
+
+        The series keeps the answer it had and this date gets an override carrying the new one —
+        the same mechanism a renamed or moved occurrence uses, so other clients read one
+        occurrence answered differently rather than a series that changed its mind.
+        """
+
+        if not id or not recurrence_id or not participant_uid:
+            raise ValueError("'id', 'recurrence_id' and 'participant_uid' are all required.")
+
+        events = self.get([id])
+        if not events:
+            raise ValueError(f"Event with id '{id}' not found.")
+
+        overrides = events[0].get("recurrenceOverrides", {}) or {}
+        key = f"participants/{participant_uid}/participationStatus"
+        status = participation_status.lower()
+
+        # JMAP refuses a patch whose parent isn't there, so the shape follows what is stored:
+        # a whole map only when the event carries no overrides at all, and otherwise the
+        # smallest write that touches this occurrence and no other.
+        if not overrides:
+            patch = {"recurrenceOverrides": {recurrence_id: {key: status}}}
+        elif recurrence_id in overrides:
+            patch = {f"recurrenceOverrides/{recurrence_id}/{key}": status}
+        else:
+            patch = {f"recurrenceOverrides/{recurrence_id}": {key: status}}
+
+        response = self._update(
+            {id: {**patch, "updated": utcnow()}}, sendSchedulingMessages=send_scheduling_messages
+        )
+
+        result = {"updated": [], "notUpdated": {}}
+        if method_responses := response.get("methodResponses"):
+            result["updated"].extend(method_responses[0][1].get("updated", {}).keys())
+            if not_updated := method_responses[0][1].get("notUpdated", {}):
+                result["notUpdated"].update(not_updated)
+
+        return result
+
+    def remove_overrides(self, id: str, recurrence_ids: list[str]) -> dict:
+        """Drops the named occurrences' overrides, leaving every other one where it is.
+
+        One key removed per occurrence rather than a rewritten map: the map is shared state, and
+        a copy taken before someone else's write would put their occurrence back.
+        """
+
+        if not id or not recurrence_ids:
+            raise ValueError("Both 'id' and 'recurrence_ids' are required.")
+
+        payload = {id: {f"recurrenceOverrides/{rid}": None for rid in recurrence_ids}}
+        payload[id]["updated"] = utcnow()
+
+        response = self._update(payload)
+
+        result = {"updated": [], "notUpdated": {}}
+        if method_responses := response.get("methodResponses"):
+            result["updated"].extend(method_responses[0][1].get("updated", {}).keys())
+            if not_updated := method_responses[0][1].get("notUpdated", {}):
+                result["notUpdated"].update(not_updated)
+
+        return result
+
+    def set_overrides(self, id: str, overrides: dict) -> dict:
+        """Replaces an event's whole recurrenceOverrides map.
+
+        For rewriting the map as a whole — re-keying every override after the series it belongs
+        to has moved. Anywhere that touches a single occurrence must patch that occurrence's key
+        instead, so a copy of the map taken before someone else's write cannot undo it.
+        """
+
+        if not id:
+            raise ValueError("'id' is required.")
+
+        response = self._update({id: {"recurrenceOverrides": overrides, "updated": utcnow()}})
+
+        result = {"updated": [], "notUpdated": {}}
+        if method_responses := response.get("methodResponses"):
+            result["updated"].extend(method_responses[0][1].get("updated", {}).keys())
+            if not_updated := method_responses[0][1].get("notUpdated", {}):
+                result["notUpdated"].update(not_updated)
+
+        return result
+
     def delete_instance(self, id: str, recurrence_id: str, send_scheduling_messages: bool = False) -> dict:
         """Public method to delete a specific instance of a recurring calendar event based on its ID and recurrence ID by marking it as excluded in the master event's recurrence overrides.
         If send_scheduling_messages is True, the JMAP server sends a cancellation for the excluded instance; pass False to suppress it (e.g. when the client sends its own)."""
@@ -520,8 +618,11 @@ class CalendarEventService(CalendarsService):
                 uid = participant.get("uid") or str(uuid7())
                 expect_reply = participant.get("expect_reply", False)
                 calendar_address = f"mailto:{email}" if email else None
+                schedule_agent = (participant.get("schedule_agent") or "").lower() or None
 
-                if expect_reply:
+                # A participant nobody schedules (a mailing list kept for display) gets no
+                # routing, whatever the reply expectation its members inherit.
+                if expect_reply and schedule_agent != "none":
                     send_to = (
                         participant.get("send_to") or {"imip": calendar_address} if calendar_address else None
                     )
@@ -536,12 +637,14 @@ class CalendarEventService(CalendarsService):
                     "sendTo": send_to,
                     "scheduleId": schedule_id,
                     "calendarAddress": calendar_address,
-                    "kind": participant.get("kind", "").lower() or None,
+                    "kind": (participant.get("kind") or "").lower() or None,
                     "description": participant.get("description") or None,
                     "roles": participant.get("roles") or None,
-                    "participationStatus": participant.get("participation_status", "").lower() or None,
+                    "participationStatus": (participant.get("participation_status") or "").lower() or None,
                     "expectReply": expect_reply,
                     "comment": participant.get("comment") or None,
+                    "scheduleAgent": schedule_agent,
+                    "memberOf": participant.get("member_of") or None,
                 }
                 participants_emails.append(email)
 

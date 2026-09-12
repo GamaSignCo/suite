@@ -7,7 +7,7 @@
 			<template #icon><Megaphone class="h-5 w-5" /></template>
 			<template #actions>
 				<Button :label="__('Edit')" @click="showEdit = true" />
-				<Dropdown :options="dropdownOptions" :button="{ icon: 'more-horizontal' }" />
+				<Dropdown :options="dropdownOptions" :button="{ icon: 'lucide-more-horizontal' }" />
 			</template>
 		</DashboardDetailHeader>
 
@@ -15,7 +15,7 @@
 			<!-- Email Addresses -->
 			<DashboardCard :title="__('Email Addresses')" :button-label="__('Add')" @action="showAddEmail = true">
 				<div class="flex flex-col">
-					<div class="bg-surface-gray-2 text-ink-gray-5 flex items-center rounded px-5 py-2.5 text-sm">
+					<div class="bg-surface-gray-2 text-ink-gray-5 flex items-center rounded-4 px-5 py-2.5 text-sm">
 						<span class="flex-1">{{ __('Email Address') }}</span>
 						<span class="flex-1">{{ __('Description') }}</span>
 						<span class="w-20 shrink-0 text-center">{{ __('Enabled') }}</span>
@@ -104,22 +104,15 @@
 	<EditMailingListModal v-if="list.data" v-model="showEdit" :list="list.data" @reload="list.reload()" />
 	<AddMailingListEmailModal v-model="showAddEmail" :list-id="listId" @reload="list.reload()" />
 	<AddMailingListRecipientsModal v-model="showAddRecipients" :list-id="listId" @reload="list.reload()" />
-	<Dialog v-model="showDelete" :options="deleteDialogOptions" />
+	<Dialog v-model:open="showDelete" v-bind="deleteDialogOptions" />
 </template>
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { useRouter } from 'vue-router'
 import {
-	Button,
-	Dialog,
-	Dropdown,
-	FeatherIcon,
-	FormControl,
-	Switch,
-	Tooltip,
-	createResource,
-	usePageMeta,
-} from 'frappe-ui'
+	Button, Dialog, Dropdown, FormControl, Switch, Tooltip, createResource, usePageMeta } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
 
 import Megaphone from '~icons/lucide/megaphone'
 
@@ -144,7 +137,7 @@ const { listId } = defineProps<{ listId: string }>()
 
 const router = useRouter()
 
-usePageMeta(() => ({ title: (list.data as ListData | undefined)?.email || listId }))
+usePageMeta(() => appPageMeta((list.data as ListData | undefined)?.email || listId, 'Mail'))
 
 const showEdit = ref(false)
 const showAddEmail = ref(false)
@@ -232,14 +225,14 @@ const deleteDialogOptions = computed(() => ({
 	title: __('Delete Mailing List'),
 	message: __('Are you sure you want to delete this mailing list? This action cannot be undone.'),
 	size: 'xl',
-	icon: { name: 'alert-triangle', appearance: 'warning' },
+	icon: { name: 'lucide-alert-triangle', theme: 'amber' },
 	actions: [{ label: __('Confirm'), variant: 'solid', theme: 'red', onClick: deleteList.submit }],
 }))
 
 const dropdownOptions = computed(() => [
 	{
 		group: '',
-		items: [{ label: __('Delete'), icon: 'trash-2', onClick: () => (showDelete.value = true) }],
+		options: [{ label: __('Delete'), icon: 'lucide-trash-2', onClick: () => (showDelete.value = true) }],
 	},
 ])
 </script>

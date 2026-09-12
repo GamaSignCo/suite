@@ -10,15 +10,23 @@ export function registerRoomJoinHandlers(deps: HandlerDeps) {
 		data: {
 			roomId: string;
 			participantId: string;
+			connectionId: string;
+			conflictId?: string;
 			userData: UserData;
 			e2ee?: { enabled?: boolean; capability?: { supported?: boolean } };
 		},
 	): Promise<void> {
-		const { roomId, participantId, userData, e2ee } = data;
+		const { roomId, participantId, connectionId, conflictId, userData, e2ee } =
+			data;
 		const startedAt = performance.now();
 		const scope = socket.scope ?? 'unknown';
+		let participantClaimed = false;
+		let firstConnection = false;
+		let participantReconnected = false;
+		if (socket.scope === 'full' && !socket.peerId) socket.peerId = socket.id;
+		const peerId = socket.peerId ?? participantId;
 		const rejoin = Boolean(
-			deps.mediasoup.getRoomPeers?.(getRoomId(socket))?.get(participantId),
+			deps.mediasoup.getRoomPeers?.(getRoomId(socket))?.get(peerId),
 		);
 
 		try {
@@ -30,19 +38,49 @@ export function registerRoomJoinHandlers(deps: HandlerDeps) {
 
 			const scopedRoomId = getRoomId(socket);
 			if (socket.scope === 'full') {
+				if (
+					socket.isGuest &&
+					deps.registry.isParticipantRevoked(scopedRoomId, participantId)
+				) {
+					throw new Error('Guest is banned from this room');
+				}
 				enforceE2EEJoinPolicy(socket, e2ee);
+				await deps.roomLifecycle.humanJoined(scopedRoomId);
+				const acquisition = deps.registry.acquireParticipant(
+					socket,
+					scopedRoomId,
+					participantId,
+					connectionId,
+					conflictId,
+				);
+				if (acquisition.status === 'conflict') {
+					throw new ParticipantConnectionConflictError(acquisition.conflictId);
+				}
+				participantClaimed = true;
+				firstConnection = acquisition.status === 'acquired';
+				participantReconnected =
+					acquisition.status === 'reconnect' ||
+					acquisition.status === 'takeover';
+				if (acquisition.replacedSocket) {
+					acquisition.replacedSocket.emit('participant_connection_replaced', {
+						reason: acquisition.status,
+					});
+					acquisition.replacedSocket.disconnect(true);
+				}
 			}
 
-			await deps.mediasoup.createRoom(
-				scopedRoomId,
-				(roomIdInner, participantIds) => {
-					deps.registry.emitToFullAccessParticipants(
-						roomIdInner,
-						'active_speaker',
-						{ participantIds },
-					);
-				},
-			);
+			if (socket.scope === 'full') {
+				await deps.mediasoup.createRoom(
+					scopedRoomId,
+					(roomIdInner, peerIds) => {
+						deps.registry.emitActiveSpeaker(
+							roomIdInner,
+							participantIdsForPeers(deps, roomIdInner, peerIds),
+						);
+					},
+				);
+				assertParticipantOwnership(deps, socket, scopedRoomId, participantId);
+			}
 
 			socket.join(scopedRoomId);
 
@@ -51,43 +89,50 @@ export function registerRoomJoinHandlers(deps: HandlerDeps) {
 
 			if (socket.scope === 'full') {
 				deps.registry.joinScope(socket, scopedRoomId, 'full');
-				deps.registry.claimParticipant(socket, scopedRoomId, participantId);
-				const senderId = deps.registry.assignSenderId(
-					scopedRoomId,
-					participantId,
-				);
+				const senderId = deps.registry.assignSenderId(scopedRoomId, peerId);
 				socket.senderId = senderId;
 				if (!socket.e2eeRequired) {
 					await deps.e2eeRoster.add(scopedRoomId, {
-						participantId,
+						participantId: peerId,
 						senderId,
 						isHost: Boolean(socket.isHost),
 						joinedAt: Date.now(),
 					});
+					assertParticipantOwnership(deps, socket, scopedRoomId, participantId);
 				}
 				await deps.e2eeEpochRelay.retryPendingCommitRequests(scopedRoomId);
+				assertParticipantOwnership(deps, socket, scopedRoomId, participantId);
 
 				const existingPeer = deps.mediasoup
 					.getRoomPeers?.(scopedRoomId)
-					?.get(participantId);
+					?.get(peerId);
 				if (existingPeer) {
 					loggers.socketHandler.info(
 						'Peer %s already in room %s — clearing stale transports/producers before rejoin',
-						participantId,
+						peerId,
 						scopedRoomId,
 					);
-					await deps.mediasoup.removePeer(scopedRoomId, participantId);
+					await deps.mediasoup.removePeer(scopedRoomId, peerId);
 				}
-				deps.mediasoup.addPeer(scopedRoomId, participantId, {
+				deps.mediasoup.addPeer(scopedRoomId, peerId, {
 					...userData,
 					senderId: socket.senderId,
 					isHost: Boolean(socket.isHost),
 				});
 
-				if (isRealParticipant(userData.userId)) {
+				if (firstConnection && isRealParticipant(userData.userId)) {
 					deps.registry.emitParticipantEvent(
 						scopedRoomId,
 						'participant_joined',
+						participantId,
+						userData,
+					);
+				} else if (
+					participantReconnected &&
+					isRealParticipant(userData.userId)
+				) {
+					deps.registry.emitParticipantUpdated(
+						scopedRoomId,
 						participantId,
 						userData,
 					);
@@ -111,11 +156,15 @@ export function registerRoomJoinHandlers(deps: HandlerDeps) {
 			}
 
 			socket.emit('existing_raised_hands', {
-				hands: deps.registry.getRaisedHands(scopedRoomId) as unknown as Record<
-					string,
-					boolean
-				>,
+				hands: deps.registry.getRaisedHands(scopedRoomId),
 			});
+
+			if (socket.scope === 'full') {
+				const pinned = deps.registry.getPinnedChatMessage(scopedRoomId);
+				if (pinned) {
+					socket.emit('existing_pinned_message', { pinned });
+				}
+			}
 
 			if (socket.scope === 'full' && !socket.e2eeRequired) {
 				const roomPolls = deps.registry.getActivePolls(scopedRoomId);
@@ -146,6 +195,19 @@ export function registerRoomJoinHandlers(deps: HandlerDeps) {
 				(performance.now() - startedAt) / 1000,
 			);
 		} catch (error) {
+			if (socket.scope === 'full') {
+				if (participantClaimed) {
+					await deps.participantConnections.rollbackFailedAdmission(
+						socket,
+						getRoomId(socket),
+						participantId,
+						peerId,
+						firstConnection,
+					);
+				} else {
+					deps.roomLifecycle.scheduleCleanupIfHumanEmpty(getRoomId(socket));
+				}
+			}
 			deps.telemetry.recordRoomJoin(
 				{ scope, rejoin, outcome: 'failure' },
 				(performance.now() - startedAt) / 1000,
@@ -160,8 +222,92 @@ export function registerRoomJoinHandlers(deps: HandlerDeps) {
 	}
 
 	return (socket: Socket) => {
+		socket.on('recording:join', async (data, callback) => {
+			let roomJoinAttempted = false;
+			let fieldsAssigned = false;
+			let recorderJoinAttempted = false;
+			let peerCreationAttempted = false;
+			let roomId: string | undefined;
+			let peerId: string | undefined;
+			try {
+				deps.authManager.ensureRecorderAccess(socket);
+				if (data?.roomId !== socket.meetingId)
+					throw new Error('Room ID mismatch');
+				roomId = getRoomId(socket);
+				peerId = socket.userId;
+				await deps.mediasoup.createRoom(roomId, (roomIdInner, peerIds) => {
+					deps.registry.emitActiveSpeaker(
+						roomIdInner,
+						participantIdsForPeers(deps, roomIdInner, peerIds),
+					);
+				});
+				roomJoinAttempted = true;
+				await socket.join(roomId);
+				socket.roomId = roomId;
+				socket.participantId = peerId;
+				fieldsAssigned = true;
+				recorderJoinAttempted = true;
+				deps.registry.joinRecorder(socket, roomId, peerId);
+				peerCreationAttempted = true;
+				await deps.mediasoup.addPeer(roomId, peerId, {
+					name: 'Recorder',
+					userId: peerId,
+					audio_enabled: false,
+					video_enabled: false,
+				});
+				deps.roomLifecycle.scheduleCleanupIfHumanEmpty(roomId);
+				socket.emit('existing_raised_hands', {
+					hands: deps.registry.getRaisedHands(roomId),
+				});
+				callback({ success: true });
+			} catch (error) {
+				if (roomId && peerId) {
+					if (peerCreationAttempted) {
+						try {
+							await deps.mediasoup.removePeer(roomId, peerId);
+						} catch (cleanupError) {
+							loggers.socketHandler.warn(
+								'Recorder peer rollback failed for %s: %s',
+								peerId,
+								(cleanupError as Error).message,
+							);
+						}
+					}
+					if (recorderJoinAttempted) {
+						try {
+							deps.registry.leaveRecorderRoom(socket, roomId, peerId);
+						} catch (cleanupError) {
+							loggers.socketHandler.warn(
+								'Recorder registry rollback failed for %s: %s',
+								peerId,
+								(cleanupError as Error).message,
+							);
+						}
+					}
+					if (roomJoinAttempted) {
+						try {
+							socket.leave(roomId);
+						} catch (cleanupError) {
+							loggers.socketHandler.warn(
+								'Recorder room rollback failed for %s: %s',
+								peerId,
+								(cleanupError as Error).message,
+							);
+						}
+					}
+				}
+				if (fieldsAssigned) {
+					socket.roomId = undefined;
+					socket.participantId = undefined;
+				}
+				callback({ success: false, error: (error as Error).message });
+			}
+		});
+
 		socket.on('join_room', async (data, callback) => {
 			try {
+				if (socket.scope === 'recording')
+					throw new Error('Recorder must use recording:join');
 				if (!socket.userId || !socket.meetingId) {
 					callback({ success: false, error: 'Authentication required' });
 					return;
@@ -171,13 +317,15 @@ export function registerRoomJoinHandlers(deps: HandlerDeps) {
 				await handleJoinRoom(socket, {
 					roomId,
 					participantId: socket.userId,
+					connectionId: data.connectionId ?? socket.id,
+					conflictId: data.conflictId,
 					userData: {
 						name: userData.name,
-						userId: userData.userId,
+						userId: socket.userId,
 						avatar: userData.avatar,
 						audio_enabled: mediaState.audio_enabled,
 						video_enabled: mediaState.video_enabled,
-						is_guest: userData.is_guest,
+						is_guest: Boolean(socket.isGuest),
 					},
 					e2ee,
 				});
@@ -186,7 +334,7 @@ export function registerRoomJoinHandlers(deps: HandlerDeps) {
 					socket,
 					deps,
 					getRoomId(socket),
-					socket.userId,
+					socket.peerId ?? socket.userId,
 				).catch((error: unknown) => {
 					deps.telemetry.recordE2EEEvent('join-status', 'failure');
 					loggers.socketHandler.error(
@@ -206,6 +354,15 @@ export function registerRoomJoinHandlers(deps: HandlerDeps) {
 					});
 				});
 			} catch (error) {
+				if (error instanceof ParticipantConnectionConflictError) {
+					callback({
+						success: false,
+						error: 'Another device is already connected',
+						code: 'PARTICIPANT_CONNECTION_CONFLICT',
+						details: { conflictId: error.conflictId },
+					});
+					return;
+				}
 				loggers.socketHandler.error(
 					'Error joining room: %s',
 					(error as Error).message,
@@ -220,49 +377,29 @@ export function registerRoomJoinHandlers(deps: HandlerDeps) {
 			const participantId = socket.participantId;
 			if (roomId && participantId) {
 				try {
-					const shouldCleanupPeer = deps.registry.releaseParticipant(
-						socket,
-						roomId,
-						participantId,
-					);
-					if (shouldCleanupPeer) {
-						if (socket.senderId !== undefined) {
-							await deps.e2eeRoster.remove(roomId, socket.senderId);
-							deps.e2eeEpochRelay.removePendingJoiner(roomId, socket.senderId);
-						}
-						deps.registry.removeSender(roomId, participantId);
-						await deps.mediasoup.removePeer(roomId, participantId);
-
-						if (isRealParticipant(participantId)) {
-							socket
-								.to(roomId)
-								.emit('participant_left', { roomId, participantId });
-						}
-
-						if (deps.registry.hasRaisedHand(roomId, participantId)) {
-							deps.registry.clearRaisedHand(roomId, participantId);
-							deps.registry.emitToFullAccessParticipants(
-								roomId,
-								'hand_raised',
-								{
-									participantId,
-									raised: false,
-									timestamp: new Date().toISOString(),
-								},
-							);
+					if (socket.scope === 'full') {
+						await deps.participantConnections.leave(
+							socket,
+							roomId,
+							participantId,
+						);
+						return;
+					}
+					if (socket.scope === 'recording') {
+						const ownsPeer = deps.registry.leaveRecorder(
+							socket,
+							roomId,
+							participantId,
+						);
+						if (ownsPeer) {
+							await deps.mediasoup.removePeer(roomId, participantId);
 						}
 					}
-
 					socket.leave(roomId);
 					deps.registry.leaveScope(socket, roomId, 'full');
 					deps.registry.leaveScope(socket, roomId, 'presence-preview');
 					socket.roomId = undefined;
-					if (deps.registry.isEmpty(roomId)) {
-						deps.registry.cleanupRoom(roomId);
-						deps.e2eeEpochRelay.clearRoom(roomId);
-						await deps.e2eeRoster.clearRoom(roomId);
-						deps.mediasoup.closeRoom(roomId);
-					}
+					socket.peerId = undefined;
 					loggers.socketHandler.info('%s left room %s', participantId, roomId);
 				} catch (e) {
 					loggers.socketHandler.warn(
@@ -273,6 +410,40 @@ export function registerRoomJoinHandlers(deps: HandlerDeps) {
 			}
 		});
 	};
+}
+
+class ParticipantConnectionConflictError extends Error {
+	constructor(readonly conflictId: string) {
+		super('Another device is already connected');
+	}
+}
+
+function assertParticipantOwnership(
+	deps: HandlerDeps,
+	socket: Socket,
+	roomId: string,
+	participantId: string,
+): void {
+	if (!deps.registry.isParticipantOwner(socket, roomId, participantId)) {
+		throw new Error('Participant connection was replaced');
+	}
+}
+
+function participantIdsForPeers(
+	deps: HandlerDeps,
+	roomId: string,
+	peerIds: string[],
+): string[] {
+	const peers = deps.mediasoup.getRoomPeers?.(roomId);
+	return Array.from(
+		new Set(
+			peerIds
+				.map((peerId) => peers?.get(peerId)?.info.userId)
+				.filter((participantId): participantId is string =>
+					Boolean(participantId),
+				),
+		),
+	);
 }
 
 function enforceE2EEJoinPolicy(

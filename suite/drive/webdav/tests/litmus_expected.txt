@@ -1,0 +1,3 @@
+# Tolerated litmus non-passes, one per line: <group>:<test>:<FAIL|WARNING> reason [issue]
+# CI fails on any FAIL not listed here, and on lines that now pass (delete them).
+basic:delete_fragment:WARNING werkzeug strips URI fragments before the app sees them, so a fragment-bearing DELETE cannot be told apart from a normal one

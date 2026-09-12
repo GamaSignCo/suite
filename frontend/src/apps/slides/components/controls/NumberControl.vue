@@ -52,6 +52,8 @@ const props = defineProps({
 		default: 1,
 	},
 	disabled: Boolean,
+	// a measured value rather than a stored one, dimmed so it reads as such
+	derived: Boolean,
 })
 
 const live = ref(null)
@@ -107,6 +109,12 @@ function onArrowStep(event) {
 		inputRef.value?.blur()
 		return
 	}
+	if (event.key === 'Escape') {
+		event.stopPropagation()
+		live.value = null
+		inputRef.value?.blur()
+		return
+	}
 	if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
 	event.preventDefault()
 	const typed = live.value !== null ? parseFloat(live.value) : Number(model.value)
@@ -149,7 +157,10 @@ const plainTextInput = [
 	'[&::-webkit-outer-spin-button]:appearance-none',
 ]
 
-const textColor = computed(() => (props.disabled ? 'text-ink-gray-4' : 'text-ink-gray-9'))
+const textColor = computed(() => {
+	if (props.disabled) return 'text-ink-gray-4'
+	return props.derived ? 'text-ink-gray-5' : 'text-ink-gray-7'
+})
 
 const rowClasses = computed(() => [
 	'flex h-7 w-full items-center justify-between',
@@ -157,7 +168,7 @@ const rowClasses = computed(() => [
 ])
 
 const fieldClasses = computed(() => [
-	'inline-flex items-center gap-0.5 rounded-sm p-1',
+	'inline-flex items-center gap-0.5 rounded-3 p-1',
 	'focus-within:ring-1 focus-within:ring-outline-gray-3',
 	props.disabled ? 'cursor-not-allowed' : 'cursor-text',
 ])
@@ -173,9 +184,11 @@ const inputWidth = computed(() => {
 	}
 	const text = String(current.value ?? '')
 	const whole = text.split('.')[0]
-	const wholeDigits = whole.length || 1
+	// the sign is not a digit, so maxDigits must not spend a slot on it
+	const sign = whole.startsWith('-') ? 1 : 0
+	const wholeDigits = whole.length - sign || 1
 	const capped = props.maxDigits ? Math.min(wholeDigits, props.maxDigits) : wholeDigits
 	const fractionDigits = text.length - whole.length
-	return `${capped + fractionDigits}ch`
+	return `${capped + sign + fractionDigits}ch`
 })
 </script>

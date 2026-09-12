@@ -8,6 +8,7 @@ import { addUpload, updateUpload } from '@/apps/drive/data/uploads'
 import { currentFolder } from '@/apps/drive/data/currentFolder'
 import Dropzone from 'dropzone'
 import { storageBar } from '@/apps/drive/resources/files'
+import { useEmitter } from '@/apps/drive/utils/useEmitter'
 
 const route = useRoute()
 defineEmits(['success'])
@@ -229,13 +230,13 @@ onMounted(() => {
     })
   })
 })
-emitter.on('uploadFile', () => {
+useEmitter('uploadFile', () => {
   if (dropzone.value.hiddenFileInput) {
     dropzone.value.hiddenFileInput.removeAttribute('webkitdirectory')
     dropzone.value.hiddenFileInput.click()
   }
 })
-emitter.on('cancelUpload', (uuid) => {
+useEmitter('cancelUpload', (uuid) => {
   const files = dropzone.value.files
   for (let i = 0; i < files.length; i++) {
     if (files[i].upload.uuid === uuid) {
@@ -243,7 +244,7 @@ emitter.on('cancelUpload', (uuid) => {
     }
   }
 })
-emitter.on('retryUpload', (uuid) => {
+useEmitter('retryUpload', (uuid) => {
   const file = dropzone.value.files.find((f) => f.upload.uuid === uuid)
   if (file) {
     file.status = Dropzone.ADDED
@@ -257,10 +258,10 @@ emitter.on('retryUpload', (uuid) => {
     })
   }
 })
-emitter.on('cancelAllUploads', () => {
+useEmitter('cancelAllUploads', () => {
   dropzone.value.removeAllFiles(true)
 })
-emitter.on('uploadFolder', () => {
+useEmitter('uploadFolder', () => {
   if (dropzone.value.hiddenFileInput) {
     dropzone.value.hiddenFileInput.setAttribute('webkitdirectory', true)
     dropzone.value.hiddenFileInput.click()

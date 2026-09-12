@@ -2,7 +2,7 @@
 	<AppSettingsHeader :title="__('Automation')">
 		<template #actions>
 			<Button
-				icon-left="refresh-cw"
+				icon-left="lucide-refresh-cw"
 				:label="__('Rebuild Automation')"
 				:loading="rebuildAutomation.loading"
 				:tooltip="
@@ -10,7 +10,7 @@
 				"
 				@click="rebuildAutomation.submit()"
 			/>
-			<Button icon-left="plus" :label="__('New')" @click="addScript" />
+			<Button icon-left="lucide-plus" :label="__('New')" @click="addScript" />
 		</template>
 	</AppSettingsHeader>
 	<AppSettingsBody>
@@ -18,7 +18,7 @@
 		<div
 			v-for="script in filteredScripts"
 			:key="script.name"
-			class="hover:bg-surface-gray-1 -mx-2 flex cursor-pointer items-center justify-between rounded px-3 py-1"
+			class="hover:bg-surface-gray-1 -mx-2 flex cursor-pointer items-center justify-between rounded-4 px-3 py-1"
 			@click="editScript(script)"
 		>
 			<div class="flex items-center gap-2">
@@ -132,12 +132,12 @@ const scriptOptions = (script: SieveScript) => [
 	},
 	{
 		label: __('Edit'),
-		icon: 'edit-2',
+		icon: 'lucide-edit-2',
 		onClick: () => editScript(script),
 	},
 	{
 		label: __('Delete'),
-		icon: 'trash-2',
+		icon: 'lucide-trash-2',
 		theme: 'red',
 		onClick: () => {
 			selectedScript.value = script

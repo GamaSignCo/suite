@@ -1,0 +1,17 @@
+services:
+  stalwart:
+    image: stalwartlabs/stalwart:${STALWART_VERSION:-v0.16.17}
+    container_name: stalwart-test
+    ports:
+      - "${STALWART_HTTP_PORT:-8080}:8080"
+      # The JMAP session advertises URLs at https://mail.example.test (the bootstrap
+      # serverHostname), so the TLS listener must be reachable on 443 as well.
+      - "${STALWART_HTTPS_PORT:-443}:443"
+    environment:
+      STALWART_HOSTNAME: mail.example.test
+      STALWART_RECOVERY_ADMIN: ${STALWART_ADMIN_USER:-admin}:${STALWART_ADMIN_PASSWORD:-admin}
+    volumes:
+      - stalwart-data:/etc/stalwart
+
+volumes:
+  stalwart-data:

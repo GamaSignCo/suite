@@ -14,6 +14,7 @@ dependencies = [
     "pymupdf>=1.24.0",
     "boto3~=1.43.29",
     "pycrdt==0.12.26",
+    "lxml~=6.1",  # drive: WebDAV XML (previously only a transitive dep via frappe)
     # kept for other suite modules (drive dropped these): PyJWT→meet, Markdown→writer, beautifulsoup4→mail/client
     "PyJWT>=2.8.0",
     "Markdown==3.8.2",
@@ -24,12 +25,8 @@ dependencies = [
     "msgpack~=1.2.1",
     "isodate~=0.7.2",
     "tantivy~=0.26.0",
-    "paramiko~=5.0.0",
     "icalendar~=6.1.0",
-    "dnspython~=2.6.1",
     "pydenticon~=0.3.1",
-    "dns-lexicon~=3.20.1",
-    "ansible-runner~=2.4.1",
     # sheets — AI Assist (Claude)
     "anthropic>=0.40",
 ]
@@ -37,7 +34,6 @@ dependencies = [
 [deploy.dependencies.apt]
 packages = [
     "ffmpeg",   # drive: video thumbnails/transcode
-    "ansible",  # mail: stalwart provisioning (ansible-runner)
 ]
 
 [build-system]

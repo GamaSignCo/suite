@@ -28,6 +28,37 @@
 					</div>
 				</div>
 
+				<div
+					v-if="pinnedMessage"
+					class="group mx-3 mb-2 flex shrink-0 items-center gap-2 rounded-[18px] bg-surface-gray-2 px-3 py-2.5"
+					role="button"
+					tabindex="0"
+					data-testid="pinned-message-banner"
+					@click="scrollToMessage(pinnedMessage.messageId)"
+					@keydown.enter.prevent="scrollToMessage(pinnedMessage.messageId)"
+					@keydown.space.prevent="scrollToMessage(pinnedMessage.messageId)"
+				>
+					<span class="lucide-pin size-3.5 shrink-0 text-ink-gray-5" aria-hidden="true" />
+					<div class="min-w-0 flex-1">
+						<div class="truncate text-[11px] tracking-[0.11px] text-ink-gray-5">
+							{{ pinnedMessage.user_name }}
+						</div>
+						<div class="mt-0.5 truncate text-sm tracking-[0.21px] text-ink-gray-8">
+							{{ pinnedMessage.message }}
+						</div>
+					</div>
+					<Button
+						v-if="canPin"
+						variant="ghost"
+						size="xs"
+						icon="lucide-pin-off"
+						class="!bg-surface-gray-1 !text-ink-gray-5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 hover:!bg-surface-gray-3 hover:!text-ink-gray-8"
+						label="Unpin"
+						tooltip="Unpin message"
+						@click.stop="emit('unpin')"
+					/>
+				</div>
+
 				<div ref="listEl" class="flex-1 overflow-y-auto px-3 py-7">
 					<div class="flex flex-col gap-5">
 						<template v-for="item in chatItems" :key="item.key">
@@ -39,6 +70,7 @@
 								<MeetAvatar
 									v-if="item.poll.createdBy !== userId"
 									size="lg"
+									:image="avatarByUser[item.poll.createdBy]"
 									:label="item.poll.createdByName || item.poll.createdBy"
 									class="mt-6 shrink-0"
 								/>
@@ -65,6 +97,7 @@
 							<MeetAvatar
 								v-if="!item.group.isOwn"
 								size="lg"
+								:image="avatarByUser[item.group.user_id]"
 								:label="item.group.user_name"
 								class="mt-6 shrink-0"
 							/>
@@ -83,9 +116,24 @@
 									<div
 										v-for="message in item.group.messages"
 										:key="message.id"
-										class="max-w-full whitespace-pre-wrap rounded-[18px] px-3 py-2.5 text-left text-p-sm tracking-[0.28px] text-ink-gray-8 [overflow-wrap:anywhere]"
+										class="group relative max-w-full whitespace-pre-wrap rounded-[18px] px-3 py-2.5 text-left text-p-sm tracking-[0.28px] text-ink-gray-8 [overflow-wrap:anywhere]"
+										:data-message-id="message.messageId"
 										:class="item.group.isOwn ? 'bg-surface-gray-3' : 'bg-surface-gray-2'"
 									>
+										<Button
+											v-if="canPin"
+											type="button"
+											variant="ghost"
+											size="xs"
+											:icon="isPinned(message) ? 'lucide-pin-off' : 'lucide-pin'"
+											:class="[
+												'absolute -top-2.5 -right-2.5 !rounded-full border border-outline-gray-2 !bg-surface-gray-1 !p-0 !text-ink-gray-5 shadow-sm hover:!bg-surface-gray-2 hover:!text-ink-gray-8',
+												isPinned(message) ? '!opacity-100' : 'opacity-0 group-hover:opacity-100',
+											]"
+											:label="isPinned(message) ? 'Unpin message' : 'Pin message'"
+											:tooltip="isPinned(message) ? 'Unpin message' : 'Pin message'"
+											@click="togglePin(message)"
+										/>
 										<template
 											v-for="(token, i) in tokenizeChatMessage(message.message)"
 											:key="i"
@@ -95,7 +143,7 @@
 												:href="token.url"
 												target="_blank"
 												rel="noopener noreferrer"
-												class="text-ink-blue-5 underline"
+												class="break-all text-ink-blue-5 underline"
 											>{{ token.text }}</a>
 											<span v-else>{{ token.text }}</span>
 										</template>
@@ -114,12 +162,12 @@
 				<form class="relative shrink-0 p-3" @submit.prevent="handleSend">
 					<template v-if="canSendMessages">
 						<div
-							class="chat-composer relative flex cursor-text items-center gap-2 rounded-lg border border-outline-gray-2 bg-surface-gray-1 px-2.5 py-1.5 shadow-sm transition-[border-color,box-shadow] focus-within:border-outline-gray-3 focus-within:shadow-[0_0_0_1px_var(--outline-gray-3)]"
+							class="chat-composer relative flex cursor-text items-center gap-2 rounded-5 border border-outline-gray-2 bg-surface-base py-1.5 pe-2 transition-colors hover:border-outline-gray-3 hover:shadow-sm focus-within:border-outline-gray-4 focus-within:shadow-sm"
 							@click="focusInput"
 						>
 							<div
 								v-if="emojiMenuActive"
-								class="absolute bottom-full left-0 z-50 mb-1 max-h-[220px] min-w-[12rem] overflow-y-auto rounded-lg border border-outline-gray-2 bg-surface-modal p-1 shadow-lg"
+								class="absolute bottom-full left-0 z-50 mb-1 max-h-[220px] min-w-[12rem] overflow-y-auto rounded-6 border border-outline-gray-2 bg-surface-elevation-2 p-1 shadow-lg"
 								role="listbox"
 								aria-label="Emoji suggestions"
 								data-testid="chat-emoji-suggestions"
@@ -129,7 +177,7 @@
 									:key="item.name"
 									type="button"
 									role="option"
-									class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm"
+									class="flex w-full items-center gap-2 rounded-4 px-2 py-1.5 text-left text-sm"
 									:class="
 										index === emojiSelectedIndex
 											? 'bg-surface-gray-3'
@@ -154,7 +202,7 @@
 								v-model="draft"
 								rows="1"
 								placeholder="Type a message"
-								class="chat-composer-input min-w-0 flex-1 resize-none border-0 bg-transparent py-0 text-sm leading-5 text-ink-gray-8 tracking-[0.28px] shadow-none outline-none ring-0 placeholder:text-ink-gray-5 focus:border-0 focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0"
+								class="chat-composer-input min-h-7 min-w-0 flex-1 resize-none border-0 bg-transparent py-1.5 text-base text-ink-gray-8 shadow-none outline-none ring-0 placeholder-ink-gray-4 focus:border-0 focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0"
 								@input="onInput"
 								@keydown="onKeydown"
 							/>
@@ -162,7 +210,7 @@
 								type="submit"
 								variant="subtle"
 								theme="gray"
-								class="!h-7 !w-7 shrink-0 !rounded-md p-0"
+								size="sm"
 								label="Send message"
 							>
 								<template #icon>
@@ -171,7 +219,7 @@
 							</Button>
 						</div>
 					</template>
-					<div v-else class="m-2 rounded-lg border border-outline-gray-2 bg-surface-gray-2 py-3 text-center text-sm text-ink-gray-5">
+					<div v-else class="m-2 rounded-6 border border-outline-gray-2 bg-surface-gray-2 py-3 text-center text-sm text-ink-gray-5">
 						The host has restricted chat to hosts and co-hosts only.
 					</div>
 				</form>
@@ -205,6 +253,7 @@ import {
 	type EmojiSuggestion,
 } from "../utils/emojiSuggest";
 import { usePollStore } from "../composables/usePollStore";
+import { pollKey } from "../composables/usePoll";
 import type { PollPayloadFE } from "../types";
 import CreatePollModal from "./CreatePollModal.vue";
 import MeetAvatar from "./MeetAvatar.vue";
@@ -213,6 +262,7 @@ import LucideChartColumn from "~icons/lucide/chart-column";
 
 interface ChatMessage {
 	id: string | number;
+	messageId?: string;
 	user_id: string;
 	user_name: string;
 	message: string;
@@ -223,15 +273,19 @@ const props = defineProps<{
 	open?: boolean;
 	userId?: string;
 	userName?: string;
+	avatarByUser?: Record<string, string | null | undefined>;
 	messages?: ChatMessage[];
 	isHost?: boolean;
 	isCohost?: boolean;
 	isGuest?: boolean;
 	hostOnlyChat?: boolean;
+	pinnedMessage?: ChatMessage | null;
 }>();
 
+const avatarByUser = computed(() => props.avatarByUser || {});
+
 const pollStore = usePollStore();
-const pollService = inject("poll") as any;
+const pollService = inject(pollKey);
 const showPollModal = ref(false);
 
 const activePolls = computed(() => pollStore.activePolls);
@@ -260,6 +314,8 @@ const handlePollSubmit = async (payload: {
 const emit = defineEmits<{
 	close: [];
 	send: [text: string];
+	pin: [messageId: string];
+	unpin: [];
 }>();
 const listEl = ref<HTMLElement | null>(null);
 const inputEl = ref<HTMLTextAreaElement | null>(null);
@@ -276,6 +332,28 @@ const canSendMessages = computed(() => {
 	return props.isHost || props.isCohost;
 });
 
+const canPin = computed(() => props.isHost || props.isCohost);
+
+function isPinned(message: ChatMessage): boolean {
+	return Boolean(
+		props.pinnedMessage && props.pinnedMessage.messageId === message.messageId,
+	);
+}
+
+function togglePin(message: ChatMessage) {
+	if (!message.messageId) return;
+	if (isPinned(message)) emit("unpin");
+	else emit("pin", message.messageId);
+}
+
+function scrollToMessage(messageId?: string) {
+	if (!messageId) return;
+	const messageEl = listEl.value?.querySelector<HTMLElement>(
+		`[data-message-id="${messageId}"]`,
+	);
+	messageEl?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
 onMounted(async () => {
 	await scrollToBottom();
 });
@@ -284,7 +362,7 @@ const chatItems = computed(() =>
 	buildChatTimeline(props.messages || [], activePolls.value, props.userId),
 );
 
-function time(ts) {
+function time(ts: string) {
 	try {
 		return new Date(ts).toLocaleTimeString([], {
 			hour: "2-digit",
@@ -409,7 +487,7 @@ function autosize() {
 	const el = inputEl.value;
 	if (!el) return;
 	el.style.height = "auto";
-	el.style.height = `${Math.min(el.scrollHeight, 44)}px`;
+	el.style.height = `${Math.min(el.scrollHeight, 88)}px`;
 }
 
 async function scrollToBottom() {
@@ -424,9 +502,7 @@ watch([chatItems], scrollToBottom, { deep: true });
 
 <style scoped>
 .chat-composer-input {
-	min-height: 1.375rem;
-	max-height: 44px;
-	padding: 0;
+	max-height: 88px;
 	margin: 0;
 	overflow-y: auto;
 	caret-color: var(--ink-gray-8);

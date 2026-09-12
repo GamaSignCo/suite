@@ -1,17 +1,27 @@
-import { frappeRequest, toast } from "frappe-ui";
+import { toast } from "frappe-ui";
 import type { Ref } from "vue";
 import type { Router } from "vue-router";
-import type { TransportManager } from "../utils/media/TransportManager";
-import type { SFUClient } from "../utils/SFUClient";
+import type { SFUMeetingManager } from "../utils/SFUMeetingManager";
 import type { ChatStore } from "./useChatStore";
-import type { ConnectionState } from "./useConnectionState";
+import {
+	clearGuestSessionForExit,
+	readGuestSession,
+	type ConnectionState,
+} from "./useConnectionState";
 import type { CurrentUser } from "./useCurrentUser";
 import type { GridLayout } from "./useGridLayout";
 import type { LobbyStore } from "./useLobbyStore";
 import type { MediaState } from "./useMediaState";
 import type { ParticipantStore } from "./useParticipantStore";
+import type { RecoveryTimelineEntry } from "./useParticipantConnectionState";
 import type { RaiseHandStore } from "./useRaiseHandStore";
 import type { ReactionStore } from "./useReactionStore";
+import {
+	isUnknownRecord,
+	type JoinPayload,
+	normalizeJoinPayload,
+} from "../types";
+import { submit, type Call } from "../utils/request";
 
 interface LobbyActions {
 	approveUser: (userId: string) => Promise<void>;
@@ -28,49 +38,20 @@ interface MediaControlsActions {
 	) => Promise<void>;
 }
 
-interface ProducerLike {
-	id: string;
-	track: MediaStreamTrack | null;
-	replaceTrack?: (opts: { track: MediaStreamTrack }) => Promise<void>;
-	pause?: () => void;
-	resume?: () => void;
-	close?: () => void;
+interface MeetingDocLike {
+	banGuest: Call<unknown, { guest_id: string }>;
+	promoteToCohost: Call<unknown, { user_id: string }>;
+	reload: () => Promise<unknown>;
 }
-
-interface MediaHandlerLike {
-	audioProducer: ProducerLike | null;
-	videoProducer: ProducerLike | null;
-	screenProducer: ProducerLike | null;
-	setProducers: (producers: Record<string, unknown>) => void;
-	stopScreenShare: () => void;
-}
-
-interface VideoManagerLike {
-	audioElements: Map<string, HTMLAudioElement>;
-}
-
-interface SFUMeetingManagerLike {
-	sfuClient: SFUClient;
-	transportManager: TransportManager | null;
-	mediaHandler: MediaHandlerLike | null;
-	videoManager: VideoManagerLike | null;
-}
-
-export type MeetingDocLike = {
-	doc: { banned_users?: Array<{ user: string }> } | null | undefined;
-	setValue: { submit: (data: Record<string, unknown>) => Promise<unknown> };
-	reload: () => Promise<void>;
-	[key: string]: unknown;
-};
 
 interface SFUConnectionActions {
-	sfuManager: Ref<SFUMeetingManagerLike | null>;
-	sfuClient: SFUClient;
-	joinMeetingRoom: () => Promise<void>;
+	sfuManager: Ref<SFUMeetingManager | null>;
+	joinMeetingRoom: (options?: { switchHere?: boolean }) => Promise<void>;
 	handleGuestJoinResult: (
-		joinResult: Record<string, unknown>,
+		joinResult: JoinPayload,
 		guestName: string,
 	) => Promise<void>;
+	recoveryTimeline: Ref<RecoveryTimelineEntry[]>;
 }
 
 interface MeetingHandlersDeps {
@@ -95,14 +76,20 @@ interface MeetingHandlersDeps {
 }
 
 export function useMeetingHandlers(deps: MeetingHandlersDeps) {
-	const resetToPreview = () => {
-		deps.connectionState.connectionError = null;
-		deps.connectionState.isConnecting = false;
-		deps.connectionState.isInPreview = true;
+	const resetToPreview = async () => {
+		const manager = deps.sfuConnection.sfuManager.value;
+		deps.sfuConnection.sfuManager.value = null;
+		try {
+			await manager?.cleanup();
+		} finally {
+			deps.connectionState.connectionError = null;
+			deps.connectionState.guestAuthToken = null;
+			deps.connectionState.isInPreview = true;
+		}
 	};
 
-	const joinMeetingFromPreview = async () => {
-		await deps.sfuConnection.joinMeetingRoom();
+	const joinMeetingFromPreview = async (switchHere = false) => {
+		await deps.sfuConnection.joinMeetingRoom({ switchHere });
 	};
 
 	const handleGuestJoinComplete = async ({
@@ -110,12 +97,18 @@ export function useMeetingHandlers(deps: MeetingHandlersDeps) {
 		joinResult,
 	}: {
 		guestName: string;
-		joinResult: Record<string, unknown>;
+		joinResult: unknown;
 	}) => {
+		const normalizedJoinResult = normalizeJoinPayload(joinResult);
+		if (!normalizedJoinResult) {
+			deps.connectionState.connectionError = "Invalid guest join response";
+			return;
+		}
 		const guestId =
-			(joinResult?.guest_id as string) ||
+			normalizedJoinResult.guest_id ||
 			(deps.connectionState.guestId as string);
-		const resolvedGuestName = guestName || localStorage.getItem("guest_name");
+		const resolvedGuestName =
+			guestName || readGuestSession(deps.meetingId)?.guestName;
 
 		if (guestId && resolvedGuestName) {
 			deps.currentUser.setCurrentUser({
@@ -128,25 +121,27 @@ export function useMeetingHandlers(deps: MeetingHandlersDeps) {
 		}
 
 		await deps.sfuConnection.handleGuestJoinResult(
-			joinResult,
+			normalizedJoinResult,
 			resolvedGuestName || "",
 		);
 	};
 
 	const leaveWaitingRoom = () => {
+		clearGuestSessionForExit(deps.meetingId);
 		deps.lobbyStore.isWaitingForApproval = false;
 		deps.lobbyStore.isJoinRequestRejected = false;
 		deps.router.push({ name: "meet-home" });
 	};
 
 	const leaveLobby = async () => {
+		clearGuestSessionForExit(deps.meetingId);
 		deps.lobbyStore.isInLobby = false;
 		deps.lobbyStore.isWaitingForApproval = false;
-		deps.lobbyStore.lobbyParticipantCount = 0;
 		deps.router.push({ name: "meet-home" });
 	};
 
 	const goHome = () => {
+		clearGuestSessionForExit(deps.meetingId);
 		deps.lobbyStore.isJoinRequestRejected = false;
 		deps.lobbyStore.isInLobby = false;
 		deps.router.push({ name: "meet-home" });
@@ -176,56 +171,49 @@ export function useMeetingHandlers(deps: MeetingHandlersDeps) {
 
 	const handleMuteParticipant = async (participantId: string) => {
 		try {
-			if (deps.sfuConnection.sfuManager.value?.sfuClient) {
-				deps.sfuConnection.sfuManager.value.sfuClient.sendEvent(
-					"host_control",
-					{
-						action: "mute_participant",
-						targetParticipantId: participantId,
-					},
-				);
-			}
+			await deps.sfuConnection.sfuManager.value?.sendHostControl(
+				"mute_participant",
+				participantId,
+			);
 		} catch (error) {
 			console.error("Failed to mute participant:", error);
 		}
 	};
 
 	const handleKickParticipant = async (participantId: string, ban = false) => {
+		let backendBanRecorded = false;
 		try {
-			if (ban) {
-				await deps.meetingDoc.setValue.submit({
-					banned_users: [
-						...(deps.meetingDoc.doc?.banned_users || []),
-						{ user: participantId },
-					],
-				});
+			const shouldBan = ban && participantId.startsWith("guest_");
+			const manager = deps.sfuConnection.sfuManager.value;
+			if (!manager) {
+				toast.error("Cannot remove this participant while disconnected. Reconnect and try again.");
+				return;
+			}
+			if (shouldBan) {
+				await submit(deps.meetingDoc.banGuest, { guest_id: participantId });
+				backendBanRecorded = true;
 			}
 
-			if (deps.sfuConnection.sfuManager.value?.sfuClient) {
-				deps.sfuConnection.sfuManager.value.sfuClient.sendEvent(
-					"host_control",
-					{
-						action: "kick_participant",
-						targetParticipantId: participantId,
-					},
-				);
-			}
+			await manager.sendHostControl(
+				shouldBan ? "ban_participant" : "kick_participant",
+				participantId,
+			);
 		} catch (error) {
 			console.error("Failed to kick participant:", error);
+			toast.error(
+				backendBanRecorded
+					? "Guest was banned but could not be disconnected. Use Remove to retry the live removal."
+					: "Could not remove this participant. Please try again.",
+			);
 		}
 	};
 
 	const handleLowerHand = async (participantId: string) => {
 		try {
-			if (deps.sfuConnection.sfuManager.value?.sfuClient) {
-				deps.sfuConnection.sfuManager.value.sfuClient.sendEvent(
-					"host_control",
-					{
-						action: "lower_hand",
-						targetParticipantId: participantId,
-					},
-				);
-			}
+			await deps.sfuConnection.sfuManager.value?.sendHostControl(
+				"lower_hand",
+				participantId,
+			);
 		} catch (error) {
 			console.error("Failed to lower hand:", error);
 		}
@@ -233,15 +221,14 @@ export function useMeetingHandlers(deps: MeetingHandlersDeps) {
 
 	const handlePromoteToCohost = async (participantId: string) => {
 		try {
-			const response = await frappeRequest({
-				url: "suite.meet.api.meeting.promote_to_cohost",
-				params: {
-					meeting_id: deps.meetingId,
-					user_id: participantId,
-				},
+			const response = await submit(deps.meetingDoc.promoteToCohost, {
+				user_id: participantId,
 			});
 
-			if ((response as { meeting_id?: string })?.meeting_id) {
+			if (
+				isUnknownRecord(response) &&
+				typeof response.meeting_id === "string"
+			) {
 				toast.success("User promoted to co-host");
 				await deps.meetingDoc.reload();
 			}
@@ -300,21 +287,27 @@ export function useMeetingHandlers(deps: MeetingHandlersDeps) {
 			meetingId: deps.meetingId,
 			networkQuality: deps.connectionState.networkQuality,
 			localStream: deps.mediaState.localStream,
-			transportManager:
-				deps.sfuConnection.sfuManager.value?.transportManager || null,
-			sfuClient: deps.sfuConnection.sfuClient,
-			recoveryTimeline: deps.connectionState.recoveryTimeline,
+			diagnostics:
+				(await deps.sfuConnection.sfuManager.value?.getConnectionDiagnostics()) ??
+				null,
+			recoveryTimeline: deps.sfuConnection.recoveryTimeline.value,
 		});
 	};
 
-	const handleDeviceChanged = async (event: Record<string, unknown>) => {
-		if (typeof event.type !== "string" || typeof event.deviceId !== "string") {
+	const handleDeviceChanged = async (event: unknown) => {
+		if (
+			!isUnknownRecord(event) ||
+			(event.type !== "camera" &&
+				event.type !== "microphone" &&
+				event.type !== "speaker") ||
+			typeof event.deviceId !== "string"
+		) {
 			return;
 		}
 
 		try {
 			await deps.mediaControls.switchInputDevice(
-				event.type as "camera" | "microphone" | "speaker",
+				event.type,
 				event.deviceId,
 			);
 		} catch (error) {

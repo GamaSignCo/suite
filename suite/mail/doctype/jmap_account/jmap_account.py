@@ -296,6 +296,12 @@ def sync_jmap_accounts(user: str, accounts: dict[str, dict]) -> None:
     if not identifier:
         return
 
+    # The skip flags only pause hook-triggered builds during the bulk sync below and must not
+    # leak: flags survive the request in long-lived processes (workers, tests), where a leaked
+    # flag would silently no-op every later automation sieve rebuild.
+    previous_sieve_flag = frappe.flags.get("skip_automation_sieve_build")
+    previous_archive_flag = frappe.flags.get("skip_archive_mailbox_creation")
+
     try:
         frappe.flags.skip_automation_sieve_build = True
         frappe.flags.skip_archive_mailbox_creation = True
@@ -313,6 +319,8 @@ def sync_jmap_accounts(user: str, accounts: dict[str, dict]) -> None:
                 rename_default_mailboxes(account)
                 build_automation_sieve(account, activate=True)
     finally:
+        frappe.flags.skip_automation_sieve_build = previous_sieve_flag
+        frappe.flags.skip_archive_mailbox_creation = previous_archive_flag
         release_lock(lockname, identifier)
 
 

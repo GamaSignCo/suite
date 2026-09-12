@@ -43,12 +43,12 @@
   <ErrorPage v-if="file.error" :error="file.error" />
   <div v-else-if="!document?.doc" class="flex-1 overflow-y-auto flex justify-center">
     <div class="w-full md:min-w-[48rem] md:max-w-[48rem] px-5 pt-10 space-y-3">
-      <Skeleton class="h-7 w-2/5 rounded" />
+      <Skeleton class="h-7 w-2/5 rounded-4" />
       <div class="h-3" />
       <Skeleton v-for="(w, i) in ['92%', '78%', '85%', '65%', '88%', '40%', '80%', '70%', '60%', '84%']" :key="i"
-        class="h-3.5 rounded" :style="{ width: w }" />
+        class="h-3.5 rounded-4" :style="{ width: w }" />
       <div class="h-4" />
-      <Skeleton v-for="(w, i) in ['88%', '72%', '90%', '55%', '76%']" :key="'p' + i" class="h-3.5 rounded"
+      <Skeleton v-for="(w, i) in ['88%', '72%', '90%', '55%', '76%']" :key="'p' + i" class="h-3.5 rounded-4"
         :style="{ width: w }" />
     </div>
   </div>
@@ -81,6 +81,7 @@ import { useSessionStore } from '@/boot/session'
 const currentUserId = computed(() => useSessionStore().user)
 const isLoggedIn = computed(() => useSessionStore().isLoggedIn)
 import { Button, Skeleton, useDoc, usePageMeta } from 'frappe-ui'
+import { appPageMeta } from '@/utils/documentTitle'
 
 import VersionsSidebar from '@/apps/writer/components/VersionsSidebar.vue'
 import WriterSettings from '@/apps/writer/components/WriterSettings.vue'
@@ -142,9 +143,7 @@ const editable = computed(() => {
 watch(showVersions, (v) => {
   if (!v) versionPreview.value = null
 })
-usePageMeta(() => ({
-  title: file.doc ? file.doc.file_name : 'Loading...',
-}))
+usePageMeta(() => appPageMeta(file.doc ? file.doc.file_name : 'Loading...', 'Writer'))
 
 // fix: bad pattern
 const globalSettings = !isLoggedIn.value

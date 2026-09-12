@@ -1,16 +1,16 @@
 <template>
   <div class="flex min-w-0 items-center" data-testid="breadcrumbs">
     <div v-if="loading" class="flex items-center gap-1.5" data-testid="breadcrumbs-loading">
-      <Skeleton class="h-4 w-16 rounded-sm" />
-      <span class="text-lg-medium text-ink-gray-4" aria-hidden="true">/</span>
-      <Skeleton class="h-4 w-32 rounded-sm" />
+      <Skeleton class="h-4 w-16 rounded-1" />
+      <span class="text-md-medium text-ink-gray-4" aria-hidden="true">/</span>
+      <Skeleton class="h-4 w-32 rounded-1" />
     </div>
     <template v-else-if="isEditing">
       <template v-if="parentItems.length">
-        <Breadcrumbs :items="parentItems" />
+        <Breadcrumbs class="parent-breadcrumbs" :items="parentItems" />
         <span class="mx-0.5 text-base text-ink-gray-4" aria-hidden="true">/</span>
       </template>
-      <InlineRenameInput :entity="entity" class="text-lg-medium" />
+      <InlineRenameInput :entity="entity" appearance="breadcrumb" />
     </template>
     <Breadcrumbs v-else :items="displayItems" />
   </div>
@@ -50,3 +50,9 @@ const displayItems = computed(() => {
   return items
 })
 </script>
+
+<style scoped>
+.parent-breadcrumbs :deep(a) {
+  color: var(--ink-gray-5);
+}
+</style>

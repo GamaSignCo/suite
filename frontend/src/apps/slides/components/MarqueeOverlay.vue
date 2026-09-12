@@ -109,7 +109,25 @@ const isRotatedElementWithinMarquee = (element, marqueeBounds) => {
 	return rectsOverlap(elementCorners, marqueeCorners, axes)
 }
 
+// an elbow's box is mostly empty space too, so test its segments instead
+const isElbowWithinMarquee = (element, marqueeBounds) => {
+	const points = element.points.map((point) => ({
+		x: element.left + point.x,
+		y: element.top + point.y,
+	}))
+	return points.slice(1).some((point, i) => {
+		const previous = points[i]
+		return isWithinOverlappingBounds(marqueeBounds, {
+			left: Math.min(previous.x, point.x),
+			right: Math.max(previous.x, point.x),
+			top: Math.min(previous.y, point.y),
+			bottom: Math.max(previous.y, point.y),
+		})
+	})
+}
+
 const isElementWithinMarquee = (element, marqueeBounds) => {
+	if (element.points) return isElbowWithinMarquee(element, marqueeBounds)
 	if (element.rotation) return isRotatedElementWithinMarquee(element, marqueeBounds)
 	return isWithinOverlappingBounds(marqueeBounds, getElementPosition(element.id))
 }
@@ -123,6 +141,7 @@ const getElementsWithinMarquee = (rect) => {
 	}
 
 	return currentSlide.value.elements
+		.filter((element) => !element.locked)
 		.filter((element) => isElementWithinMarquee(element, marqueeBounds))
 		.map((element) => element.id)
 }
@@ -171,7 +190,10 @@ const watchForSelectionIntent = (downEvent) => {
 
 const handleMouseDown = (e) => {
 	if (pendingShapeType.value) return
-	if (![slideDiv.value, slideContainerDiv.value].includes(e.target)) return
+	const onBlankSurface =
+		[slideDiv.value, slideContainerDiv.value].includes(e.target) ||
+		e.target?.matches?.('[data-slide-surface]')
+	if (!onBlankSurface) return
 
 	watchForSelectionIntent(e)
 }

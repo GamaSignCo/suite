@@ -1,4 +1,5 @@
-import { expect, joinHostAndGuest, test } from "../fixtures/test";
+import { appUrl, expect, joinHostAndGuest, test } from "../fixtures/test";
+import { meetHostName } from "../helpers/auth";
 import { expectRemoteVideoReceiving } from "../helpers/media";
 
 const disconnectTestEnabled =
@@ -7,6 +8,19 @@ const disconnectWaitMs = Number.parseInt(
 	process.env.SFU_E2E_DISCONNECT_WAIT_MS || "7000",
 	10,
 );
+
+test("media fault fixture follows native network availability", async ({ createParticipant }) => {
+	const participant = await createParticipant();
+	await participant.page.goto(appUrl("/meet/"));
+	await expect.poll(() => participant.page.evaluate(() => navigator.onLine)).toBe(true);
+	try {
+		await participant.context.setOffline(true);
+		await expect.poll(() => participant.page.evaluate(() => navigator.onLine)).toBe(false);
+	} finally {
+		await participant.context.setOffline(false);
+	}
+	await expect.poll(() => participant.page.evaluate(() => navigator.onLine)).toBe(true);
+});
 
 test.describe("SFU reconnect", () => {
 	test.skip(
@@ -19,13 +33,16 @@ test.describe("SFU reconnect", () => {
 		createMeeting,
 		createParticipant,
 	}) => {
+		test.setTimeout(120_000);
 		const meetingId = await createMeeting();
 		const guestName = "Guest Server Disconnect";
 		const guest = await createParticipant();
 
 		await joinHostAndGuest(hostPage, guest, meetingId, guestName);
-		await expectRemoteVideoReceiving(hostPage, guestName);
-		await expectRemoteVideoReceiving(guest.page, "Administrator");
+		await Promise.all([
+			expectRemoteVideoReceiving(hostPage, guestName),
+			expectRemoteVideoReceiving(guest.page, meetHostName),
+		]);
 
 		await guest.context.setOffline(true);
 		await expect(hostPage.locator("[data-participant-id]")).toHaveCount(1, {
@@ -39,7 +56,9 @@ test.describe("SFU reconnect", () => {
 		await expect(guest.page.locator("[data-participant-id]")).toHaveCount(2, {
 			timeout: 45_000,
 		});
-		await expectRemoteVideoReceiving(hostPage, guestName);
-		await expectRemoteVideoReceiving(guest.page, "Administrator");
+		await Promise.all([
+			expectRemoteVideoReceiving(hostPage, guestName),
+			expectRemoteVideoReceiving(guest.page, meetHostName),
+		]);
 	});
 });

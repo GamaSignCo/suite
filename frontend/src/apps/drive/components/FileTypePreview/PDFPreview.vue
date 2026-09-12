@@ -5,9 +5,9 @@
       <span class="text-sm">{{ Math.round(scale * 100) }}%</span>
       <Button @click="scale += 0.25" :disabled="scale >= 2" label="+" />
     </div>
-    <div class="grow flex items-center justify-center border rounded-sm max-h-[70vh] overflow-auto">
-      <Skeleton v-if="loading" class="w-full h-[70vh] rounded-sm" />
-      <canvas ref="canvasRef" :class="{ hidden: loading }" class="rounded-sm" />
+    <div class="grow flex items-center justify-center border rounded-1 max-h-[70vh] overflow-auto">
+      <Skeleton v-if="loading" class="w-full h-[70vh] rounded-1" />
+      <canvas ref="canvasRef" :class="{ hidden: loading }" class="rounded-1" />
     </div>
     <div v-if="totalPages" class="flex gap-2 justify-center items-center">
       <Button label="Prev" :disabled="currentPage <= 1" @click="currentPage--" />
@@ -27,12 +27,9 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import { Skeleton, Button } from 'frappe-ui'
 import { breakpointsTailwind, useBreakpoints } from '@vueuse/core'
-import * as PDFJS from 'pdfjs-dist'
-
-PDFJS.GlobalWorkerOptions.workerSrc = new URL(
-  'pdfjs-dist/build/pdf.worker.min.mjs',
-  import.meta.url
-).toString()
+// Shared with mail's attachment viewer: one pdf.js instance, one worker asset. That module wires
+// up the worker too — workerSrc has to be set on the instance that opens the document.
+import { pdfjs } from '@/utils/pdfjs'
 
 const breakpoints = useBreakpoints(breakpointsTailwind)
 const isMobile = breakpoints.smaller('sm')
@@ -51,7 +48,7 @@ let pdfDoc = null
 
 async function loadPDF() {
   loading.value = true
-  const task = PDFJS.getDocument(src.value)
+  const task = pdfjs.getDocument(src.value)
   pdfDoc = await task.promise
   totalPages.value = pdfDoc.numPages
   await renderPage(currentPage.value)

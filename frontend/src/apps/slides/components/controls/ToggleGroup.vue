@@ -1,22 +1,19 @@
 <template>
 	<div :class="rowClasses">
 		<span v-if="label" :class="labelClasses">{{ label }}</span>
-		<div class="inline-flex items-center gap-1 rounded bg-surface-base p-px">
-			<button
-				v-for="option in options"
-				:key="option.value"
-				type="button"
-				:title="option.label"
-				:class="getButtonClass(option.value)"
-				@click="toggle(option.value)"
-			>
-				<component :is="option.icon" :class="getIconClass(option.value)" />
-			</button>
+		<div class="inline-flex items-center gap-1 rounded-4 bg-surface-base p-px">
+			<Tooltip v-for="option in options" :key="option.value" :text="option.label" :hover-delay="0">
+				<button type="button" :class="getButtonClass(option.value)" @click="toggle(option.value)">
+					<component :is="option.icon" :class="getIconClass(option.value)" />
+				</button>
+			</Tooltip>
 		</div>
 	</div>
 </template>
 
 <script setup>
+import { Tooltip } from 'frappe-ui'
+
 import { labelClasses } from '@/apps/slides/utils/constants'
 
 const model = defineModel({ default: () => [] })
@@ -35,7 +32,7 @@ const getButtonClass = (value) => [buttonClasses, isActive(value) ? activeClasse
 
 const getIconClass = (value) => [
 	iconClasses,
-	isActive(value) ? 'text-ink-gray-9' : 'text-ink-gray-7',
+	isActive(value) ? 'text-ink-gray-7' : 'text-ink-gray-6',
 ]
 
 const toggle = (value) => {

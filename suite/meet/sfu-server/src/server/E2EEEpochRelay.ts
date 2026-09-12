@@ -15,7 +15,7 @@ import {
 	type PersistedE2eePendingCommitRequest,
 } from './E2eeCoordinatorPersistence';
 import type { E2eeRosterStore } from './E2eeRosterStore';
-import { checkSocketRateLimits } from './handlers/utils';
+import { checkSocketRateLimits, getRoomId } from './handlers/utils';
 
 type TypedSocket = Socket<
 	ClientToServerEvents,
@@ -107,6 +107,7 @@ export class E2EEEpochRelay {
 		private readonly persistence: E2eeCoordinatorPersistence = new InMemoryE2eeCoordinatorPersistence(),
 		private readonly rateLimiter: RateLimiter | null = null,
 		private readonly telemetry: Telemetry | null = null,
+		private readonly bypassRateLimits = false,
 	) {
 		this.io = io;
 		this.fullAccessSockets = fullAccessSockets;
@@ -133,9 +134,11 @@ export class E2EEEpochRelay {
 		const allowed = checkSocketRateLimits(
 			socket,
 			this.rateLimiter,
+			`e2ee-epoch:${getRoomId(socket)}`,
 			E2EE_EPOCH_USER_LIMIT,
 			E2EE_EPOCH_IP_LIMIT,
 			E2EE_EPOCH_RATE_WINDOW_MS,
+			this.bypassRateLimits,
 		);
 		if (!allowed) {
 			this.telemetry?.recordE2EEEvent('unknown', 'rate_limited');
@@ -146,18 +149,6 @@ export class E2EEEpochRelay {
 			});
 		}
 		return allowed;
-	}
-
-	requestKeyPackages(
-		roomId: string,
-		epochNumber: number,
-		reason: 'enable' | 'join' | 'reconnect',
-	): void {
-		this.emitToFullAccessParticipants(roomId, {
-			type: 'key-package-request',
-			epochNumber,
-			reason,
-		});
 	}
 
 	requestKeyPackageFromParticipant(
@@ -194,9 +185,9 @@ export class E2EEEpochRelay {
 			const socket = this.io.sockets.sockets.get(socketId) as
 				| TypedSocket
 				| undefined;
-			if (!socket?.participantId || socket.senderId === excludedSenderId)
-				continue;
-			this.emitToTarget(roomId, socket.participantId, {
+			const peerId = socket?.peerId ?? socket?.participantId;
+			if (!peerId || socket?.senderId === excludedSenderId) continue;
+			this.emitToTarget(roomId, peerId, {
 				type: 'key-package-request',
 				epochNumber,
 				reason,
@@ -326,7 +317,7 @@ export class E2EEEpochRelay {
 			await this.hydrate();
 			if (socket.scope !== 'full') return;
 			const roomId = socket.roomId;
-			const fromParticipantId = socket.participantId;
+			const fromParticipantId = socket.peerId ?? socket.participantId;
 			const fromSenderId = socket.senderId;
 			loggers.socketHandler.debug(
 				'[DEBUG-e2ee] SFU: epoch envelope received %o',
@@ -466,15 +457,6 @@ export class E2EEEpochRelay {
 			});
 			return;
 		}
-		await this.persistence.retainKeyPackage(roomId, {
-			type: 'key-package',
-			fromParticipantId,
-			fromSenderId,
-			epochNumber: payload.epochNumber,
-			keyPackage: payload.keyPackage,
-			consumed: false,
-			expiresAt: this.expiresAt(),
-		});
 		this.emitToFullAccessParticipants(roomId, {
 			type: 'key-package',
 			fromParticipantId,
@@ -957,11 +939,6 @@ export class E2EEEpochRelay {
 		await this.retainCommit(roomId, commit);
 		this.emitToFullAccessParticipants(roomId, commit);
 		if (hasMatchingPending) {
-			await this.persistence.markKeyPackagesConsumed(
-				roomId,
-				payload.previousEpochNumber,
-				this.parseJoiningSenderIds(payload.membershipDeltaId),
-			);
 			await this.clearPendingCommitRequest(roomId, payload.previousEpochNumber);
 		}
 	}
@@ -1297,16 +1274,6 @@ export class E2EEEpochRelay {
 		return Date.now() + E2EE_COORDINATOR_TTL_MS;
 	}
 
-	private parseJoiningSenderIds(membershipDeltaId: string): number[] {
-		if (!membershipDeltaId.startsWith('add-')) return [];
-		const body = membershipDeltaId.slice('add-'.length).split('-to-')[0];
-		if (!body) return [];
-		return body
-			.split('-')
-			.map((id) => Number.parseInt(id, 10))
-			.filter((id) => this.isSenderId(id));
-	}
-
 	private hasContiguousRetainedEpochs(
 		roomId: string,
 		knownEpochNumber: number,
@@ -1386,7 +1353,7 @@ export class E2EEEpochRelay {
 	private async getCommitterDebugState(
 		roomId: string,
 		excludeSenderIds: number[],
-	): Promise<Record<string, unknown>> {
+	) {
 		const rosterEntries = (await this.roster?.list(roomId)) ?? [];
 		const fullAccessSocketIds = Array.from(
 			this.fullAccessSockets.get(roomId) ?? [],
@@ -1484,10 +1451,8 @@ export class E2EEEpochRelay {
 		if (!socketsInRoom) return null;
 
 		for (const socketId of socketsInRoom) {
-			const socket = this.io.sockets.sockets.get(socketId) as
-				| TypedSocket
-				| undefined;
-			if (socket && socket.participantId === participantId) {
+			const socket = this.io.sockets.sockets.get(socketId);
+			if (socket && (socket.peerId ?? socket.participantId) === participantId) {
 				return socket;
 			}
 		}
@@ -1569,8 +1534,7 @@ export class E2EEEpochRelay {
 		for (const socketId of socketIds) {
 			const socket = this.io.sockets.sockets.get(socketId);
 			if (socket) {
-				// biome-ignore lint/suspicious/noExplicitAny: typed-socket emit with narrowed payload
-				(socket as any).emit('e2ee:epoch', data);
+				socket.emit('e2ee:epoch', data);
 			}
 		}
 	}

@@ -1,16 +1,25 @@
 <template>
+	<!-- The list indents are ours rather than prose-sm's 22px: an outside marker is drawn in
+	     that padding, and "10." is wider than it, so from the tenth item on the number was cut
+	     off by the editor's own scroll container (it starts at x=0 — the body carries no
+	     horizontal padding on desktop). Both lists move together so a document mixing them
+	     keeps one indent. -->
+	<!-- 75vh is a modal's height — it has the screen to itself. Docked, the composer sits beside
+	     the mail it is being written about, so it takes a fixed 30rem and leaves the rest of the
+	     list visible; the panel's own max-h still clips it on a short viewport. In a thread the
+	     height is the thread's. -->
 	<TextEditor
 		ref="textEditor"
-		editor-class="prose-sm max-w-none"
-		:extensions="[CustomImageExtension, CustomParagraphExtension]"
-		:content="mail.html_body.replaceAll('<div><br></div>', '<div></div>')"
-		:upload-function
-		class="flex flex-col max-sm:overflow-y-auto"
-		:class="{ 'pointer-events-none opacity-50': !show, 'sm:h-[75vh]': !isInThread }"
-		:style="isMobile && { height: editorHeight }"
-		@change="
-			(val: string) => (mail.html_body = val.replaceAll('<div></div>', '<div><br></div>'))
-		"
+		editor-class="prose-sm max-w-none [&_ol]:ps-7 [&_ul]:ps-7"
+		:extensions="[imageExtension, CustomParagraphExtension, ...mentionExtensions]"
+		:content="editorContent"
+		:upload-function="uploadInlineImage"
+		class="flex flex-col"
+		:class="[
+			{ 'pointer-events-none opacity-50': !show },
+			isInThread ? '' : docked ? 'sm:h-[30rem]' : 'sm:h-[75vh]',
+		]"
+		@change="onEditorChange"
 		@dragenter.prevent="handleDragEnter"
 		@dragover.prevent="handleDragOver"
 		@dragleave.prevent="handleDragLeave"
@@ -19,11 +28,30 @@
 		<template #top>
 			<div
 				class="flex flex-col gap-2.5 border-b pb-2.5 max-sm:px-3 max-sm:pt-2.5"
-				:class="{ 'border-transparent': isDragging }"
+				:class="[
+					isDragging ? 'border-transparent' : '',
+					// Bleed the rule to its container's edges while the fields stay on the content
+					// axis: every host pads this block, so without cancelling that the separator
+					// stops short of both sides and reads as underlining the fields rather than
+					// dividing the composer. The amount is whichever host it is — the message card
+					// in a thread pads by 5, the Dialog's body wrapper and ComposeDock by 6.
+					isInThread ? 'sm:-mx-5 sm:px-5' : 'sm:-mx-6 sm:px-6',
+				]"
 			>
-				<div v-if="!mailDetails?.type || isMobile" class="flex justify-between gap-2">
+				<!-- A reply inside a thread leaves From and Subject out: the conversation around it
+				     says both. Detached into a window there is no conversation around it, so a
+				     popped-out reply shows them like any other composer. -->
+				<div
+					v-if="!isInThread || !mailDetails?.type || isMobile"
+					class="flex justify-between gap-2"
+				>
 					<div class="flex items-center gap-2">
 						<span class="text-ink-gray-4 text-sm">{{ __('From') }}</span>
+						<!-- Button mode, like the phone composer's: the trigger takes the width of the
+						     identity it is showing. As an input it was a box of a fixed 16rem with the
+						     name and address inside it, and anything longer than that — which is most
+						     addresses once the display name is in front of them — was cut off mid-domain.
+						     The list is filtered from the popover's own search box instead. -->
 						<Combobox
 							v-model="mail.from_email"
 							:options="
@@ -32,15 +60,18 @@
 									value: i.email,
 								})) || []
 							"
-							:open-on-click="true"
-							class="min-w-64"
+							trigger="button"
+							class="min-w-0 max-w-full"
 						/>
 					</div>
+					<!-- Unsaved text is no reason to withhold this: the draft is handed to the window as
+					     it stands, in memory, rather than fetched back from the server. Only a save
+					     actually in flight holds it up — see popOut. -->
 					<Button
 						v-if="isInThread"
 						variant="ghost"
-						:disabled="isLoading || isDraftUpdated"
-						@click="emit('popOut', mail)"
+						:disabled="isLoading"
+						@click="popOut()"
 					>
 						<template #icon>
 							<component :is="ExternalLink" class="text-ink-gray-5 h-4 w-4" />
@@ -108,11 +139,12 @@
 					</div>
 				</div>
 				<label
-					v-if="!mailDetails?.type || isMobile"
+					v-if="!isInThread || !mailDetails?.type || isMobile"
 					class="flex cursor-text items-center gap-2"
 				>
 					<span class="text-ink-gray-4 text-sm">{{ __('Subject') }}</span>
 					<input
+						ref="subjectInput"
 						v-model="mail.subject"
 						class="flex-1 cursor-text border-none bg-inherit text-base focus-visible:!ring-0"
 					/>
@@ -124,16 +156,16 @@
 				class="relative flex flex-1 cursor-text flex-col border-2 border-transparent py-2.5 text-sm max-sm:px-3 sm:overflow-y-auto"
 				:class="{
 					'max-h-96 min-h-32': isInThread,
-					'!border-outline-gray-3 rounded border-dashed': isDragging,
+					'!border-outline-gray-3 rounded-4 border-dashed': isDragging,
 				}"
 				@click="editor.commands.focus('end')"
 			>
 				<div
 					v-if="isDragging"
-					class="bg-surface-gray-1/90 text-ink-gray-3 absolute inset-0 z-50 flex flex-col items-center justify-center space-y-1 rounded"
+					class="bg-surface-gray-1/90 text-ink-gray-3 absolute inset-0 z-50 flex flex-col items-center justify-center space-y-1 rounded-4"
 				>
 					<UploadCloud class="stroke-1.5 h-12 w-12" />
-					<p class="text-xl-semibold">{{ __('Drop files to upload') }}</p>
+					<p class="text-lg-semibold">{{ __('Drop files to upload') }}</p>
 				</div>
 
 				<EditorContent :editor :class="{ 'opacity-30': isDragging }" @click.stop />
@@ -157,7 +189,7 @@
 							(file: Attachment) => file.disposition === 'attachment',
 						)"
 						:key="index"
-						class="bg-surface-gray-2 text-ink-gray-6 flex cursor-pointer items-center rounded p-2.5"
+						class="bg-surface-gray-2 text-ink-gray-6 flex cursor-pointer items-center rounded-4 p-2.5"
 						:href="file.file_url"
 						target="_blank"
 						@click="openAttachment(file.blob_id, file.type)"
@@ -178,7 +210,7 @@
 					<div
 						v-for="(fileUpload, id) in fileUploads.filter((fu) => fu.isUploading)"
 						:key="id"
-						class="bg-surface-gray-2 text-ink-gray-6 mb-2 rounded p-2.5 text-sm"
+						class="bg-surface-gray-2 text-ink-gray-6 mb-2 rounded-4 p-2.5 text-sm"
 					>
 						<div class="mb-1.5 flex items-center">
 							<span class="mr-1 font-medium"> {{ fileUpload.name }} </span>
@@ -191,15 +223,24 @@
 				</div>
 			</div>
 		</template>
+		<!-- Last child of the scroller, so `sticky bottom-0` (mobile, in the toolbar itself) pins it to
+		     the bottom of the scrollport while the fields and body scroll under it. The sheet ends where
+		     the keyboard begins, so that bottom edge is the top of the keyboard. -->
 		<template #bottom>
 			<ComposeMailToolbar
 				:is-recipients-empty
+				:is-uploading
 				class="border-t"
-				:class="{ 'border-transparent': isDragging }"
+				:class="[
+					isDragging ? 'border-transparent' : '',
+					// Same bleed as the field block above, so both rules span the same width.
+					isInThread ? 'sm:-mx-5 sm:px-5' : 'sm:-mx-6 sm:px-6',
+				]"
 				@select-files="(files: File[]) => uploadFiles(files)"
 				@append-emoji="(emoji: string) => appendEmoji(emoji)"
 				@discard-mail="discardMail"
 				@send-mail="sendMail"
+				@schedule-send="openScheduleModal"
 			/>
 		</template>
 	</TextEditor>
@@ -208,62 +249,33 @@
 		v-model="showContactsModal"
 		@insert="(selections) => mail[insertContactsInto].push(...selections)"
 	/>
+	<ScheduleSendModal v-model="showScheduleModal" @confirm="scheduleSend" />
 </template>
 
 <script setup lang="ts">
-import {
-	computed,
-	inject,
-	nextTick,
-	onMounted,
-	onUnmounted,
-	reactive,
-	ref,
-	useTemplateRef,
-	watch,
-} from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, nextTick, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
 import { EditorContent } from '@tiptap/vue-3'
-import { watchDebounced } from '@vueuse/core'
 import {
-	ChevronDown,
-	ChevronUp,
-	ExternalLink,
-	Forward,
-	Reply,
-	ReplyAll,
-	UploadCloud,
-} from 'lucide-vue-next'
+	ChevronDown, ChevronUp, ExternalLink, Forward, Reply, ReplyAll, UploadCloud, } from 'lucide-vue-next'
 import {
-	Button,
-	Combobox,
-	Dropdown,
-	FeatherIcon,
-	ImageExtension,
-	Progress,
-	TextEditor,
-	Tooltip,
-	createResource,
-	useFileUpload,
-} from 'frappe-ui'
+	Button, Combobox, Dropdown, Progress, Tooltip, useFileUpload } from 'frappe-ui'
+import { Icon as FeatherIcon, TextEditor } from 'frappe-ui/experimental'
 
-import { getAttachmentUrl } from '@/apps/mail/resources'
+import { formatBytes, isOverlayPresent, raiseToast } from '@/apps/mail/utils'
+import { useScreenSize } from '@/apps/mail/utils/composables'
+import { useComposeMail } from '@/apps/mail/composables/useComposeMail'
 import {
-	formatBytes,
-	isOverlayPresent,
-	processInlineImages,
-	raiseToast,
-	randomString,
-} from '@/apps/mail/utils'
-import { useScreenSize, useVisualViewport } from '@/apps/mail/utils/composables'
-import { CustomParagraphExtension } from '@/apps/mail/utils/text-editor'
-import { injectAccountScope } from '@/apps/mail/utils/accountScope'
+	CustomImageExtension,
+	CustomParagraphExtension,
+	uploadFunction,
+} from '@/apps/mail/utils/text-editor'
 import ComposeMailToolbar from '@/apps/mail/components/ComposeMailToolbar.vue'
 
-import type { Attachment, ComposeMailData, File as FileDoc, Identity, UserResource } from '@/apps/mail/types'
+import type { Attachment, ComposeMailData, File as FileDoc, Identity } from '@/apps/mail/types'
 
 import RecipientInput from './Controls/RecipientInput.vue'
 import ContactsModal from './Modals/ContactsModal.vue'
+import ScheduleSendModal from './Modals/ScheduleSendModal.vue'
 
 const show = defineModel<boolean>()
 
@@ -271,38 +283,83 @@ const {
 	reloadMails,
 	mailDetails,
 	isInThread = false,
+	docked = false,
 } = defineProps<{
 	reloadMails: () => void
 	mailDetails?: ComposeMailData
 	isInThread?: boolean
+	// Docked composer: shorter than a modal, which has the screen to itself.
+	docked?: boolean
 }>()
 
-const emit = defineEmits(['discardMail', 'reply', 'replyAll', 'forward', 'popOut'])
-
-const router = useRouter()
-const route = useRoute()
-// The editor sends as the enclosing pane's account (the thread's owning account in
-// All Inboxes, the active one everywhere else): identities, the account's default
-// outgoing email and every create/draft call resolve through this scope.
-const scope = injectAccountScope()
-const { accountId: scopeAccountId, identities, mailboxIds } = scope
-
-const viewSentMessage = (threadID: string) =>
-	router.push({
-		name: 'mail-mail',
-		params: { accountId: scopeAccountId.value, mailbox: mailboxIds.value.sent, threadID },
-	})
-
-const getIdentity = (email: string) =>
-	identities.value.data?.find((identity: Identity) => identity.email === email)
-
-// Editor
+const emit = defineEmits(['discardMail', 'discardStarted', 'reply', 'replyAll', 'forward', 'popOut'])
 
 const { isMobile } = useScreenSize()
 
 const textEditor = useTemplateRef('textEditor')
 const toInput = useTemplateRef('toInput')
 const ccInput = useTemplateRef('ccInput')
+const subjectInput = useTemplateRef<HTMLInputElement>('subjectInput')
+
+const fileUploads = ref<ReturnType<typeof useFileUpload>[]>([])
+const pendingInlineUploads = ref(0)
+const isUploading = computed(
+	() => pendingInlineUploads.value > 0 || fileUploads.value.some((upload) => upload.isUploading),
+)
+
+const uploadInlineImage = async (file: File) => {
+	pendingInlineUploads.value++
+	try {
+		return await uploadFunction(file)
+	} finally {
+		pendingInlineUploads.value--
+	}
+}
+const imageExtension = CustomImageExtension.configure({ uploadFunction: uploadInlineImage })
+
+// What the composition *is* — draft state, autosave, send, schedule, discard, attachments, mentions
+// — lives in the composable, shared with the phone composer (ComposeView). Only what is particular
+// to this dialog stays here: the contact picker, drag-and-drop, and the in-thread draft actions.
+const {
+	mail,
+	identities,
+	isLoading,
+	isDraftUpdated,
+	isRecipientsEmpty,
+	updateOriginalMail,
+	saveDraft,
+	payListDebt,
+	sendMail,
+	discardMail,
+	onClosed,
+	showScheduleModal,
+	openScheduleModal,
+	scheduleSend,
+	openQuotedContent,
+	openAttachment,
+	mentionExtensions,
+	appendEmoji,
+	editorContent,
+	onEditorChange,
+} = useComposeMail({
+	mailDetails,
+	isInThread,
+	reloadMails,
+	close: () => (show.value = false),
+	isOpen: () => !!show.value,
+	onDiscardUnsaved: () => emit('discardMail'),
+	onDiscardStarted: () => emit('discardStarted'),
+	host: () => textEditor.value,
+	isUploading: () => isUploading.value,
+	// The dialog holds the rest of the page inert, so the mention dropdown has to render inside it
+	// rather than at <body>, where it would be unreachable.
+	mentionContainer: () =>
+		(textEditor.value?.$el as HTMLElement | undefined)?.closest<HTMLElement>('[role="dialog"]') ??
+		null,
+})
+
+// The composer stays mounted when it closes, so the in-flight flags have to be cleared on the way out.
+watch(show, (open) => !open && onClosed())
 
 const showContactsModal = ref(false)
 const insertContactsInto = ref('')
@@ -318,349 +375,111 @@ const toggleCcBcc = () => {
 	if (showCcBcc.value) nextTick(() => ccInput.value?.setFocus())
 }
 
-const appendEmoji = (emoji: string) => {
-	textEditor.value.editor.commands.insertContent(emoji)
-	textEditor.value.editor.commands.focus()
-}
-
-const editorHeight = useVisualViewport(
-	(viewport) => `${viewport.height - viewport.offsetTop - 113}px`,
-)
-
-// Setup & hooks
-
-const user = inject('$user') as UserResource
-
-const getDefaultFromEmail = () => {
-	const identityEmails = identities.value.data?.map((i: Identity) => i.email) ?? []
-	// The default outgoing email is per-account; pick the scope account's.
-	const defaultOutgoingEmail = scope.account.value?.default_outgoing_email
-
-	return (
-		identityEmails.find((e) => e === mailDetails?.from_email) ??
-		identityEmails.find((e) => e === defaultOutgoingEmail) ??
-		identityEmails[0] ??
-		user.data.name
-	)
-}
-
-const mail = reactive<ComposeMailData>({
-	name: mailDetails?.name || '',
-	id: mailDetails?.id || '',
-	from_email: getDefaultFromEmail(),
-	to: mailDetails?.to || [],
-	cc: mailDetails?.cc || [],
-	bcc: mailDetails?.bcc || [],
-	attachments: mailDetails?.attachments || [],
-	subject: mailDetails?.subject || '',
-	html_body: mailDetails?.html_body || '',
-	quoted_content: mailDetails?.quoted_content || '',
-	in_reply_to: mailDetails?.in_reply_to || '',
-	in_reply_to_id: mailDetails?.in_reply_to_id || '',
-	forwarded_from_id: mailDetails?.forwarded_from_id || '',
-})
-
-const originalMail = ref<ComposeMailData>()
-const updateOriginalMail = () => (originalMail.value = JSON.parse(JSON.stringify(mail)))
-const isDraftUpdated = computed(() => JSON.stringify(mail) !== JSON.stringify(originalMail.value))
-
+// Start where there is still something to write: the body on a reply (recipients and subject come
+// with the thread), the subject when the draft arrived addressed but unnamed — a `mailto:` link, or
+// a calendar invite's participants — and the To field otherwise. The delay is the dialog's: focusing
+// during its transition doesn't take.
 onMounted(() => {
 	updateOriginalMail()
-	if (!mailDetails?.in_reply_to) setTimeout(() => toInput.value?.setFocus(), 50)
-	else textEditor.value.editor.commands.focus()
+	if (mailDetails?.in_reply_to) return textEditor.value.editor.commands.focus()
+
+	// Deferred, and the choice made from inside: TextEditor renders nothing until it has built its
+	// editor on its own mounted hook, so neither field exists yet at this point.
+	setTimeout(() => {
+		if (!isRecipientsEmpty.value && !mail.subject && subjectInput.value) subjectInput.value.focus()
+		else toInput.value?.setFocus()
+	}, 50)
 })
 
-onUnmounted(() => saveDraft())
-
-watchDebounced(mail, () => saveDraft(), { debounce: 2000 })
-
-// Actions
-
-const isSavingDraft = ref(false)
-
-const saveDraft = async () => {
-	if (!isDraftUpdated.value || isLoading.value || isDiscarding.value) return
-
-	isSavingDraft.value = true
-	if (mail.id) await updateDraft.submit({ submit: false })
-	else if (!isMailEmpty.value) await createMail.submit({ save_as_draft: true })
-	isSavingDraft.value = false
+// Popping out is a hand-off, not a close: the window is given this very draft and takes over saving
+// it, so this editor leaves without a word. Saving anyway would race the window into writing the
+// same reply twice — one draft from each — which is the duplicate the debounced save is held back
+// from making, arriving by the other door.
+//
+// A save in flight is the one thing that has to finish first, and is why both entry points are
+// withheld while `isLoading`: the id the server is about to hand back lands on this composable, and
+// the window — which copies the draft as it is at the moment of the hand-off — would never hear of
+// it. Its first save would then create a second draft rather than update this one.
+let handedOff = false
+const popOut = () => {
+	handedOff = true
+	emit('popOut', mail)
 }
 
-const sendMail = async () => {
-	if (deleteMail.loading) return
-
-	if (isRecipientsEmpty.value)
-		return raiseToast(__('Please add at least one recipient.'), 'error')
-
-	isSavingDraft.value = false
-	show.value = false
-	if (createMail.loading) await createMail.promise
-	if (updateDraft.loading) await updateDraft.promise
-
-	if (mail.id) updateDraft.submit({ submit: true })
-	else createMail.submit({ save_as_draft: false })
-}
-
-const isDiscarding = ref(false)
-
-const discardMail = async () => {
-	if (deleteMail.loading) return
-
-	isDiscarding.value = true
-	show.value = false
-	if (createMail.loading) await createMail.promise
-	if (updateDraft.loading) await updateDraft.promise
-	if (mail.id) deleteMail.submit()
-	else emit('discardMail')
-}
-
-watch(show, (val) => {
-	if (val) return
-	isDiscarding.value = false
-	isSavingDraft.value = false
+// Otherwise this is the last chance to keep what was typed since the autosave last ran. Closing a
+// composer now unmounts this editor outright — the dialog drops it, the phone leaves the compose
+// route — so the debounced save that would have caught up in a second's time never gets to.
+//
+// And then the list is told, if a draft in a thread has been going to the server without it (see
+// payListDebt). After the save, so the reload finds the draft as it was left rather than as it was
+// a keystroke before that. Not on a hand-off: the window this draft has gone to is saving it now,
+// and it tells the list itself.
+onUnmounted(async () => {
+	if (handedOff) return
+	await saveDraft()
+	payListDebt()
 })
 
-defineExpose({ sendMail, discardMail })
-
-const onMailUpdateSuccess = ({
-	id,
-	status,
-	error,
-	thread_id,
-}: {
-	id: string
-	status: string
-	error: string
-	thread_id?: string
-}) => {
-	if (id) mail.id = id
-	updateOriginalMail()
-	if (error) return raiseToast(error, 'error')
-	if (isDiscarding.value) return
-
-	if (!isInThread || status === 'Submitted') reloadMails()
-	if (show.value) return
-
-	if (status === 'Drafted' && isSavingDraft.value) raiseToast(__('Draft saved.'))
-	else if (status === 'Submitted')
-		raiseToast(
-			__('Message sent.'),
-			'success',
-			// No View action when the sent mail's thread is already open in front of the user.
-			thread_id && route.params.threadID !== thread_id
-				? { label: __('View'), onClick: () => viewSentMessage(thread_id) }
-				: undefined,
-		)
-}
-
-// Resources
-
-const createMail = createResource({
-	url: 'suite.mail.api.mail.create_mail',
-	makeParams: ({ save_as_draft }: { save_as_draft: boolean }) => ({
-		account: scopeAccountId.value,
-		...mail,
-		...processInlineImages(mail),
-		from_name: getIdentity(mail.from_email!)._name,
-		save_as_draft,
-	}),
-	onSuccess: onMailUpdateSuccess,
-	onError: (error) => raiseToast(error.message, 'error'),
-})
-
-const updateDraft = createResource({
-	url: 'suite.mail.api.mail.update_draft_mail',
-	makeParams: ({ submit }: { submit: boolean }) => ({
-		account: scopeAccountId.value,
-		...mail,
-		...processInlineImages(mail),
-		from_name: getIdentity(mail.from_email!)._name,
-		submit,
-	}),
-	onSuccess: onMailUpdateSuccess,
-	onError: (error) => raiseToast(error.message, 'error'),
-})
-
-const deleteMail = createResource({
-	url: 'suite.mail.api.mail.delete_mail',
-	makeParams: () => ({ account: scopeAccountId.value, id: mail.id }),
-	onSuccess: () => {
-		reloadMails()
-		raiseToast(__('Draft discarded.'))
-	},
-	onError: (error) => raiseToast(error.message, 'error'),
-})
-
-const isLoading = computed(() => createMail.loading || updateDraft.loading || deleteMail.loading)
+// `mail` is exposed so the window around this one can read the draft — the minimised bar names
+// itself after the subject, which only exists in here.
+defineExpose({ mail, sendMail, discardMail, openScheduleModal })
 
 // Local draft actions
 
 const localDraftActions = computed(() => [
 	{
 		group: '',
-		items: [
+		options: [
 			{ label: __('Reply'), icon: Reply, onClick: () => emit('reply') },
-			{
-				label: __('Reply All'),
-				icon: ReplyAll,
-				onClick: () => emit('replyAll'),
-			},
-			{
-				label: __('Forward'),
-				icon: Forward,
-				onClick: () => emit('forward'),
-			},
+			{ label: __('Reply All'), icon: ReplyAll, onClick: () => emit('replyAll') },
+			{ label: __('Forward'), icon: Forward, onClick: () => emit('forward') },
 		],
 	},
 	{
 		group: '',
-		items: [
+		options: [
 			{
 				label: __('Pop Out'),
 				icon: ExternalLink,
-				onClick: () => emit('popOut', mail),
+				onClick: () => popOut(),
 				condition: () => !isLoading.value,
 			},
 		],
 	},
 ])
 
-// Mail content
-
-const isRecipientsEmpty = computed(() => [mail.to, mail.cc, mail.bcc].every((d) => !d.length))
-
-const isBodyEmpty = computed(() => {
-	if (!mail.html_body) return true
-
-	const element = document.createElement('div')
-	element.innerHTML = mail.html_body
-
-	const hasText = element.textContent?.trim()
-	const hasMedia = element.querySelector('img, video, svg') !== null
-
-	return !hasText && !hasMedia
-})
-
-const isMailEmpty = computed(() => {
-	const isSubjectEmpty = !mail.subject
-	const isQuotedContentEmpty = !mail.quoted_content
-	const isAttachmentsEmpty = !mail.attachments?.length
-
-	return (
-		isSubjectEmpty &&
-		isQuotedContentEmpty &&
-		isRecipientsEmpty.value &&
-		isAttachmentsEmpty &&
-		isBodyEmpty.value
-	)
-})
-
-const openQuotedContent = () => {
-	mail.html_body += `<br>${mail.quoted_content}`
-	mail.quoted_content = ''
-}
-
-const buildSignature = (email?: string) => {
-	const identity = getIdentity(email!)
-	return identity?.text_signature
-		? `<div><br></div><div><br></div>${identity.html_signature}`
-		: ''
-}
-
-const bodyText = (html: string) => {
-	const element = document.createElement('div')
-	element.innerHTML = html || ''
-	return element.textContent?.trim() ?? ''
-}
-
-// Swap the signature when the From identity changes — but only while the body is still the
-// auto-inserted signature (or empty), so a message the user has written isn't overwritten.
-// Compared by text so the editor's HTML normalization doesn't defeat the match.
-watch(
-	() => mail.from_email,
-	(val, oldVal) => {
-		if (isBodyEmpty.value || bodyText(mail.html_body) === bodyText(buildSignature(oldVal))) {
-			mail.html_body = buildSignature(val)
-		}
-	},
-	{ immediate: true },
-)
-
-// Attachments
-
-const openAttachment = async (blob_id?: string, type?: string) => {
-	if (!blob_id) return
-
-	// Opened up front, while the click's user activation is still live: Safari blocks
-	// window.open() once the gesture has expired, which it has by the time the
-	// attachment has been fetched. A null tab means the popup blocker got it —
-	// retrying after the fetch would hit the same block, so just say so.
-	const tab = window.open('', '_blank')
-	if (!tab) return raiseToast(__('Allow popups to open attachments.'), 'error')
-
-	try {
-		tab.location.href = await getAttachmentUrl(blob_id, type, scopeAccountId.value)
-	} catch {
-		tab.close()
-	}
-}
-
-// Custom Extensions
-
-const uploadFunction = async (file: File) => {
-	const fileUpload = useFileUpload()
-	return fileUpload.upload(file, {
-		private: true,
-		folder: 'Home/Frappe Mail',
-		upload_endpoint: '/api/method/suite.mail.api.mail.upload_file',
-	})
-}
-
-const CustomImageExtension = ImageExtension.extend({
-	addAttributes() {
-		return {
-			...this.parent?.(),
-			'data-cid': {
-				default: null,
-				parseHTML: (element) => element.getAttribute('data-cid'),
-				renderHTML: (attributes) => {
-					const src = attributes.src || ''
-					if (
-						!attributes['data-cid'] &&
-						(src.startsWith('/files') || src.startsWith('/private/files'))
-					)
-						attributes['data-cid'] = randomString(10)
-					return { 'data-cid': attributes['data-cid'] }
-				},
-			},
-		}
-	},
-}).configure({
-	HTMLAttributes: { width: '600', style: 'max-width:100%; height:auto' },
-	uploadFunction,
-})
-
 const TYPE_ICON_MAP = {
-	reply: Reply,
-	replyAll: ReplyAll,
-	forward: Forward,
+	reply: 'lucide-reply',
+	replyAll: 'lucide-reply-all',
+	forward: 'lucide-forward',
 }
 
 // Shortcuts
 
+// Every mounted composer listens on the window, and a thread can hold more than one — a draft
+// being replied to below another, or one open here and another in the composer window. Without
+// this the shortcuts went to all of them at once: ⌘D discarded every open draft, ⌘Enter sent them.
+// The one the keystroke belongs to is the one it was typed into.
+const ownsEvent = (e: KeyboardEvent) => {
+	const root = textEditor.value?.$el as HTMLElement | undefined
+	const target = e.target as Node | null
+	return !!root && !!target && root.contains(target)
+}
+
 const handleKeydown = (e: KeyboardEvent) => {
 	if (!show.value || (isInThread && isOverlayPresent())) return
+	if (!ownsEvent(e)) return
 
 	handleSendShortcut(e)
 	handleDiscardShortcut(e)
 }
 
+// ⌘Enter sends; with Shift it asks when to, as the split button's menu does.
 const handleSendShortcut = (e: KeyboardEvent) => {
-	if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-		e.preventDefault()
-		sendMail()
-	}
+	if (!(e.metaKey || e.ctrlKey) || e.key !== 'Enter') return
+	e.preventDefault()
+	if (e.shiftKey) openScheduleModal()
+	else sendMail()
 }
 
 const handleDiscardShortcut = (e: KeyboardEvent) => {
@@ -703,8 +522,6 @@ const handleDrop = (e: DragEvent) => {
 	const files = Array.from(e.dataTransfer?.files ?? [])
 	uploadFiles(files)
 }
-
-const fileUploads = ref<ReturnType<typeof useFileUpload>[]>([])
 
 const uploadFiles = async (files: File[]) => {
 	if (!files.length) return

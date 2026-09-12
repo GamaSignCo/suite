@@ -17,8 +17,8 @@
 				@click="generateKeys.submit()"
 			/>
 
-			<Dialog v-model="showSecret" :options="{ title: __('API Access') }">
-				<template #body-content>
+			<Dialog v-model:open="showSecret" v-bind="{ title: __('API Access') }">
+				<template #default>
 					<p class="text-base">
 						{{
 							__(`Please copy the API secret now. You won’t be able to see it again!`)
@@ -47,7 +47,7 @@
 					<div
 						v-for="row in configRows"
 						:key="row.key"
-						class="space-y-3 rounded-lg border p-4"
+						class="space-y-3 rounded-6 border p-4"
 					>
 						<div class="flex items-center justify-between gap-2">
 							<span class="text-ink-gray-8 font-medium">{{ row.protocol }}</span>

@@ -1,6 +1,7 @@
 import type { Server, Socket } from 'socket.io';
 import { loggers } from '../../utils/logger';
 import type { RateLimiter } from '../../utils/rateLimiter';
+import type { RoomRegistry } from '../RoomRegistry';
 import type { TypedSocket } from './Handler';
 
 export function isRealParticipant(participantId: string): boolean {
@@ -16,20 +17,36 @@ export function getRoomId(socket: Socket): string {
 	return `${site}::${meetingId}`;
 }
 
-function isDevOrCiEnvironment(): boolean {
-	const devEnv = process.env.NODE_ENV === 'development';
-	const inCi = process.env.CI === 'true' || !!process.env.GITHUB_ACTIONS;
-	return devEnv || inCi;
+export function getPeerId(socket: Socket): string {
+	return socket.peerId ?? socket.userId;
+}
+
+export function ensureParticipantOwner(
+	socket: Socket,
+	registry: RoomRegistry,
+): { roomId: string; participantId: string } {
+	const roomId = socket.roomId;
+	const participantId = socket.participantId;
+	if (
+		!roomId ||
+		!participantId ||
+		!registry.isParticipantOwner(socket, roomId, participantId)
+	) {
+		throw new Error('Participant connection is no longer active');
+	}
+	return { roomId, participantId };
 }
 
 export function checkSocketRateLimits(
 	socket: Socket,
 	rateLimiter: RateLimiter,
+	namespace: string,
 	userLimit: number,
 	ipLimit: number,
 	windowMs: number,
+	bypass = false,
 ): boolean {
-	if (isDevOrCiEnvironment()) {
+	if (bypass) {
 		return true;
 	}
 	const forwardedFor = socket.handshake.headers['x-forwarded-for'];
@@ -43,8 +60,8 @@ export function checkSocketRateLimits(
 		getFirstIp(forwarded) ||
 		socket.handshake.address;
 
-	const userKey = `user:${socket.userId}`;
-	const ipKey = `ip:${clientIp}`;
+	const userKey = `${namespace}:user:${socket.userId}`;
+	const ipKey = `${namespace}:ip:${clientIp}`;
 
 	const userAllowed = rateLimiter.checkRateLimit(userKey, userLimit, windowMs);
 	const ipAllowed = rateLimiter.checkRateLimit(ipKey, ipLimit, windowMs);
@@ -62,20 +79,21 @@ export function checkSocketRateLimits(
 	return userAllowed && ipAllowed;
 }
 
-export function findSocketByParticipantId(
+export function findSocketsByParticipantId(
 	io: Server,
 	roomId: string,
 	participantId: string,
-): TypedSocket | null {
+): TypedSocket[] {
 	const socketsInRoom = io.sockets.adapter.rooms.get(roomId);
-	if (!socketsInRoom) return null;
+	if (!socketsInRoom) return [];
 
+	const matches: TypedSocket[] = [];
 	for (const socketId of socketsInRoom) {
 		const socket = io.sockets.sockets.get(socketId) as TypedSocket | undefined;
 		if (socket && socket.participantId === participantId) {
-			return socket;
+			matches.push(socket);
 		}
 	}
 
-	return null;
+	return matches;
 }

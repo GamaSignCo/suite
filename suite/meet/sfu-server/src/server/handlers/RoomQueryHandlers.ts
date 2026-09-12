@@ -6,9 +6,25 @@ import { checkSocketRateLimits, getRoomId } from './utils';
 
 export function registerRoomQueryHandlers(deps: HandlerDeps) {
 	return (socket: Socket) => {
+		socket.on('recording:get_projection_snapshot', (_data, callback) => {
+			try {
+				deps.authManager.ensureRecorderAccess(socket);
+				const roomId = getRoomId(socket);
+				if (!deps.registry.isJoinedActiveRecorder(socket, roomId))
+					throw new Error('Recorder must join the room first');
+
+				callback({
+					success: true,
+					snapshot: deps.registry.getRecorderStageSnapshot(roomId),
+				});
+			} catch (error) {
+				callback({ success: false, error: (error as Error).message });
+			}
+		});
+
 		socket.on('get_router_rtp_capabilities', async (_data, callback) => {
 			try {
-				deps.authManager.ensureFullAccess(socket);
+				deps.authManager.ensureMediaConsumerAccess(socket);
 				const roomId = getRoomId(socket);
 
 				loggers.socketHandler.debug(
@@ -31,7 +47,7 @@ export function registerRoomQueryHandlers(deps: HandlerDeps) {
 
 		socket.on('get_existing_producers', async (_data, callback) => {
 			try {
-				deps.authManager.ensureFullAccess(socket);
+				deps.authManager.ensureMediaConsumerAccess(socket);
 				const roomId = getRoomId(socket);
 				const userId = socket.userId;
 
@@ -75,10 +91,21 @@ export function registerRoomQueryHandlers(deps: HandlerDeps) {
 
 		socket.on('get_room_participants', async (_data, callback) => {
 			try {
-				deps.authManager.ensurePresenceAccess(socket);
+				if (socket.scope === 'recording')
+					deps.authManager.ensureRecorderAccess(socket);
+				else deps.authManager.ensurePresenceAccess(socket);
 
+				const roomId = getRoomId(socket);
 				if (
-					!checkSocketRateLimits(socket, deps.rateLimiter, 10, 10, 60 * 1000)
+					!checkSocketRateLimits(
+						socket,
+						deps.rateLimiter,
+						`room-participants:${roomId}`,
+						60,
+						300,
+						60 * 1000,
+						deps.runtime.bypassRateLimits,
+					)
 				) {
 					callback({
 						success: false,
@@ -87,14 +114,18 @@ export function registerRoomQueryHandlers(deps: HandlerDeps) {
 					return;
 				}
 
-				const roomId = getRoomId(socket);
 				loggers.socketHandler.debug(
 					'Getting room participants for room %s, user %s, scope %s',
 					roomId,
 					socket.userId,
 					socket.scope,
 				);
-				const participants = deps.mediasoup.getRoomParticipants(roomId);
+				const participants = deps.mediasoup
+					.getRoomParticipants(roomId)
+					.filter(
+						(participant) =>
+							!deps.registry.isRecorderPeer(roomId, participant.id),
+					);
 
 				let responseParticipants: ParticipantInfo[] | PreviewParticipantInfo[] =
 					participants;
@@ -114,7 +145,15 @@ export function registerRoomQueryHandlers(deps: HandlerDeps) {
 					responseParticipants.length,
 					roomId,
 				);
-				callback({ success: true, participants: responseParticipants });
+				callback({
+					success: true,
+					participants: responseParticipants,
+					...(socket.scope === 'presence-preview' && {
+						isCurrentUserPresent:
+							deps.registry.getParticipantSocketIds(roomId, socket.userId)
+								.length > 0,
+					}),
+				});
 			} catch (error) {
 				loggers.socketHandler.error(
 					'Error getting room participants: %s',

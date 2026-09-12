@@ -46,23 +46,16 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import {
-	Badge,
-	FeatherIcon,
-	FormControl,
-	ListEmptyState,
-	ListHeader,
-	ListRow,
-	ListRows,
-	ListView,
-	usePageMeta,
-} from 'frappe-ui'
+	Badge, FormControl, usePageMeta } from 'frappe-ui'
+import { Icon as FeatherIcon, ListEmptyState, ListHeader, ListRow, ListRows, ListView } from 'frappe-ui/experimental'
 
 import { userStore } from '@/apps/mail/stores/user'
 import DashboardLayout from '@/apps/mail/components/DashboardLayout.vue'
 import AddAddressBookModal from '@/apps/mail/components/Modals/AddAddressBookModal.vue'
 
-usePageMeta(() => ({ title: __('Address Books') }))
+usePageMeta(() => appPageMeta(__('Address Books'), 'Mail'))
 
 const { addressBooks } = userStore()
 

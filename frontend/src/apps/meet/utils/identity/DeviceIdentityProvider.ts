@@ -23,6 +23,7 @@
 // provider for tests.
 
 import { ed25519KeyPair, exportEd25519PublicKey } from "../media/e2ee";
+import { readString, writeString } from "@/utils/localStorage";
 
 export interface DeviceIdentity {
 	deviceId: string;
@@ -125,12 +126,12 @@ function generateDeviceId(): string {
 }
 
 function getOrCreateDeviceId(): string {
-	const existing = localStorage.getItem(DEVICE_ID_STORAGE_KEY);
+	const existing = readString(DEVICE_ID_STORAGE_KEY);
 	if (existing && /^[a-zA-Z0-9._-]{1,64}$/.test(existing)) {
 		return existing;
 	}
 	const next = generateDeviceId();
-	localStorage.setItem(DEVICE_ID_STORAGE_KEY, next);
+	writeString(DEVICE_ID_STORAGE_KEY, next);
 	return next;
 }
 
@@ -139,12 +140,10 @@ async function loadOrCreateKeyPair(
 	publicKeyId: string,
 ): Promise<CryptoKeyPair> {
 	const privJwk = await idbGet(privateKeyId);
-	if (privJwk) {
+	const pubJwk = await idbGet(publicKeyId);
+	if (privJwk && pubJwk) {
 		const privateKey = await loadPrivateSigningKey(privateKeyId, privJwk);
-		const pubJwk = await idbGet(publicKeyId);
-		const publicKey = pubJwk
-			? await loadPublicVerifyKey(publicKeyId, pubJwk)
-			: (null as unknown as CryptoKey);
+		const publicKey = await loadPublicVerifyKey(publicKeyId, pubJwk);
 		return { privateKey, publicKey };
 	}
 	const kp = await ed25519KeyPair();

@@ -3,16 +3,17 @@
  * Handles MediaSoup consumer lifecycle and stream management
  */
 
-import type { Consumer } from "mediasoup-client/types";
+import type { AppData, Consumer, MediaKind } from "mediasoup-client/types";
 
 export interface ConsumerEntry {
 	id: string;
 	participantId: string;
 	producerId: string;
-	kind: string;
+	kind: MediaKind;
 	isScreen: boolean;
+	adaptivelyPaused: boolean;
 	track?: MediaStreamTrack;
-	appData?: Record<string, unknown>;
+	appData?: AppData;
 	createdAt: number;
 	consumer: Consumer;
 	close?: () => void;
@@ -24,7 +25,7 @@ interface ConsumerLostInfo {
 	consumerId: string;
 	participantId: string;
 	producerId: string;
-	kind: string;
+	kind: MediaKind;
 	isScreen: boolean;
 }
 
@@ -34,21 +35,10 @@ interface ConsumerEventHandlers {
 	onConsumerUpdated?: (
 		consumerId: string,
 		updatedConsumer: ConsumerEntry,
-		updates: Record<string, unknown>,
+		updates: Partial<ConsumerEntry>,
 	) => void;
 	onAllConsumersCleared?: (consumerIds: string[]) => void;
 	onConsumerLost?: (info: ConsumerLostInfo) => void;
-}
-
-interface ConsumerStats {
-	total: number;
-	video: number;
-	audio: number;
-	screenShare: number;
-	byParticipant: Record<
-		string,
-		{ video: number; audio: number; screen: number }
-	>;
 }
 
 export class ConsumerManager {
@@ -81,6 +71,7 @@ export class ConsumerManager {
 			producerId: consumer.producerId,
 			kind: consumer.kind,
 			isScreen: consumer.appData?.type === "screen" || false,
+			adaptivelyPaused: false,
 			track: consumer.track,
 			appData: consumer.appData,
 			createdAt: Date.now(),
@@ -157,10 +148,6 @@ export class ConsumerManager {
 		);
 	}
 
-	getConsumersByKind(kind: string): ConsumerEntry[] {
-		return this.getAllConsumers().filter((consumer) => consumer.kind === kind);
-	}
-
 	getVideoConsumer(participantId: string): ConsumerEntry | undefined {
 		return this.getAllConsumers().find(
 			(consumer) =>
@@ -181,75 +168,9 @@ export class ConsumerManager {
 		return this.getAllConsumers().filter((consumer) => consumer.isScreen);
 	}
 
-	async pauseConsumer(consumerId: string): Promise<boolean> {
-		const consumer = this.getConsumer(consumerId);
-		if (consumer && typeof consumer.pause === "function") {
-			try {
-				await consumer.pause();
-				console.log(`Consumer paused: ${consumerId}`);
-				return true;
-			} catch (error) {
-				console.error(`Failed to pause consumer ${consumerId}:`, error);
-			}
-		}
-		return false;
-	}
-
-	async resumeConsumer(consumerId: string): Promise<boolean> {
-		const consumer = this.getConsumer(consumerId);
-		if (consumer && typeof consumer.resume === "function") {
-			try {
-				await consumer.resume();
-				console.log(`Consumer resumed: ${consumerId}`);
-				return true;
-			} catch (error) {
-				console.error(`Failed to resume consumer ${consumerId}:`, error);
-			}
-		}
-		return false;
-	}
-
-	async pauseParticipantConsumers(
-		participantId: string,
-		kind: string | null = null,
-	): Promise<boolean[]> {
-		const consumers = this.getConsumersByParticipant(participantId);
-		const filteredConsumers = kind
-			? consumers.filter((c) => c.kind === kind)
-			: consumers;
-
-		const results = await Promise.all(
-			filteredConsumers.map((consumer) => this.pauseConsumer(consumer.id)),
-		);
-
-		console.log(
-			`Paused ${filteredConsumers.length} consumers for ${participantId}`,
-		);
-		return results;
-	}
-
-	async resumeParticipantConsumers(
-		participantId: string,
-		kind: string | null = null,
-	): Promise<boolean[]> {
-		const consumers = this.getConsumersByParticipant(participantId);
-		const filteredConsumers = kind
-			? consumers.filter((c) => c.kind === kind)
-			: consumers;
-
-		const results = await Promise.all(
-			filteredConsumers.map((consumer) => this.resumeConsumer(consumer.id)),
-		);
-
-		console.log(
-			`Resumed ${filteredConsumers.length} consumers for ${participantId}`,
-		);
-		return results;
-	}
-
 	updateConsumer(
 		consumerId: string,
-		updates: Record<string, unknown>,
+		updates: Partial<ConsumerEntry>,
 	): ConsumerEntry | null {
 		const consumer = this.consumers.get(consumerId);
 		if (consumer) {
@@ -281,38 +202,6 @@ export class ConsumerManager {
 		}
 
 		return removedConsumers;
-	}
-
-	getConsumerStats(): ConsumerStats {
-		const all = this.getAllConsumers();
-		return {
-			total: all.length,
-			video: all.filter((c) => c.kind === "video").length,
-			audio: all.filter((c) => c.kind === "audio").length,
-			screenShare: all.filter((c) => c.isScreen).length,
-			byParticipant: this.getConsumersByParticipantStats(),
-		};
-	}
-
-	getConsumersByParticipantStats(): Record<
-		string,
-		{ video: number; audio: number; screen: number }
-	> {
-		const stats: Record<
-			string,
-			{ video: number; audio: number; screen: number }
-		> = {};
-		for (const consumer of this.getAllConsumers()) {
-			if (!stats[consumer.participantId]) {
-				stats[consumer.participantId] = { video: 0, audio: 0, screen: 0 };
-			}
-			if (consumer.isScreen) {
-				stats[consumer.participantId].screen++;
-			} else {
-				stats[consumer.participantId][consumer.kind as "video" | "audio"]++;
-			}
-		}
-		return stats;
 	}
 
 	clear(): void {

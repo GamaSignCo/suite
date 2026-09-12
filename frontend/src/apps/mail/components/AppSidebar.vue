@@ -14,10 +14,13 @@
 			v-if="!isMobile || isSidebarOpen"
 			id="sidebar"
 			v-model:collapsed="isSidebarCollapsed"
+			class="border-r border-outline-gray-1"
 			:class="{ 'fixed left-0 top-0 z-10 w-60 !bg-surface-base': isMobile }"
 			:disable-collapse="isMobile"
 		>
-			<div class="flex h-full flex-col p-2">
+			<!-- No padding around the header: its own inset centres the logo in the
+			     collapsed rail, in line with the icons of the px-2 body below. -->
+			<div class="flex h-full flex-col">
 				<SidebarHeader
 					:title="title"
 					:subtitle="subtitle"
@@ -25,23 +28,28 @@
 					:logo="branding.data?.brand_html || MailLogo"
 				/>
 
-				<!-- -mx/px: rows sit flush with the clip edge, so without this the
-				     active item's shadow ring is cut off at both sides. -->
-				<div class="-mx-1 flex-1 overflow-y-auto overflow-x-hidden px-1">
+				<div class="flex-1 overflow-y-auto overflow-x-hidden px-2">
 					<SidebarSection
 						v-for="section in sidebarItems"
 						:key="section.key ?? section.label"
 						:label="section.label"
-						:items="section.items"
 						:collapsible="section.collapsible"
 						:collapsed="isSectionCollapsed(section)"
 						@update:collapsed="(collapsed) => setSectionCollapsed(section.key, collapsed)"
 					>
-						<template #sidebar-item="{ item }">
-							<SidebarItem
+						<SidebarItem
+							v-for="item in section.items"
+							:key="item.label"
 								:label="item.label"
 								:icon="item.icon"
 								:to="item.to"
+								:class="
+									threadDrag.overMailbox.value === item.mailboxId &&
+									'ring-2 ring-outline-gray-3 ring-inset'
+								"
+								@dragover="onFolderDragOver($event, item)"
+								@dragleave="onFolderDragLeave(item)"
+								@drop="onFolderDrop($event, item)"
 								:active="
 									item.activeFor?.includes(
 										['mail-mailbox', 'mail-mail'].includes(route.name as string)
@@ -71,12 +79,11 @@
 										</span>
 									</div>
 								</template>
-							</SidebarItem>
-						</template>
+						</SidebarItem>
 					</SidebarSection>
 				</div>
 
-				<div class="mt-auto">
+				<div class="mt-auto p-2">
 					<!-- Personal widgets (events, quota) are meaningless while administering the server. -->
 					<UpcomingEvents
 						v-if="user.data.is_jmap_configured && !route.meta.isDashboard"
@@ -116,10 +123,9 @@
 import { computed, h, inject, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useStorage } from '@vueuse/core'
-import { Icon } from 'frappe-ui/icons'
-import { Check, Keyboard, User } from 'lucide-vue-next'
+import { Icon } from 'frappe-ui/experimental'
+import { Keyboard, User } from 'lucide-vue-next'
 import {
-	Avatar,
 	Button,
 	Dropdown,
 	Sidebar,
@@ -129,10 +135,12 @@ import {
 	SidebarSection,
 } from 'frappe-ui'
 
+import { accountSubmenu } from '@/composables/accountSubmenu'
 import { useAppSwitcher } from '@/composables/useAppSwitcher'
 import { FOLDER_ICON_COLOR_MAP } from '@/apps/mail/constants'
-import { getIcon, getMailboxName, toTitleCase } from '@/apps/mail/utils'
+import { canMoveToMailbox, getIcon, getMailboxName, toTitleCase } from '@/apps/mail/utils'
 import { useAccountSwitch, useScreenSize, useSettings, useSidebar } from '@/apps/mail/utils/composables'
+import { useThreadDrag } from '@/apps/mail/composables/useThreadDrag'
 import { sessionStore } from '@/apps/mail/stores/session'
 import { SECONDARY_MAILBOX_ROLES, userStore } from '@/apps/mail/stores/user'
 import MailLogo from '@/apps/mail/components/Icons/MailLogo.vue'
@@ -148,6 +156,7 @@ import type { MailboxData } from '@/apps/mail/types'
 
 import ArrowLeft from '~icons/lucide/arrow-left'
 import BookUser from '~icons/lucide/book-user'
+import CalendarClock from '~icons/lucide/calendar-clock'
 import Clock from '~icons/lucide/clock'
 import ContactRound from '~icons/lucide/contact-round'
 import Crown from '~icons/lucide/crown'
@@ -197,6 +206,41 @@ const { logout, branding } = sessionStore()
 const store = userStore()
 const { mailboxes, allInboxesUnread } = store
 
+// ── Threads dropped onto a folder ─────────────────────────────────────────────────────────────────
+// The rows are dragged in the view; the folders that take them are here. The move itself belongs to
+// the view too — the sidebar only says which folder the cursor is over, and hands the drop back.
+const threadDrag = useThreadDrag()
+
+/**
+ * Folders that can take a drop: exactly the ones the "Move to" menu offers, read from the same
+ * predicate so the two lists cannot drift. That rules out the mailbox the thread is already in,
+ * along with Sent, Drafts and the Screener; Junk and Trash stay in, since handleMoveThreads reads
+ * those as "mark as spam" and "delete", which is what dropping there means. Sidebar entries that
+ * are not real mailboxes — Starred, All Inboxes, Outbox — have no id and fall out on their own.
+ */
+const canDrop = (item: { mailboxId?: string }) =>
+	threadDrag.isDragging.value &&
+	!!mailboxes.data?.some((m: MailboxData) => m.id === item.mailboxId) &&
+	canMoveToMailbox(item.mailboxId, route.params.mailbox as string, store.mailboxIds)
+
+const onFolderDragOver = (e: DragEvent, item: { mailboxId?: string }) => {
+	if (!canDrop(item)) return
+	// Without preventDefault the browser refuses the drop and shows the "no" cursor.
+	e.preventDefault()
+	if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+	threadDrag.overMailbox.value = item.mailboxId!
+}
+
+const onFolderDragLeave = (item: { mailboxId?: string }) => {
+	if (threadDrag.overMailbox.value === item.mailboxId) threadDrag.overMailbox.value = ''
+}
+
+const onFolderDrop = (e: DragEvent, item: { mailboxId?: string }) => {
+	if (!canDrop(item)) return
+	e.preventDefault()
+	threadDrag.drop(item.mailboxId!)
+}
+
 const user = inject('$user')
 
 const appsMenuOption = useAppSwitcher('mail')
@@ -239,7 +283,7 @@ const goToMailbox = () => {
 const menuItems = computed(() => [
 	{
 		group: '',
-		items: [
+		options: [
 			{
 				...appsMenuOption.value,
 				condition: () => !isMobile.value,
@@ -267,7 +311,7 @@ const menuItems = computed(() => [
 	},
 	{
 		group: '',
-		items: [
+		options: [
 			{
 				icon: Settings,
 				label: __('Settings'),
@@ -283,25 +327,11 @@ const menuItems = computed(() => [
 	},
 	{
 		group: '',
-		items: [
+		options: [
 			{
 				icon: User,
 				label: __('Accounts'),
-				submenu: user.data.accounts.map?.((a) => ({
-					component: h(
-						'div',
-						{
-							class: 'flex items-center gap-2 p-1.5 rounded hover:bg-surface-gray-2 cursor-pointer w-48 shrink-0',
-							onClick: () => switchAccount(a.id),
-						},
-						[
-							h(Avatar, { label: a._name, size: 'md' }),
-							h('span', { class: 'text-sm w-full truncate' }, a._name),
-							a.id === store.accountId &&
-								h(Check, { label: a._name, class: 'shrink-0 icon' }),
-						],
-					),
-				})),
+				submenu: accountSubmenu(user.data.accounts, store.accountId, switchAccount),
 				condition: () => user.data.accounts?.length > 1 && !route.meta.isDashboard,
 			},
 			{
@@ -465,7 +495,7 @@ const mailboxItems = computed(
 								params: { accountId: store.accountId, mailbox: mailbox.id },
 							},
 					suffix: mailbox.unread_threads ? String(mailbox.unread_threads) : '',
-					activeFor: isScreener ? ['mail-screener'] : [mailbox.id],
+					activeFor: isScreener ? ['mail-screener', 'mail-screener-sender'] : [mailbox.id],
 					menuOptions: isScreener
 						? undefined
 						: [
@@ -543,7 +573,15 @@ const sidebarItems = computed(() => {
 		to: { name: 'mail-mailbox', params: { accountId: store.accountId, mailbox: 'starred' } },
 		activeFor: ['starred'],
 	}
-	const defaultItems = [...defaultMailboxes, starredItem]
+	// Synthetic like Starred, but backed by the server's held (FUTURERELEASE)
+	// EmailSubmissions rather than a mailbox, so it opens a dedicated page.
+	const outboxItem = {
+		label: __('Outbox'),
+		icon: CalendarClock,
+		to: { name: 'mail-outbox', params: { accountId: store.accountId } },
+		activeFor: ['mail-outbox', 'mail-submission'],
+	}
+	const defaultItems = [...defaultMailboxes, starredItem, outboxItem]
 
 	const secondaryItems = mailboxItems.value
 		.filter((item) => {

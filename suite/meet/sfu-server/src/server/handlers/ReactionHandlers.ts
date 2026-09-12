@@ -2,33 +2,33 @@ import type { Socket } from 'socket.io';
 import type { ReactionMessage } from '../../types';
 import { loggers } from '../../utils/logger';
 import type { HandlerDeps } from './Handler';
+import { ensureParticipantOwner } from './utils';
 
 export function registerReactionHandlers(deps: HandlerDeps) {
 	return (socket: Socket) => {
 		socket.on('reaction:send', (data = {}) => {
 			try {
 				deps.authManager.ensureFullAccess(socket);
-				const roomId = socket.roomId;
+				const { roomId, participantId } = ensureParticipantOwner(
+					socket,
+					deps.registry,
+				);
 				const reaction =
 					typeof data.reaction === 'string' ? data.reaction : null;
 
-				if (!roomId || !reaction || !socket.participantId) {
+				if (!reaction) {
 					return;
 				}
 
 				const payload: ReactionMessage = {
 					roomId,
 					reaction,
-					fromUser: socket.participantId,
+					fromUser: participantId,
 					fromName: socket.userName,
 					timestamp: new Date().toISOString(),
 				};
 
-				deps.registry.emitToFullAccessParticipants(
-					roomId,
-					'reaction:message',
-					payload,
-				);
+				deps.registry.emitReaction(roomId, payload);
 			} catch (e) {
 				loggers.socketHandler.warn(
 					'reaction:send handling failed: %s',

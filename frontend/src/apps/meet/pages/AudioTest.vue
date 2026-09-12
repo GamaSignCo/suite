@@ -3,15 +3,15 @@
 <template>
 	<div class="min-h-screen bg-gray-50 flex items-center justify-center p-8">
 		<div class="max-w-2xl mx-auto">
-			<div class="bg-white rounded-lg shadow-lg p-8">
+			<div class="bg-white rounded-6 shadow-lg p-8">
 				<div class="text-center mb-8">
-					<h1 class="text-5xl-bold text-gray-900 mb-2">Audio Notification Test</h1>
+					<h1 class="text-4xl-bold text-gray-900 mb-2">Audio Notification Test</h1>
 					<p class="text-gray-600">Test and tune the meeting notification sounds</p>
 				</div>
 
 				<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
 					<!-- Join Notification -->
-					<div class="bg-green-50 border border-green-200 rounded-lg p-6">
+					<div class="bg-green-50 border border-green-200 rounded-6 p-6">
 						<div class="flex items-center mb-4">
 							<div class="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center mr-3">
 								<lucide-user-plus class="w-5 h-5 text-green-600" />
@@ -39,7 +39,7 @@
 					</div>
 
 					<!-- Leave Notification -->
-					<div class="bg-red-50 border border-red-200 rounded-lg p-6">
+					<div class="bg-red-50 border border-red-200 rounded-6 p-6">
 						<div class="flex items-center mb-4">
 							<div class="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center mr-3">
 								<lucide-user-minus class="w-5 h-5 text-red-600" />
@@ -67,7 +67,7 @@
 					</div>
 
 					<!-- Join Request Notification -->
-					<div class="bg-blue-50 border border-blue-200 rounded-lg p-6">
+					<div class="bg-blue-50 border border-blue-200 rounded-6 p-6">
 						<div class="flex items-center mb-4">
 							<div class="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center mr-3">
 								<lucide-user-check class="w-5 h-5 text-blue-600" />
@@ -95,7 +95,7 @@
 					</div>
 
 					<!-- Chat Notification -->
-					<div class="bg-purple-50 border border-purple-200 rounded-lg p-6">
+					<div class="bg-purple-50 border border-purple-200 rounded-6 p-6">
 						<div class="flex items-center mb-4">
 							<div class="w-10 h-10 bg-purple-100 rounded-full flex items-center justify-center mr-3">
 								<lucide-message-circle class="w-5 h-5 text-purple-600" />
@@ -123,7 +123,7 @@
 					</div>
 
 					<!-- Hand Raise Notification -->
-					<div class="bg-orange-50 border border-orange-200 rounded-lg p-6">
+					<div class="bg-orange-50 border border-orange-200 rounded-6 p-6">
 						<div class="flex items-center mb-4">
 							<div class="w-10 h-10 bg-orange-100 rounded-full flex items-center justify-center mr-3">
 								<lucide-hand class="w-5 h-5 text-orange-600" />
@@ -135,7 +135,7 @@
 						</div>
 						<Button
 							variant="solid"
-							theme="orange"
+							theme="amber"
 							class="w-full"
 							@click="playRaiseHandNotification"
 							:disabled="isPlaying"
@@ -173,12 +173,12 @@
 				</div>
 
 				<!-- Instructions -->
-				<div class="mt-6 p-4 bg-gray-50 rounded-lg">
+				<div class="mt-6 p-4 bg-gray-50 rounded-6">
 					<h4 class="font-semibold text-gray-900 mb-2">Testing Tips:</h4>
 					<ul class="text-sm text-gray-600 space-y-1">
 						<li>• Click individual buttons to test each notification</li>
 						<li>• Use "Play All" to compare sounds in sequence</li>
-						<li>• Edit frequencies/timing in <code class="bg-gray-200 px-1 rounded">audioNotifications.ts</code></li>
+						<li>• Edit frequencies/timing in <code class="bg-gray-200 px-1 rounded-4">audioNotifications.ts</code></li>
 						<li>• Refresh page after code changes to test updates</li>
 						<li>• Check browser console for any AudioContext errors</li>
 					</ul>

@@ -2,13 +2,13 @@
 	<div class="block pt-2 text-sm">
 		<span class="text-ink-gray-6 mb-2 block leading-4">{{ label }}</span>
 		<button
-			class="bg-surface-gray-2 flex w-full items-center rounded-lg border-2 p-1"
+			class="bg-surface-gray-2 flex w-full items-center rounded-6 border-2 p-1"
 			@click="copyToClipBoard(value)"
 		>
 			<span class="scrollbar-none text-ink-gray-7 mr-1.5 overflow-x-scroll text-nowrap">
 				{{ value }}
 			</span>
-			<span class="bg-surface-base text-ink-gray-5 ml-auto rounded border p-1 text-xs">
+			<span class="bg-surface-base text-ink-gray-5 ml-auto rounded-4 border p-1 text-xs">
 				{{ message }}
 			</span>
 		</button>

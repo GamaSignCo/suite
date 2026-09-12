@@ -1,6 +1,6 @@
 <template>
-	<Dialog v-model="show" :options="options">
-		<template #body-content>
+	<Dialog v-model:open="show" v-bind="options">
+		<template #default>
 			<div class="space-y-4">
 				<FormControl
 					v-model="selectFrom"
@@ -34,14 +34,8 @@
 import { computed, ref, useTemplateRef } from 'vue'
 import { useDebounceFn, watchDebounced } from '@vueuse/core'
 import {
-	Dialog,
-	FormControl,
-	ListEmptyState,
-	ListHeader,
-	ListRows,
-	ListView,
-	createResource,
-} from 'frappe-ui'
+	Dialog, FormControl, createResource } from 'frappe-ui'
+import { ListEmptyState, ListHeader, ListRows, ListView } from 'frappe-ui/experimental'
 
 import { extractNameFromEmail } from '@/apps/mail/utils'
 import { userStore } from '@/apps/mail/stores/user'

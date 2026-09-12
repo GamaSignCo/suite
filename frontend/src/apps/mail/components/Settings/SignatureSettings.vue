@@ -2,7 +2,7 @@
 	<AppSettingsHeader :title="__('Signatures')">
 		<template #actions>
 			<Button
-				icon-left="plus"
+				icon-left="lucide-plus"
 				:label="__('New')"
 				:size="isMobile ? 'md' : 'sm'"
 				@click="showAddSignature = true"
@@ -14,7 +14,7 @@
 			<div
 				v-for="signature in signatures?.data"
 				:key="signature.name"
-				class="hover:bg-surface-gray-1 -mx-2 flex cursor-pointer items-center justify-between rounded px-3 py-1 max-sm:-mx-4 max-sm:px-4 max-sm:py-2"
+				class="hover:bg-surface-gray-1 -mx-2 flex cursor-pointer items-center justify-between rounded-4 px-3 py-1 max-sm:-mx-4 max-sm:px-4 max-sm:py-2"
 				@click="editSignature(signature.name)"
 			>
 				<span class="text-base">{{ signature.signature_name }}</span>
@@ -54,7 +54,7 @@
 <script setup lang="ts">
 import { inject, ref } from 'vue'
 import { Edit2, Ellipsis, Pin, Trash2 } from 'lucide-vue-next'
-import { Button, useList } from 'frappe-ui'
+import { Button, toast, useList } from 'frappe-ui'
 
 import { useScreenSize } from '@/apps/mail/utils/composables'
 import AppSettingsHeader from '@/components/settings/AppSettingsHeader.vue'
@@ -107,7 +107,13 @@ const signatureOptions = (signature: MailSignature) => [
 		label: __('Delete'),
 		icon: Trash2,
 		theme: 'red',
-		onClick: () => signatures.delete.submit({ name: signature.name }),
+		onClick: async () => {
+			try {
+				await signatures.delete.submit({ name: signature.name })
+			} catch (e) {
+				toast.error(e instanceof Error ? e.message : __('Could not delete signature'))
+			}
+		},
 	},
 ]
 </script>

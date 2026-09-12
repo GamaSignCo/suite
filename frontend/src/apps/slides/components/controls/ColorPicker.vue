@@ -1,29 +1,28 @@
 <template>
-	<Popover @open="syncCurrentColor">
-		<template #target="{ togglePopover, isOpen }">
+	<Popover bare @update:open="(open) => open && syncCurrentColor()">
+		<template #trigger>
 			<div
-				class="me-0.5 size-4 cursor-pointer rounded-sm ring-[1.5px] ring-outline-gray-2 ring-offset-1"
+				class="me-0.5 size-4 cursor-pointer rounded-1 ring-[1.5px] ring-outline-gray-2 ring-offset-1"
 				:style="{ backgroundColor: currentColor }"
-				@click="handleColorPickerClick(togglePopover, isOpen)"
 			></div>
 		</template>
-		<template #body>
-			<div class="m-2 rounded-lg border bg-surface-elevation-2 p-3 shadow-xl">
+		<template #default>
+			<div class="m-2 rounded-6 border border-outline-elevation-2 bg-surface-elevation-2 p-3 shadow-xl">
 				<div class="flex flex-col gap-3">
 					<div
 						ref="shadeSlider"
-						class="cursor-pointer rounded-t shadow-xl"
+						class="cursor-pointer rounded-t-4 shadow-xl"
 						:style="shadeStyles"
 						@mousedown="handleUpdateShade"
 					>
 						<div
-							class="relative size-3 rounded border shadow-md transition-transform duration-200 ease-in-out hover:scale-[1.2]"
+							class="relative size-3 rounded-4 border shadow-md transition-transform duration-200 ease-in-out hover:scale-[1.2]"
 							:style="shadeRectStyles"
 						></div>
 					</div>
 					<div class="flex h-8 justify-between py-1">
 						<div
-							class="h-full w-6 rounded-sm ring-1 ring-outline-gray-1 ring-offset-1"
+							class="h-full w-6 rounded-1 ring-1 ring-outline-gray-1 ring-offset-1"
 							:style="{ backgroundColor: currentColor }"
 						></div>
 						<div class="flex flex-col justify-between px-1">
@@ -58,19 +57,20 @@
 							placeholder="Set Color"
 							:aria-label="'Hex color input'"
 							:value="getDisplayColor()"
-							class="max-w-[94px] border-none text-sm uppercase"
+							class="max-w-[94px] border-none text-sm"
 							@update:modelValue="
 								(val) => {
 									setColor(val)
 								}
 							"
+							@keydown.enter.prevent.stop="(e) => e.target.blur()"
 							@click="handleColorInputClick"
 						/>
 
 						<div class="flex justify-center">
 							<Button
 								@click="handleClipboardCopy"
-								class="flex items-center justify-center rounded text-ink-gray-6 transition-colors hover:bg-surface-gray-3"
+								class="flex items-center justify-center rounded-4 text-ink-gray-6 transition-colors hover:bg-surface-gray-3"
 								title="Copy Color"
 							>
 								<LucideClipboard class="size-3.5 text-ink-gray-7" />
@@ -81,7 +81,7 @@
 							<Button
 								v-if="isSupported"
 								@click="openEyeDropper"
-								class="flex items-center justify-center rounded transition-colors hover:bg-surface-gray-3"
+								class="flex items-center justify-center rounded-4 transition-colors hover:bg-surface-gray-3"
 								title="Pick color from screen"
 							>
 								<EyeDropper class="size-3.5 text-ink-gray-7" />
@@ -98,7 +98,7 @@
 import { ref, unref, computed, useTemplateRef, watch } from 'vue'
 import { useElementBounding, useEyeDropper } from '@vueuse/core'
 
-import { Button, Popover, Input } from 'frappe-ui'
+import { Button, Popover, TextInput as Input } from 'frappe-ui'
 
 import { copyToClipboard } from '@/apps/slides/stores/copyPaste'
 import EyeDropper from '@/apps/slides/icons/EyeDropper.vue'
@@ -119,9 +119,9 @@ const SLIDER_WIDTH = 125
 const SHADE_RECT_WIDTH = 170
 const SHADE_RECT_HEIGHT = 130
 
-const sliderClasses = 'h-1/5 rounded cursor-pointer'
+const sliderClasses = 'h-1/5 rounded-4 cursor-pointer'
 const sliderCursorClasses =
-	'relative size-[0.8rem] rounded shadow border border-outline-gray-2 bg-white hover:scale-[1.1] transition-transform duration-200 ease-in-out'
+	'relative size-[0.8rem] rounded-4 shadow border bg-white hover:scale-[1.1] transition-transform duration-200 ease-in-out'
 
 const currentColor = defineModel()
 
@@ -300,38 +300,42 @@ watch(sRGBHex, (newColor) => {
 })
 
 const setColor = (newColor) => {
-	if (!tinycolor(newColor).isValid()) {
+	const parsed = tinycolor(newColor)
+	if (!parsed.isValid()) {
 		revertKey.value++
 		return
 	}
+
+	// keep the slider's transparency unless the typed value carries its own alpha
+	if (parsed.getAlpha() === 1 && currentOpacity.value < 1) {
+		parsed.setAlpha(currentOpacity.value)
+	}
+
 	emit('colordown')
-	currentColor.value = newColor
-	const initialHsv = tinycolor(newColor).toHsv()
+	currentColor.value = parsed.toHex8String()
+	const initialHsv = parsed.toHsv()
 	colorHue.value = initialHsv.h
 	colorSaturation.value = initialHsv.s
 	colorValue.value = initialHsv.v
 	currentOpacity.value = initialHsv.a
 	currentHue.value = tinycolor({ h: colorHue.value, s: 1, l: 0.5 })
 	emit('colorup')
+
+	// remount the input so the display re-syncs to the normalized value
+	revertKey.value++
 }
 
 const getDisplayColor = () => {
 	if (!currentColor.value) return ''
-	return tinycolor(currentColor.value).toHex8String()
+	return tinycolor(currentColor.value).toHexString().toUpperCase()
 }
 
 const handleClipboardCopy = () => {
-	const color = getDisplayColor().toUpperCase()
-	copyToClipboard(color)
+	copyToClipboard(getDisplayColor())
 }
 
 const handleColorInputClick = (e) => {
 	e.target.select()
-}
-
-const handleColorPickerClick = (togglePopover, isOpen) => {
-	if (!isOpen) syncCurrentColor()
-	togglePopover()
 }
 
 watch(

@@ -2,7 +2,7 @@
 	<AppSettingsHeader :title="__('Folders')">
 		<template #actions>
 			<Button
-				icon-left="plus"
+				icon-left="lucide-plus"
 				:label="__('New')"
 				:size="isMobile ? 'md' : 'sm'"
 				@click="editMailbox()"
@@ -14,7 +14,7 @@
 			<div
 				v-for="mailbox in managedMailboxes"
 				:key="mailbox.name"
-				class="hover:bg-surface-gray-1 -mx-2 flex cursor-pointer items-center justify-between rounded px-3 py-1 max-sm:-mx-4 max-sm:px-4 max-sm:py-2"
+				class="hover:bg-surface-gray-1 -mx-2 flex cursor-pointer items-center justify-between rounded-4 px-3 py-1 max-sm:-mx-4 max-sm:px-4 max-sm:py-2"
 				@click="editMailbox(mailbox)"
 			>
 				<div class="flex items-center gap-2 max-sm:gap-3">
@@ -58,7 +58,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { Icon } from 'frappe-ui/icons'
+import { Icon } from 'frappe-ui/experimental'
 import { Ellipsis, Eye, EyeOff, Settings, Trash2 } from 'lucide-vue-next'
 import {
 	Button,

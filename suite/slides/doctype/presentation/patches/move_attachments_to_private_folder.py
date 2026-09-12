@@ -95,6 +95,10 @@ def get_updated_elements(elements, presentation_name):
 
 
 def execute():
+    if not frappe.db.has_column("Presentation", "is_public"):
+        # The legacy flag never existed on this site — nothing to move.
+        return
+
     presentations = frappe.get_all("Presentation", filters={"is_public": 1, "is_composite": 0}, pluck="name")
 
     for presentation_name in presentations:

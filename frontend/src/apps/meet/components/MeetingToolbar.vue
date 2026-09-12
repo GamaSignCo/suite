@@ -17,6 +17,7 @@
 				<!-- Microphone -->
 				<ToolbarButton
 					:variant="isMicOn ? 'default' : 'muted'"
+					:show-tooltip="isVisible"
 					:title="`Toggle Audio (${$platform === 'mac' ? '⌘+D' : 'Ctrl+D'})`"
 					@click="$emit('toggle-microphone')"
 				>
@@ -27,6 +28,7 @@
 				<!-- Camera -->
 				<ToolbarButton
 					:variant="isCameraOn ? 'default' : 'muted'"
+					:show-tooltip="isVisible"
 					:title="`Toggle Video (${$platform === 'mac' ? '⌘+E' : 'Ctrl+E'})`"
 					@click="$emit('toggle-camera')"
 				>
@@ -38,6 +40,7 @@
 				<ToolbarButton
 					v-if="canScreenShare()"
 					:variant="isScreenSharing ? 'muted' : 'default'"
+					:show-tooltip="isVisible"
 					title="Toggle Screen Share"
 					@click="$emit('toggle-screen-share')"
 				>
@@ -48,6 +51,7 @@
 				<!-- Raise Hand -->
 				<ToolbarButton
 					:variant="isHandRaised ? 'muted' : 'default'"
+					:show-tooltip="isVisible"
 					title="Raise Hand"
 					@click="$emit('toggle-raise-hand')"
 				>
@@ -62,6 +66,7 @@
 				>
 					<template #trigger>
 						<ToolbarButton
+							:show-tooltip="isVisible"
 							title="Reactions"
 							@click="() => {}"
 						>
@@ -72,13 +77,13 @@
 
 				<!-- More Options -->
 				<div class="relative">
-					<Dropdown :options="moreOptions" placement="top">
+					<Dropdown :options="moreOptions">
 						<template #default>
 							<Button
 								size="lg"
 								variant="ghost"
 								label="More options"
-								tooltip="More options"
+								:tooltip="isVisible ? 'More options' : undefined"
 							>
 								<template #icon>
 									<MeetSettingsIcon />
@@ -91,6 +96,7 @@
 				<!-- End Call -->
 				<ToolbarButton
 					variant="active"
+					:show-tooltip="isVisible"
 					title="End Call"
 					@click="$emit('end-call')"
 				>
@@ -105,10 +111,17 @@
 				@mouseenter="onMouseEnter"
 				@mouseleave="onMouseLeave"
 			>
+				<MeetingInfoPopover
+					v-model:open="showMeetingInfo"
+					:meeting-id="meetingId"
+					:show-tooltip="isVisible"
+				/>
+
 				<!-- People -->
 				<ToolbarButton
 					v-if="!isMobile"
 					:active="isPeopleOpen"
+					:show-tooltip="isVisible"
 					variant="default"
 					title="Show Participants"
 					@click="$emit('toggle-people')"
@@ -124,6 +137,7 @@
 				<ToolbarButton
 					v-if="!isMobile"
 					:active="isChatOpen"
+					:show-tooltip="isVisible"
 					variant="default"
 					title="Show Chat"
 					@click="$emit('toggle-chat')"
@@ -138,12 +152,6 @@
 			</div>
 		</div>
 	</div>
-
-	<MeetingInfoDialog
-		v-model="showMeetingInfoDialog"
-		:meetingId="meetingId"
-		:meetingTitle="meetingTitle"
-	/>
 
 	<SettingsDialog
 		v-model="showSettingsDialog"
@@ -165,8 +173,6 @@ import {
 } from "vue";
 import LucideBug from "~icons/lucide/bug";
 import { useE2EEState } from "../composables/useE2EEState";
-import { useMeetingDoc } from "../composables/useMeetingDoc";
-import { usePlatform } from "../composables/usePlatform";
 import { useResponsiveGrid } from "../composables/useResponsiveGrid";
 import { autoHideToolbar } from "../data/mediaPreferences";
 import MeetCameraIcon from "../icons/MeetCameraIcon.vue";
@@ -181,13 +187,13 @@ import MeetPresentIcon from "../icons/MeetPresentIcon.vue";
 import MeetPresentPauseIcon from "../icons/MeetPresentPauseIcon.vue";
 import MeetSettingsIcon from "../icons/MeetSettingsIcon.vue";
 import MeetSmileIcon from "../icons/MeetSmileIcon.vue";
-import { canScreenShare } from "../utils/device";
-import MeetingInfoDialog from "./MeetingInfoDialog.vue";
+import { canScreenShare, getPlatform } from "../utils/device";
+import MeetingInfoPopover from "./MeetingInfoPopover.vue";
 import ReactionPicker from "./ReactionPicker.vue";
 import SettingsDialog from "./settings/SettingsDialog.vue";
 import ToolbarButton from "./ToolbarButton.vue";
 
-const $platform = usePlatform();
+const $platform = getPlatform();
 
 interface MoreOption {
 	icon: string | Component;
@@ -212,6 +218,9 @@ const props = defineProps<{
 	statsVisible?: boolean;
 	cameraPermissionGranted?: boolean;
 	microphonePermissionGranted?: boolean;
+	canManageRecording?: boolean;
+	recordingStatus?: string;
+	recordingLoading?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -229,28 +238,38 @@ const emit = defineEmits<{
 	"device-changed": [event: unknown];
 	"update:isReactionPickerOpen": [value: boolean];
 	"visibility-change": [visible: boolean];
+	"manage-recording": [];
 }>();
 
 const { isMobile } = useResponsiveGrid();
 const { isContextReady: isE2EEContextReady } = useE2EEState();
 
 const moreOptions = computed(() => [
-	{
-		icon: "lucide-settings",
-		label: "Settings",
-		onClick: () => {
-			showSettingsDialog.value = true;
-			resetHideTimer();
-		},
-	},
-	{
-		icon: "lucide-info",
-		label: "Meeting information",
-		onClick: () => {
-			showMeetingInfoDialog.value = true;
-			resetHideTimer();
-		},
-	},
+	...(props.canManageRecording
+		? [
+				{
+					icon: ["Recording", "Interrupted", "Stopping"].includes(
+						props.recordingStatus || "",
+					)
+						? "lucide-circle-stop"
+						: "lucide-disc",
+					label: props.recordingStatus === "Pending"
+						? "Starting recording..."
+						: ["Recording", "Interrupted", "Stopping"].includes(
+						props.recordingStatus || "",
+					)
+						? "Stop recording"
+						: "Start recording",
+					disabled:
+						props.recordingLoading ||
+						["Pending", "Stopping"].includes(props.recordingStatus || ""),
+					onClick: () => {
+						emit("manage-recording");
+						resetHideTimer();
+					},
+				},
+			]
+		: []),
 	{
 		icon: "lucide-activity",
 		label: props.statsVisible ? "Hide stats for nerds" : "Stats for nerds",
@@ -260,19 +279,19 @@ const moreOptions = computed(() => [
 		},
 	},
 	{
-		icon: props.isFullscreen ? "lucide-minimize" : "lucide-maximize",
-		label: props.isFullscreen ? "Exit full screen" : "Enter full screen",
-		onClick: () => {
-			emit("toggle-fullscreen");
-			resetHideTimer();
-		},
-	},
-	{
 		icon: LucideBug,
 		label: "Report an issue",
 		onClick: () => {
 			emit("report-problem");
 			resetHideTimer(true);
+		},
+	},
+	{
+		icon: props.isFullscreen ? "lucide-minimize" : "lucide-maximize",
+		label: props.isFullscreen ? "Exit full screen" : "Enter full screen",
+		onClick: () => {
+			emit("toggle-fullscreen");
+			resetHideTimer();
 		},
 	},
 	...(isMobile.value
@@ -293,11 +312,19 @@ const moreOptions = computed(() => [
 				},
 			]
 		: []),
+	{
+		icon: "lucide-settings",
+		label: "Settings",
+		onClick: () => {
+			showSettingsDialog.value = true;
+			resetHideTimer();
+		},
+	},
 ]);
 
 const isVisible = ref(true);
 const isHovering = ref(false);
-const showMeetingInfoDialog = ref(false);
+const showMeetingInfo = ref(false);
 const showSettingsDialog = ref(false);
 const showMeetingInfoWhenE2EEReady = ref(false);
 let hideTimeout = null;
@@ -350,6 +377,17 @@ const onMouseLeave = () => {
 const handleShortcut = (event) => {
 	if (
 		(event.ctrlKey || event.metaKey) &&
+		event.shiftKey &&
+		event.key.toLowerCase() === "f"
+	) {
+		event.preventDefault();
+		emit("toggle-fullscreen");
+		showControls();
+		return;
+	}
+
+	if (
+		(event.ctrlKey || event.metaKey) &&
 		["d", "e"].includes(event.key.toLowerCase())
 	) {
 		showControls();
@@ -362,7 +400,7 @@ const handleHostE2EEEnabled = () => {
 
 const showMeetingInfoForReadyE2EE = () => {
 	showMeetingInfoWhenE2EEReady.value = false;
-	showMeetingInfoDialog.value = true;
+	showMeetingInfo.value = true;
 	showControls();
 };
 const handleReactionSelect = (emoji) => {

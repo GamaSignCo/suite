@@ -1,40 +1,70 @@
 <template>
+	<!-- Variant B of the Invite strip design doc: the generic calendar glyph carries no
+	     information, so it becomes the date itself — scannable down a thread at a glance — and
+	     the RSVP trio becomes a segmented control, the one thing three outline buttons can't do:
+	     hold a selection. -->
 	<div
 		v-if="invite"
-		class="text-ink-gray-6 mb-3 flex flex-col gap-3 rounded border p-2.5 px-4 sm:flex-row sm:items-center"
+		class="border-outline-gray-2 bg-surface-base mb-3 flex flex-col gap-3 rounded-4 border px-4 py-3 sm:flex-row sm:items-center"
 	>
-		<div class="flex min-w-0 flex-1 items-center gap-3">
-			<CalendarPlus class="h-4.5 w-4.5 shrink-0 stroke-1.5" />
+		<!-- Opening the event is the first thing anyone tries to tap, so the target is the dates and
+		     the text together rather than the title alone — but it stops at the content: no flex-1,
+		     or the empty space between the strip's two halves would answer to a click. Only offered
+		     once the event is on a calendar of the reader's: the detail panel is a view of a real
+		     event, not of a parsed preview. -->
+		<component
+			:is="canViewEvent ? 'button' : 'div'"
+			:type="canViewEvent ? 'button' : undefined"
+			class="flex min-w-0 max-w-full items-center gap-3.5 self-start text-left sm:self-center"
+			@click="openEventDetail"
+		>
+			<!-- A span gets a chip per end: one chip can only ever claim one date. The arrow between
+			     them is what keeps 17 → 19 from reading as two unrelated events. -->
+			<div class="flex shrink-0 items-center gap-1.5">
+				<template v-for="(chip, index) in chips" :key="index">
+					<ArrowRight v-if="index" class="text-ink-gray-4 size-3 shrink-0 stroke-1.5" />
+					<DateChip :month="chip.month" :day="chip.day" />
+				</template>
+			</div>
 			<div class="min-w-0 flex-1">
-				<span class="text-ink-gray-8 block truncate">
+				<!-- The strip is the only place the event is named, so at 393px — where a real title
+				     rarely fits on one line — it wraps to two rather than truncating. -->
+				<span class="text-ink-gray-8 text-base-medium line-clamp-2 sm:line-clamp-1">
 					{{ invite.event.title || __('Untitled event') }}
 				</span>
-				<span v-if="whenLabel" class="block truncate">{{ whenLabel }}</span>
-				<span v-if="locationLabel" class="block truncate">{{ locationLabel }}</span>
+				<span v-if="whenLabel" class="text-ink-gray-5 mt-0.5 block truncate text-sm">
+					{{ whenLabel }}
+				</span>
+				<span v-if="locationLabel" class="text-ink-gray-5 block truncate text-sm">
+					{{ locationLabel }}
+				</span>
 			</div>
-		</div>
-		<div class="flex shrink-0 items-center justify-end gap-3">
-			<template v-if="invite.participant">
-				<span>{{ __('Going?') }}</span>
-				<div class="flex items-center gap-1.5">
-					<Button
-						v-for="option in RSVP_OPTIONS"
-						:key="option.value"
-						:label="option.label"
-						:variant="currentResponse === option.value ? 'solid' : 'outline'"
-						:loading="rsvp.loading && pendingResponse === option.value"
-						@click="handleRsvp(option.value)"
-					/>
-				</div>
-			</template>
+		</component>
+		<div class="flex shrink-0 items-center justify-end sm:ml-auto">
+			<!-- On mobile the answers get the width the row was already spending: full-bleed, and
+			     40px tall inside a 44px control, against the ~26px the intrinsic-width version gave
+			     them. Same overrides the calendar app's event detail sidebar uses, held to max-sm so
+			     the desktop strip keeps its compact right-aligned control. -->
+			<TabButtons
+				v-if="invite.participant"
+				class="max-sm:w-full max-sm:[&>div>[data-slot=tab-button]]:flex-1 max-sm:[&>div]:w-full max-sm:[&>div]:p-0.5 max-sm:[&_[data-slot=tab-button]>span]:h-10 max-sm:[&_[data-slot=tab-button]>span]:w-full"
+				:options="RSVP_OPTIONS"
+				:model-value="selectedResponse"
+				@update:model-value="handleRsvp"
+			/>
+			<!-- The single-button states take the same mobile treatment as the RSVP control they
+			     stand in for: whichever one the strip shows, it is the row's one action and gets the
+			     full width and the 40px height. -->
 			<Button
 				v-else-if="!invite.exists"
+				class="max-sm:!h-10 max-sm:w-full"
 				:label="__('Add to Calendar')"
 				:loading="addInvite.loading"
 				@click="addInvite.submit()"
 			/>
 			<Button
 				v-else
+				class="max-sm:!h-10 max-sm:w-full"
 				variant="outline"
 				:label="__('View in Calendar')"
 				@click="viewInCalendar"
@@ -46,12 +76,15 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { CalendarPlus } from 'lucide-vue-next'
-import { Button, createResource } from 'frappe-ui'
+import { ArrowRight } from 'lucide-vue-next'
+import { Button, TabButtons, createResource } from 'frappe-ui'
 
+import DateChip from '@/apps/calendar/components/DateChip.vue'
 import dayjs from '@/apps/calendar/utils/dayjs'
+import { eventLastDay, formatEventWhen, isAllDayEvent } from '@/apps/calendar/utils/eventTime'
 import { eventDayRoute, useUpcomingEvents } from '@/apps/mail/composables/useUpcomingEvents'
 import { raiseToast } from '@/apps/mail/utils'
+import { useScreenSize } from '@/apps/mail/utils/composables'
 
 import type { Attachment } from '@/apps/mail/types'
 
@@ -81,6 +114,8 @@ interface InviteDetails {
 const { attachment, account } = defineProps<{ attachment: Attachment; account: string }>()
 
 const router = useRouter()
+const { isMobile } = useScreenSize()
+const { events: calendarEvents, selectedEvent, openEvent } = useUpcomingEvents()
 
 const details = createResource({
 	url: 'suite.calendar.api.invites.get_invite_details',
@@ -101,20 +136,38 @@ const invite = computed<InviteDetails | null>(() => {
 // reader's, mirroring the calendar app (see @/apps/calendar/utils/datetime).
 const localZone = () => dayjs.tz?.guess?.() || Intl.DateTimeFormat().resolvedOptions().timeZone
 
-const whenLabel = computed(() => {
+const isAllDay = computed(() => !!invite.value?.event && isAllDayEvent(invite.value.event))
+
+const start = computed(() => {
 	const event = invite.value?.event
-	if (!event?.start) return ''
-
-	const start = event.time_zone
-		? dayjs.tz(event.start, event.time_zone).tz(localZone())
-		: dayjs(event.start)
-	if (event.show_without_time) return start.format('dddd, MMM D, YYYY')
-
-	const end = start.add(dayjs.duration(event.duration || 'PT0S'))
-	if (end.isSame(start, 'day'))
-		return `${start.format('dddd, MMM D, YYYY ⋅ h:mm A')} – ${end.format('h:mm A')}`
-	return `${start.format('MMM D, YYYY, h:mm A')} – ${end.format('MMM D, YYYY, h:mm A')}`
+	if (!event?.start) return null
+	// An all-day event falls on the same calendar date for everyone, so it keeps its own wall
+	// clock — moving its midnight into the reader's zone would slide it a day either way.
+	if (isAllDay.value) return dayjs(event.start)
+	if (!event.time_zone) return dayjs(event.start)
+	return dayjs.tz(event.start, event.time_zone).tz(localZone())
 })
+
+// One chip for a single day, two for a span — the last day coming from the formatter rather than
+// the raw end, so the exclusive midnight boundary is walked back in exactly one place.
+const chips = computed(() => {
+	if (!start.value) return []
+	const duration = invite.value?.event.duration
+	const last = eventLastDay(start.value, duration, isAllDay.value)
+	return [start.value, ...(last ? [last] : [])].map((day) => ({
+		month: day.format('MMM'),
+		day: day.format('D'),
+	}))
+})
+
+const whenLabel = computed(() =>
+	start.value
+		? formatEventWhen(start.value, invite.value?.event.duration, {
+				allDay: isAllDay.value,
+				compact: true,
+			})
+		: '',
+)
 
 const locationLabel = computed(() =>
 	(invite.value?.event.locations || [])
@@ -132,17 +185,17 @@ const addInvite = createResource({
 		// refetch could still report the event as missing.
 		details.data = { ...details.data, exists: true, event }
 		raiseToast(__('Event added to your calendar.'))
-		useUpcomingEvents().events.reload()
+		calendarEvents.reload()
 	},
 	onError: (error: { message?: string }) => raiseToast(error.message || '', 'error'),
 })
 
-// --- RSVP (mirrors the calendar app's "Going?" control) ---
+// --- RSVP (the same segmented control the calendar app's event detail sidebar uses) ---
 
 const RSVP_OPTIONS = [
 	{ label: __('Yes'), value: 'ACCEPTED' },
-	{ label: __('No'), value: 'DECLINED' },
 	{ label: __('Maybe'), value: 'TENTATIVE' },
+	{ label: __('No'), value: 'DECLINED' },
 ]
 
 const currentResponse = computed(() => invite.value?.participant?.status || '')
@@ -159,19 +212,49 @@ const rsvp = createResource({
 			participant: { ...details.data.participant, status: pendingResponse.value },
 		}
 		raiseToast(__('Response sent.'))
-		useUpcomingEvents().events.reload()
+		calendarEvents.reload()
+		// The panel isn't fed by that resource when it was opened from here (untracked), so hand it
+		// the fresh copy directly or it would keep showing the previous answer.
+		if (isOpen.value) openEvent(event, { tracked: false })
 	},
 	onError: (error: { message?: string }) => raiseToast(error.message || '', 'error'),
 })
 
-const handleRsvp = (response: string) => {
-	if (rsvp.loading || response === currentResponse.value) return
+// An RSVP is a state, so the control shows the answer as soon as it's tapped, and falls back to
+// the stored one if the request fails.
+const selectedResponse = computed(() =>
+	rsvp.loading ? pendingResponse.value : currentResponse.value,
+)
+
+const handleRsvp = (response?: string | number) => {
+	if (typeof response !== 'string' || rsvp.loading || response === currentResponse.value) return
 	pendingResponse.value = response
 	rsvp.submit(response.toLowerCase())
 }
 
+// Opening the event — in the panel or in the calendar — needs its own id, which only a copy on
+// one of the reader's calendars has; a parsed preview of an invite they haven't added yet has none.
+const canViewEvent = computed(() => !!invite.value?.exists && !!invite.value.event.id)
+
 const viewInCalendar = () => {
 	const event = invite.value?.event
-	if (event?.id) router.push(eventDayRoute(event, account))
+	if (canViewEvent.value && event) router.push(eventDayRoute(event, account))
+}
+
+// Whether the detail panel is currently showing this strip's event.
+const isOpen = computed(
+	() => !!selectedEvent.value && selectedEvent.value.id === invite.value?.event.id,
+)
+
+// Reading an invite and leaving the thread to read the event are different things: the strip
+// opens the same detail panel the sidebar's Upcoming events widget uses, hosted by DefaultLayout,
+// so the message stays where it is. Mobile has no room for that panel (DefaultLayout only mounts
+// it on desktop), so there it still hands over to the calendar app's day view.
+const openEventDetail = () => {
+	const event = invite.value?.event
+	if (!canViewEvent.value || !event) return
+	if (isMobile.value) router.push(eventDayRoute(event, account))
+	else if (isOpen.value) selectedEvent.value = null
+	else openEvent(event, { tracked: false })
 }
 </script>

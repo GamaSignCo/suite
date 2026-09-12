@@ -4,6 +4,8 @@ import { toast } from 'frappe-ui'
 
 import { FOLDER_ICON_MAP, SCREENER_MAILBOX_NAME } from '@/apps/mail/constants'
 import dayjs from '@/apps/mail/utils/dayjs'
+import { flattenMentions } from '@/apps/mail/utils/mentions'
+import { preserveEditorColors } from '@/apps/mail/utils/editorColors'
 import AudioIcon from '@/apps/mail/components/Icons/AudioIcon.vue'
 import ImageIcon from '@/apps/mail/components/Icons/ImageIcon.vue'
 import PDFIcon from '@/apps/mail/components/Icons/PDFIcon.vue'
@@ -42,8 +44,39 @@ export const raiseToast = (
 	message: string,
 	type = 'success',
 	action?: { label: string; onClick: () => void },
+	duration?: number,
+	// A toast can carry two buttons: `action` is the urgent one, `secondaryAction` the aside. The
+	// second is sonner's `cancel` slot — named for its usual job, but it is just a second button, and
+	// frappe-ui already styles it (ToastProvider's `cancelButton`). Sonner dismisses the toast when
+	// it is pressed, which suits anything that navigates away.
+	secondaryAction?: { label: string; onClick: () => void },
 ) => {
-	if (type === 'success') return toast.success(message, action ? { action } : undefined)
+	if (type === 'success')
+		return toast.success(
+			message,
+			action || duration || secondaryAction
+				? {
+						action,
+						duration,
+						cancel: secondaryAction,
+						// frappe-ui styles the two slots for being alone: the action carries `ml-auto` to
+						// sit against the right edge, and the cancel — never used until now — never got
+						// the action's shape. With both present that reads as one button by the message
+						// and another across the toast, in two different styles. Overridden per toast
+						// (sonner merges these over the provider's) so the pair sits together, matching:
+						// the cancel takes the auto margin for both, the action gives its up.
+						...(action && secondaryAction
+							? {
+									classes: {
+										cancelButton:
+											'!ml-auto mr-1 h-7 shrink-0 rounded-4 bg-transparent !transition-colors',
+										actionButton: '!ml-0',
+									},
+								}
+							: {}),
+					}
+				: undefined,
+		)
 
 	const div = document.createElement('div')
 	div.innerHTML = message
@@ -59,7 +92,7 @@ export const raisePromiseToast = (
 	success: string,
 	undoAction?: () => void,
 ) => {
-	toast.removeAll()
+	toast.dismiss()
 
 	const error = __('Action failed. Please try again later.')
 
@@ -84,7 +117,7 @@ export const raiseOptimisticToast = (
 	success: string,
 	undoAction?: () => void,
 ) => {
-	toast.removeAll()
+	toast.dismiss()
 	const id = toast.success(
 		success,
 		undoAction ? { action: { label: __('Undo'), onClick: () => undoAction() } } : undefined,
@@ -177,7 +210,9 @@ export const extractQuotedContent = (htmlBody?: string) => {
 	const doc = parser.parseFromString(htmlBody, 'text/html')
 
 	const topLevelDiv = Array.from(doc.body.children).find(
-		(el) => el.tagName.toLowerCase() === 'div' && el.classList.contains('frappe_mail_quote'),
+		(el) =>
+			el.tagName.toLowerCase() === 'div' &&
+			(el.classList.contains('frappe_mail_quote') || el.classList.contains('frappe_mail_fwd')),
 	)
 
 	let quoted_content = ''
@@ -213,42 +248,13 @@ export const shouldIgnoreKeypress = (
 	)
 }
 
-export const convertHtmlToText = (html: string) => {
-	if (!html) return ''
-
-	const parser = new DOMParser()
-	const doc = parser.parseFromString(html, 'text/html')
-	const body = doc.body || doc.documentElement
-
-	const anchors = body.querySelectorAll('a')
-	const buttons = body.querySelectorAll('button')
-	const inputs = body.querySelectorAll('input')
-
-	anchors.forEach((anchor) => {
-		const text = document.createTextNode(anchor.textContent)
-		anchor.parentNode?.replaceChild(text, anchor)
-	})
-
-	buttons.forEach((button) => button.remove())
-
-	inputs.forEach((input) => {
-		const type = input.getAttribute('type') || 'text'
-		if (['button', 'submit', 'reset'].includes(type)) {
-			input.remove()
-		}
-	})
-
-	const text = body.textContent || body.innerText || ''
-	return text.replace(/\s+/g, ' ').trim()
-}
-
 export const isEmail = (s: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s)
 
 // A domain entry, prefixed with @ (e.g. @example.com). Used by screening to trust/block a whole domain.
 // Mirrors the backend's DOMAIN_NAME_PATTERN: 1-63 char labels of letters/digits/hyphens (no leading or
 // trailing hyphen), joined by dots, at most 253 chars overall — so the Add button never enables a value
 // the API would reject.
-export const isDomain = (s: string) =>
+const isDomain = (s: string) =>
 	/^@(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(?:\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))+$/.test(s)
 
 // A screened value: either a full email address or a whole domain (@example.com).
@@ -351,9 +357,18 @@ export const randomString = (length: number) => {
 	return result
 }
 
-export const processInlineImages = (mail: ComposeMailData) => {
+// `sending`: mentions are flattened to plain links only on the way out. A draft keeps
+// the editor's own mention nodes, so reopening one still shows the chips.
+export const processInlineImages = (mail: ComposeMailData, { sending = false } = {}) => {
 	const htmlBody = mail.html_body! + mail.quoted_content
 	const $ = cheerio.load(htmlBody)
+
+	// Unconditional, unlike the mention flattening below: a draft is rendered by the reader too,
+	// in the same iframe that can't see the editor's stylesheet, so a draft left holding the
+	// variables would already be showing the wrong colours back to its own author.
+	preserveEditorColors($)
+
+	if (sending) flattenMentions($)
 
 	const regularAttachments = mail.attachments?.filter((a) => a.disposition !== 'inline') || []
 	const inlineAttachments = mail.attachments?.filter((a) => a.disposition === 'inline') || []
@@ -400,12 +415,7 @@ export const getScriptName = (scriptName: string) => {
 export const isSystemScript = (scriptName: string) =>
 	['vacation', 'frappe_mail_automation'].includes(scriptName)
 
-export const hasHtmlContent = (content: string | null | undefined): boolean => {
-	if (!content) return false
-	return /<(html|head|body|div|p|span|table|td|tr|a|img|br|hr|h[1-6]|ul|ol|li|strong|em|b|i|font|style)[^>]*>/i.test(
-		content,
-	)
-}
+export { decodeHtmlEntities, hasHtmlContent, plainTextToHtml } from '@/apps/mail/utils/html'
 
 export const getIcon = (mailbox: MailboxData) => {
 	// The Screener is a system folder: its 'eye' icon is authoritative and can't be overridden by a
@@ -415,6 +425,21 @@ export const getIcon = (mailbox: MailboxData) => {
 	if (mailbox.role && mailbox.role in FOLDER_ICON_MAP) return FOLDER_ICON_MAP[mailbox.role]
 	return 'folder'
 }
+
+/**
+ * Whether a mailbox can be moved into. The "Move to" menu and the folders that
+ * take a dragged thread are the same question asked twice, so they ask it here:
+ * a thread cannot be moved to where it already is, and Sent, Drafts and the
+ * Screener hold mail that is defined by how it got there rather than by a folder
+ * anyone files into.
+ */
+export const canMoveToMailbox = (
+	mailboxId: string | undefined,
+	current: string | undefined,
+	mailboxIds: { sent?: string; drafts?: string; screener?: string },
+): boolean =>
+	!!mailboxId &&
+	![current, mailboxIds.sent, mailboxIds.drafts, mailboxIds.screener].includes(mailboxId)
 
 // The Screening folder is surfaced to users as the "Screener".
 export const getMailboxName = (mailbox: MailboxData) =>

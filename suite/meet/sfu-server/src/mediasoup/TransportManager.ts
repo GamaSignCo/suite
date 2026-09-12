@@ -110,6 +110,7 @@ export class TransportManager {
 			peerId,
 			transport,
 			direction,
+			type: 'webrtc',
 		};
 		this.transports.set(transport.id, transportData);
 		transport.observer.on('close', () => {
@@ -164,6 +165,9 @@ export class TransportManager {
 		if (!transportData) {
 			throw new Error(`Transport ${transportId} not found`);
 		}
+		if (transportData.type !== 'webrtc') {
+			throw new Error(`Transport ${transportId} is not a WebRTC transport`);
+		}
 
 		try {
 			await transportData.transport.connect({ dtlsParameters });
@@ -187,12 +191,16 @@ export class TransportManager {
 		if (!transportData) {
 			throw new Error(`Transport ${transportId} not found`);
 		}
+		if (transportData.type !== 'webrtc') {
+			throw new Error(`Transport ${transportId} is not a WebRTC transport`);
+		}
 
 		return transportData.transport.restartIce();
 	}
 
 	getTransport(transportId: string): WebRtcTransport | undefined {
-		return this.transports.get(transportId)?.transport;
+		const data = this.transports.get(transportId);
+		return data?.type === 'webrtc' ? data.transport : undefined;
 	}
 
 	getTransportData(transportId: string): TransportData | undefined {
@@ -201,6 +209,18 @@ export class TransportManager {
 
 	getTransportCount(): number {
 		return this.transports.size;
+	}
+
+	getTransportCountsByWorker(
+		roomWorkerIds: Map<string, number>,
+	): Map<number, number> {
+		const counts = new Map<number, number>();
+		for (const data of this.transports.values()) {
+			const workerId = roomWorkerIds.get(data.roomId);
+			if (workerId === undefined) continue;
+			counts.set(workerId, (counts.get(workerId) ?? 0) + 1);
+		}
+		return counts;
 	}
 
 	closePeerTransports(roomId: string, peerId: string): void {
@@ -277,7 +297,9 @@ export class TransportManager {
 		const transportData: TransportData = {
 			roomId,
 			peerId,
-			transport: transport as unknown as WebRtcTransport, // fake as WebRtcTransport
+			transport,
+			direction: 'send',
+			type: 'plain',
 		};
 		this.transports.set(transport.id, transportData);
 

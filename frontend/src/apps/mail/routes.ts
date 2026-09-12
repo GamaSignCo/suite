@@ -1,12 +1,5 @@
 import type { RouteRecordRaw } from 'vue-router'
 
-import { createResource } from 'frappe-ui'
-
-// Install the mail-local navigation guard (auth-aware account resolution,
-// dashboard access control, mailbox validation + shortcut expansion) on the
-// shared suite router. Imported for side effects only.
-import '@/apps/mail/router'
-
 /**
  * Mail route module — mounted by the suite router under the '/mail' prefix.
  * Paths are RELATIVE to '/mail' (no leading slash; the empty-path '' is the
@@ -115,10 +108,49 @@ export const routes: RouteRecordRaw[] = [
 				component: () => import('@/apps/mail/pages/MailboxView.vue'),
 				props: true,
 			},
+			// Compose as a page of its own rather than an overlay over the list. `noLayout` keeps
+			// the app chrome — and the full-height scroll frame it brings — out of the way, so the
+			// composer can own the visible area and decide for itself what scrolls inside it.
+			{
+				path: 'account/:accountId/compose',
+				name: 'mail-compose',
+				component: () => import('@/apps/mail/pages/ComposeView.vue'),
+				props: true,
+				meta: { noLayout: true },
+			},
+			// Profile as a page rather than a bottom sheet, so the tab behaves like the other
+			// three — a route the bar keeps a selected state for. It holds the mobile settings
+			// list itself; PWASettings stays for the sidebar and in-thread entry points.
+			{
+				path: 'account/:accountId/profile',
+				name: 'mail-profile',
+				component: () => import('@/apps/mail/pages/ProfileView.vue'),
+			},
 			{
 				path: 'account/:accountId/screener',
 				name: 'mail-screener',
 				component: () => import('@/apps/mail/pages/ScreenerView.vue'),
+				props: true,
+			},
+			// The open sender lives in the URL, as the open thread does: on mobile the preview is a
+			// full-screen overlay, so the back gesture has to close it rather than leave the screener.
+			// Same component — the param only says which sender is open.
+			{
+				path: 'account/:accountId/screener/:senderEmail',
+				name: 'mail-screener-sender',
+				component: () => import('@/apps/mail/pages/ScreenerView.vue'),
+				props: true,
+			},
+			{
+				path: 'account/:accountId/outbox',
+				name: 'mail-outbox',
+				component: () => import('@/apps/mail/pages/OutboxView.vue'),
+				props: true,
+			},
+			{
+				path: 'account/:accountId/outbox/:submissionId',
+				name: 'mail-submission',
+				component: () => import('@/apps/mail/pages/SubmissionDetailsView.vue'),
 				props: true,
 			},
 			{
@@ -407,22 +439,3 @@ export const routes: RouteRecordRaw[] = [
 		],
 	},
 ]
-
-export default routes
-
-/* -------------------------------------------------------------------------- */
-/* Translations                                                               */
-/*                                                                            */
-/* The suite installs ONE global translation plugin (foundation              */
-/* src/boot/translation.ts) so bare `__('text')` works everywhere. We only   */
-/* need to populate `window.translatedMessages`. Mail's translation.ts plugin */
-/* was DELETED; this side-effect replaces it. Backend method preserved as-is. */
-/* -------------------------------------------------------------------------- */
-
-const translations = createResource({
-	url: 'suite.mail.api.get_translations',
-	cache: 'translations',
-	transform: (data) => (window.translatedMessages = data),
-})
-
-if (!window.translatedMessages) translations.fetch()

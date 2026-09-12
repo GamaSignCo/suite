@@ -4,15 +4,16 @@
     v-else
     v-show="!loading"
     draggable="false"
-    class="self-center justify-center max-h-[70vh] max-w-full rounded-lg"
+    class="self-center justify-center max-h-[70vh] max-w-full rounded-6"
     :src="previewURL"
   />
 </template>
 
 <script setup>
 import FilePreviewSkeleton from '@/apps/drive/components/FileTypePreview/FilePreviewSkeleton.vue'
-import { onBeforeUnmount, onMounted, ref, watch, inject } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useObjectUrl } from '@vueuse/core'
+import { useEmitter } from '@/apps/drive/utils/useEmitter'
 
 const props = defineProps({
   previewEntity: Object,
@@ -21,7 +22,6 @@ const props = defineProps({
 const loading = ref(true)
 const imgBlob = ref(null)
 const previewURL = useObjectUrl(imgBlob)
-const emitter = inject('emitter')
 
 watch(props.previewEntity, () => {
   loading.value = true
@@ -49,7 +49,7 @@ async function fetchContent() {
   }
 }
 
-emitter.on('printFile', () => {
+useEmitter('printFile', () => {
   const printFrame = document.createElement('iframe')
   printFrame.style.position = 'absolute'
   printFrame.style.width = '0'
@@ -94,7 +94,6 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  emitter.off('printFile')
   loading.value = true
   imgBlob.value = null
 })

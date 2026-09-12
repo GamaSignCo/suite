@@ -17,18 +17,18 @@
 			</div>
 			<div class="flex items-center gap-1">
 				<Tooltip text="Copy diagnostics">
-					<button class="rounded-md p-1.5 text-ink-gray-5 hover:bg-surface-gray-2 hover:text-ink-gray-8" aria-label="Copy diagnostics" @click="copyDiagnostics">
+					<button class="rounded-4 p-1.5 text-ink-gray-5 hover:bg-surface-gray-2 hover:text-ink-gray-8" aria-label="Copy diagnostics" @click="copyDiagnostics">
 						<LucideCopy class="size-4" />
 					</button>
 				</Tooltip>
 				<Tooltip :text="expanded ? 'Show less' : 'Show more'">
-					<button class="rounded-md p-1.5 text-ink-gray-5 hover:bg-surface-gray-2 hover:text-ink-gray-8" :aria-label="expanded ? 'Show less' : 'Show more'" @click="expanded = !expanded">
+					<button class="rounded-4 p-1.5 text-ink-gray-5 hover:bg-surface-gray-2 hover:text-ink-gray-8" :aria-label="expanded ? 'Show less' : 'Show more'" @click="expanded = !expanded">
 						<LucideChevronUp v-if="expanded" class="size-4" />
 						<LucideChevronDown v-else class="size-4" />
 					</button>
 				</Tooltip>
 				<Tooltip text="Close">
-					<button class="rounded-md p-1.5 text-ink-gray-5 hover:bg-surface-gray-2 hover:text-ink-gray-8" aria-label="Close" @click="close">
+					<button class="rounded-4 p-1.5 text-ink-gray-5 hover:bg-surface-gray-2 hover:text-ink-gray-8" aria-label="Close" @click="close">
 						<LucideX class="size-4" />
 					</button>
 				</Tooltip>
@@ -44,7 +44,7 @@
 				<StatValue label="Download" :value="formatBitrate(snapshot.downloadBitrate)" />
 				<StatValue label="Upload" :value="formatBitrate(snapshot.uploadBitrate)" />
 				<StatValue label="Available upload" :value="formatBitrate(snapshot.availableOutgoingBitrate)" />
-				<StatValue label="Recovery" :value="humanize(connectionState.recoveryState)" />
+				<StatValue label="Lifecycle" :value="humanize(participantConnectionState.lifecycleState)" />
 			</div>
 
 			<template v-if="expanded">
@@ -69,7 +69,7 @@
 					<p v-if="!receiveStreams.length" class="py-2 text-ink-gray-5">No active incoming streams</p>
 				</StatsSection>
 
-				<StatsSection v-if="connectionState.recoveryTimeline.length" title="Recovery history">
+				<StatsSection v-if="participantConnectionState.recoveryTimeline.length" title="Recovery history">
 					<div v-for="entry in recentRecoveryTimeline" :key="`${entry.at}-${entry.state}`" class="border-b border-outline-gray-2 py-2 last:border-0">
 						<div class="flex justify-between gap-3">
 							<span class="capitalize text-ink-gray-7">{{ humanize(entry.state) }}</span>
@@ -79,7 +79,7 @@
 					</div>
 				</StatsSection>
 
-				<p v-if="error" class="mt-3 rounded-md bg-surface-red-2 px-2.5 py-2 text-ink-red-4">{{ error }}</p>
+				<p v-if="error" class="mt-3 rounded-4 bg-surface-red-2 px-2.5 py-2 text-ink-red-4">{{ error }}</p>
 			</template>
 		</div>
 	</section>
@@ -93,6 +93,7 @@ import LucideChevronUp from "~icons/lucide/chevron-up";
 import LucideCopy from "~icons/lucide/copy";
 import LucideX from "~icons/lucide/x";
 import { useConnectionState } from "../composables/useConnectionState";
+import { useParticipantConnectionState } from "../composables/useParticipantConnectionState";
 import { useE2EEState } from "../composables/useE2EEState";
 import { type RTCStreamStats, useRTCStats } from "../composables/useRTCStats";
 import { setShowStatsForNerds } from "../data/statsPreferences";
@@ -100,6 +101,7 @@ import { setShowStatsForNerds } from "../data/statsPreferences";
 const active = ref(true);
 const expanded = ref(false);
 const connectionState = useConnectionState();
+const participantConnectionState = useParticipantConnectionState();
 const e2eeState = useE2EEState();
 const { snapshot, sendStreams, receiveStreams, error } = useRTCStats(active);
 
@@ -120,8 +122,8 @@ const iceRoute = computed(() => {
 	const remote = snapshot.value.remoteCandidateType;
 	return local || remote ? `${local || "unknown"} → ${remote || "unknown"}` : "n/a";
 });
-const recoveryCount = computed(() => connectionState.recoveryTimeline.filter((entry) => entry.state !== "healthy").length);
-const recentRecoveryTimeline = computed(() => connectionState.recoveryTimeline.slice(-8).reverse());
+const recoveryCount = computed(() => participantConnectionState.recoveryTimeline.filter((entry) => entry.state !== "healthy").length);
+const recentRecoveryTimeline = computed(() => participantConnectionState.recoveryTimeline.slice(-8).reverse());
 const encryptionStatus = computed(() => e2eeState.isContextReady.value ? "Active" : "Not active");
 
 function close() {
@@ -156,8 +158,8 @@ async function copyDiagnostics() {
 	await navigator.clipboard.writeText(JSON.stringify({
 		capturedAt: new Date().toISOString(),
 		stats: snapshot.value,
-		recoveryState: connectionState.recoveryState,
-		recoveryTimeline: connectionState.recoveryTimeline,
+		lifecycleState: participantConnectionState.lifecycleState,
+		recoveryTimeline: participantConnectionState.recoveryTimeline,
 	}, null, 2));
 }
 
@@ -182,7 +184,7 @@ const StatsSection = defineComponent({
 	setup: (props, { slots }) => () => h("section", { class: "mt-4 border-t border-outline-gray-2 pt-3" }, [
 		h("div", { class: "mb-1 flex items-center gap-2" }, [
 			h("h3", { class: "font-semibold text-ink-gray-7" }, props.title),
-			props.badge ? h("span", { class: "rounded bg-surface-gray-3 px-1.5 py-0.5 text-[10px] text-ink-gray-5" }, props.badge) : null,
+			props.badge ? h("span", { class: "rounded-4 bg-surface-gray-3 px-1.5 py-0.5 text-[10px] text-ink-gray-5" }, props.badge) : null,
 		]),
 		slots.default?.(),
 	]),

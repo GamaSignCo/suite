@@ -1,35 +1,54 @@
 import type {
-	AppData,
 	CloseProducerResult,
 	Consumer,
-	ConsumerData,
 	DtlsParameters,
 	ExistingProducer,
 	IceCandidate,
 	IceParameters,
 	MediaControlAction,
+	MediasoupConfig,
 	ParticipantInfo,
 	Peer,
 	PeerInfo,
-	ProducerData,
+	ProducerAppData,
+	ProducerCloseDetails,
+	ProducerCloseReason,
+	ProducerCloseSource,
 	Room,
 	RtpCapabilities,
 	RtpCodecCapability,
 	RtpParameters,
+	TransportData,
+	WebRtcTransportData,
 } from '../types';
 import { loggers } from '../utils/logger';
 import { ConsumerManager } from './ConsumerManager';
-import { mediasoupConfig } from './config';
-import { PeerManager } from './PeerManager';
 import { ProducerManager } from './ProducerManager';
 import { RoomManager } from './RoomManager';
 import { TransportManager } from './TransportManager';
 import { WorkerManager } from './WorkerManager';
 
+export interface ProducerCloseMetadata {
+	reason?: ProducerCloseReason;
+	source?: ProducerCloseSource;
+	details?: ProducerCloseDetails;
+}
+
+export interface ProducerClosedLifecycle extends ProducerCloseMetadata {
+	roomId: string;
+	peerId: string;
+	participantId: string;
+	producerId: string;
+	kind: 'audio' | 'video';
+	isScreen: boolean;
+	removedConsumers: CloseProducerResult['removedConsumers'];
+}
+
 export class MediasoupManager {
+	private readonly closingRooms = new Set<string>();
+	private creatingRooms = new Map<string, Promise<Room>>();
 	private workerManager = new WorkerManager();
 	private roomManager = new RoomManager();
-	private peerManager = new PeerManager();
 	private transportManager = new TransportManager();
 	private producerManager = new ProducerManager();
 	consumerManager = new ConsumerManager();
@@ -44,6 +63,9 @@ export class MediasoupManager {
 	private mediaScoreListeners: Array<
 		(direction: 'send' | 'recv', kind: 'audio' | 'video', score: number) => void
 	> = [];
+	private producerClosedListeners: Array<
+		(event: ProducerClosedLifecycle) => void
+	> = [];
 
 	private peerScores = new Map<
 		string,
@@ -55,13 +77,7 @@ export class MediasoupManager {
 	>();
 	private creatingConsumers = new Set<string>();
 
-	constructor() {
-		this.consumerManager.onClose(({ roomId, peerId, consumer }) => {
-			this.roomManager
-				.getRoom(roomId)
-				?.peers.get(peerId)
-				?.consumers.delete(consumer.id);
-		});
+	constructor(private readonly config: MediasoupConfig) {
 		this.consumerManager.onScore((kind, score) => {
 			for (const listener of this.mediaScoreListeners) {
 				listener('recv', kind, score);
@@ -103,6 +119,12 @@ export class MediasoupManager {
 					delete peerState[kind];
 					this.evaluateAndEmitNetworkQuality(roomId, peerId);
 				}
+			},
+		);
+		this.producerManager.on(
+			'producer_transport_closed',
+			(producerId: string) => {
+				this.closeProducer(producerId);
 			},
 		);
 	}
@@ -170,39 +192,73 @@ export class MediasoupManager {
 		this.mediaScoreListeners.push(listener);
 	}
 
-	async getWorkerResourceUsage(): Promise<{
-		userCpuSeconds: number;
-		systemCpuSeconds: number;
-		maxResidentMemoryBytes: number;
-	}> {
+	onProducerClosed(listener: (event: ProducerClosedLifecycle) => void): void {
+		this.producerClosedListeners.push(listener);
+	}
+
+	async getWorkerResourceUsage(): Promise<
+		Array<{
+			worker: string;
+			userCpuSeconds?: number;
+			systemCpuSeconds?: number;
+			maxResidentMemoryBytes?: number;
+			rooms: number;
+			peers: number;
+			transports: number;
+			producers: number;
+			consumers: number;
+		}>
+	> {
+		const workers = this.workerManager.getAllWorkers();
 		const usage = await Promise.allSettled(
-			this.workerManager
-				.getAllWorkers()
-				.map(({ worker }) => worker.getResourceUsage()),
+			workers.map(({ worker }) => worker.getResourceUsage()),
 		);
-		return usage.reduce(
-			(total, result) => {
-				if (result.status === 'rejected') return total;
-				return {
-					userCpuSeconds:
-						total.userCpuSeconds + result.value.ru_utime / 1_000_000,
-					systemCpuSeconds:
-						total.systemCpuSeconds + result.value.ru_stime / 1_000_000,
-					maxResidentMemoryBytes:
-						total.maxResidentMemoryBytes + result.value.ru_maxrss * 1024,
-				};
-			},
-			{ userCpuSeconds: 0, systemCpuSeconds: 0, maxResidentMemoryBytes: 0 },
+		const rooms = this.roomManager.getAllRooms();
+		const roomWorkerIds = new Map(
+			rooms.map((room) => [room.id, room.workerId]),
 		);
+		const roomCounts = new Map<number, { rooms: number; peers: number }>();
+		for (const room of rooms) {
+			const counts = roomCounts.get(room.workerId) ?? { rooms: 0, peers: 0 };
+			counts.rooms += 1;
+			counts.peers += room.peers.size;
+			roomCounts.set(room.workerId, counts);
+		}
+		const transportCounts =
+			this.transportManager.getTransportCountsByWorker(roomWorkerIds);
+		const producerCounts =
+			this.producerManager.getProducerCountsByWorker(roomWorkerIds);
+		const consumerCounts =
+			this.consumerManager.getConsumerCountsByWorker(roomWorkerIds);
+		return workers.map(({ id }, index) => {
+			const counts = {
+				...{ rooms: 0, peers: 0 },
+				...roomCounts.get(id),
+				transports: transportCounts.get(id) ?? 0,
+				producers: producerCounts.get(id) ?? 0,
+				consumers: consumerCounts.get(id) ?? 0,
+			};
+			const result = usage[index];
+			if (result.status === 'rejected')
+				return { worker: String(id), ...counts };
+			return {
+				worker: String(id),
+				...counts,
+				// mediasoup reports CPU time in milliseconds and max RSS in KiB.
+				userCpuSeconds: result.value.ru_utime / 1_000,
+				systemCpuSeconds: result.value.ru_stime / 1_000,
+				maxResidentMemoryBytes: result.value.ru_maxrss * 1024,
+			};
+		});
 	}
 
 	async init(): Promise<void> {
 		loggers.mediasoupManager.info('Initializing Mediasoup');
 
 		await this.workerManager.initialize(
-			mediasoupConfig.numWorkers,
-			mediasoupConfig.worker,
-			mediasoupConfig.webRtcServer,
+			this.config.numWorkers,
+			this.config.worker,
+			this.config.webRtcServer,
 		);
 
 		loggers.mediasoupManager.info('Mediasoup initialized successfully');
@@ -212,18 +268,40 @@ export class MediasoupManager {
 		roomId: string,
 		onActiveSpeaker?: (roomId: string, participantIds: string[]) => void,
 	): Promise<Room> {
-		const { worker, webRtcServer } = this.workerManager.getNextWorker();
-		return this.roomManager.createRoom(
+		const room = this.roomManager.getRoom(roomId);
+		if (room) return room;
+		const pending = this.creatingRooms.get(roomId);
+		if (pending) return pending;
+
+		const { id, worker, webRtcServer } = this.workerManager.getNextWorker();
+		const creation = this.roomManager.createRoom(
 			roomId,
+			id,
 			worker,
 			webRtcServer,
-			mediasoupConfig.router.mediaCodecs as RtpCodecCapability[],
+			this.config.router.mediaCodecs as RtpCodecCapability[],
 			onActiveSpeaker,
 		);
+		this.creatingRooms.set(roomId, creation);
+		try {
+			return await creation;
+		} finally {
+			this.creatingRooms.delete(roomId);
+		}
 	}
 
 	async closeRoom(roomId: string): Promise<void> {
-		await this.roomManager.closeRoom(roomId);
+		if (this.closingRooms.has(roomId)) return;
+		this.closingRooms.add(roomId);
+		const room = this.roomManager.getRoom(roomId);
+		try {
+			for (const peerId of [...(room?.peers.keys() ?? [])]) {
+				await this.removePeer(roomId, peerId);
+			}
+			await this.roomManager.closeRoom(roomId);
+		} finally {
+			this.closingRooms.delete(roomId);
+		}
 	}
 
 	async addPeer(
@@ -236,12 +314,36 @@ export class MediasoupManager {
 			video_enabled: true,
 		},
 	): Promise<Peer> {
+		if (this.closingRooms.has(roomId)) {
+			throw new Error(`Room ${roomId} is closing`);
+		}
 		const room = this.roomManager.getRoom(roomId);
 		if (!room) {
 			throw new Error(`Room ${roomId} not found`);
 		}
 
-		return this.peerManager.addPeer(room, peerId, peerInfo);
+		const existing = room.peers.get(peerId);
+		if (existing) {
+			existing.info = { ...existing.info, ...peerInfo };
+			return existing;
+		}
+
+		const peer: Peer = {
+			id: peerId,
+			info: {
+				name: peerInfo.name || '',
+				userId: peerInfo.userId || peerId,
+				avatar: peerInfo.avatar,
+				audio_enabled: peerInfo.audio_enabled ?? false,
+				video_enabled: peerInfo.video_enabled ?? false,
+				is_guest: peerInfo.is_guest ?? false,
+				senderId: peerInfo.senderId,
+				isHost: peerInfo.isHost || false,
+			},
+			producers: new Map(),
+		};
+		room.peers.set(peerId, peer);
+		return peer;
 	}
 
 	async removePeer(roomId: string, peerId: string): Promise<void> {
@@ -258,9 +360,7 @@ export class MediasoupManager {
 		this.consumerManager.closePeerConsumers(roomId, peerId);
 		this.transportManager.closePeerTransports(roomId, peerId);
 		peer?.producers.clear();
-		peer?.consumers.clear();
-		peer?.transports.clear();
-		this.peerManager.removePeer(room, peerId);
+		room.peers.delete(peerId);
 		this.peerScores.delete(peerId);
 	}
 
@@ -290,21 +390,31 @@ export class MediasoupManager {
 			room.router,
 			room.webRtcServer,
 			direction,
-			mediasoupConfig.webRtcTransport,
+			this.config.webRtcTransport,
 		);
 	}
 
 	async connectWebRtcTransport(
 		transportId: string,
 		dtlsParameters: DtlsParameters,
+		roomId: string,
+		peerId: string,
+		expectedDirection?: 'send' | 'recv',
 	): Promise<void> {
+		this.assertTransportAccess(transportId, roomId, peerId, expectedDirection);
 		return this.transportManager.connectWebRtcTransport(
 			transportId,
 			dtlsParameters,
 		);
 	}
 
-	async restartWebRtcTransportIce(transportId: string): Promise<IceParameters> {
+	async restartWebRtcTransportIce(
+		transportId: string,
+		roomId: string,
+		peerId: string,
+		expectedDirection?: 'send' | 'recv',
+	): Promise<IceParameters> {
+		this.assertTransportAccess(transportId, roomId, peerId, expectedDirection);
 		return this.transportManager.restartWebRtcTransportIce(transportId);
 	}
 
@@ -327,7 +437,7 @@ export class MediasoupManager {
 			throw new Error(`Peer ${peerId} not found in room ${roomId}`);
 		}
 
-		const listenIp = mediasoupConfig.webRtcServer.listenIp || '0.0.0.0';
+		const listenIp = this.config.webRtcServer.listenIp;
 		return this.transportManager.createPlainTransport(
 			roomId,
 			peerId,
@@ -338,20 +448,28 @@ export class MediasoupManager {
 
 	async createProducer(
 		transportId: string,
+		roomId: string,
+		peerId: string,
 		rtpParameters: RtpParameters,
 		kind: 'audio' | 'video',
-		appData: AppData = {},
+		appData: ProducerAppData = {},
 		senderId?: number,
 		paused = false,
-	): Promise<{ id: string; kind: 'audio' | 'video'; appData: AppData }> {
-		const enrichedAppData: AppData =
+	): Promise<{
+		id: string;
+		kind: 'audio' | 'video';
+		appData: ProducerAppData;
+	}> {
+		const enrichedAppData: ProducerAppData =
 			senderId !== undefined ? { ...appData, senderId } : appData;
-		const transportData = this.transportManager.getTransportData(transportId);
-		if (!transportData) {
-			throw new Error(`Transport ${transportId} not found`);
-		}
+		const transportData = this.assertTransportAccess(
+			transportId,
+			roomId,
+			peerId,
+			'send',
+		);
 
-		const { roomId, peerId, transport } = transportData;
+		const { transport } = transportData;
 		const room = this.roomManager.getRoom(roomId);
 		if (!room) {
 			throw new Error(`Room ${roomId} not found`);
@@ -388,6 +506,8 @@ export class MediasoupManager {
 	async createConsumer(
 		transportId: string,
 		producerId: string,
+		roomId: string,
+		peerId: string,
 		rtpCapabilities: RtpCapabilities,
 	): Promise<{
 		id: string;
@@ -397,17 +517,23 @@ export class MediasoupManager {
 		paused: boolean;
 		senderId?: number;
 	}> {
-		const transportData = this.transportManager.getTransportData(transportId);
-		if (!transportData) {
-			throw new Error(`Transport ${transportId} not found`);
-		}
-
+		const transportData = this.assertTransportAccess(
+			transportId,
+			roomId,
+			peerId,
+			'recv',
+		);
 		const producerData = this.producerManager.getProducerData(producerId);
 		if (!producerData) {
 			throw new Error(`Producer ${producerId} not found`);
 		}
+		if (producerData.roomId !== roomId) {
+			throw new Error(
+				`Producer ${producerId} does not belong to room ${roomId}`,
+			);
+		}
 
-		const { roomId, peerId, transport } = transportData;
+		const { transport } = transportData;
 		const consumerKey = `${roomId}:${peerId}:${producerId}`;
 		if (this.creatingConsumers.has(consumerKey)) {
 			throw new Error(
@@ -457,12 +583,9 @@ export class MediasoupManager {
 			this.consumerManager.closeConsumer(result.id);
 			throw new Error(`Peer ${peerId} not found in room ${roomId}`);
 		}
-
-		const consumer = this.consumerManager.getConsumer(result.id);
-		if (!consumer) {
+		if (!this.consumerManager.getConsumerData(result.id)) {
 			throw new Error(`Failed to create consumer ${result.id}`);
 		}
-		peer.consumers.set(result.id, consumer);
 
 		return {
 			...result,
@@ -477,13 +600,19 @@ export class MediasoupManager {
 		return this.producerManager.getProducer(producerId);
 	}
 
-	closeProducer(producerId: string): CloseProducerResult {
+	closeProducer(
+		producerId: string,
+		metadata: ProducerCloseMetadata = {},
+	): CloseProducerResult {
 		const producerData = this.producerManager.getProducerData(producerId);
 		if (!producerData) return { isScreen: false, removedConsumers: [] };
+		const room = this.roomManager.getRoom(producerData.roomId);
+		const participantId =
+			room?.peers.get(producerData.peerId)?.info.userId ?? producerData.peerId;
+		const kind = producerData.producer.kind;
 
 		const result = this.producerManager.closeProducer(producerId);
 
-		const room = this.roomManager.getRoom(producerData.roomId);
 		if (room) {
 			const peer = room.peers.get(producerData.peerId);
 			if (peer) {
@@ -513,10 +642,34 @@ export class MediasoupManager {
 			}
 		}
 
-		return { ...result, removedConsumers };
+		const closeResult = { ...result, removedConsumers };
+		const event: ProducerClosedLifecycle = {
+			roomId: producerData.roomId,
+			peerId: producerData.peerId,
+			participantId,
+			producerId,
+			kind,
+			isScreen: closeResult.isScreen,
+			removedConsumers,
+			...metadata,
+		};
+		for (const listener of this.producerClosedListeners) {
+			try {
+				listener(event);
+			} catch (error) {
+				loggers.mediasoupManager.warn(
+					'Producer close listener failed for %s: %s',
+					producerId,
+					(error as Error).message,
+				);
+			}
+		}
+
+		return closeResult;
 	}
 
-	closeConsumer(consumerId: string): void {
+	closeConsumer(consumerId: string, roomId: string, peerId: string): void {
+		this.assertConsumerAccess(consumerId, roomId, peerId);
 		this.consumerManager.closeConsumer(consumerId);
 	}
 
@@ -528,16 +681,82 @@ export class MediasoupManager {
 		return this.producerManager.resumeProducer(producerId);
 	}
 
-	async requestConsumerKeyFrame(consumerId: string): Promise<boolean> {
+	async requestConsumerKeyFrame(
+		consumerId: string,
+		roomId: string,
+		peerId: string,
+	): Promise<boolean> {
+		const data = this.consumerManager.getConsumerData(consumerId);
+		if (!data) return false;
+		if (data.roomId !== roomId || data.peerId !== peerId) {
+			throw new Error('Consumer ownership mismatch');
+		}
 		return this.consumerManager.requestConsumerKeyFrame(consumerId);
 	}
 
-	getConsumerData(consumerId: string): ConsumerData | undefined {
-		return this.consumerManager.getConsumerData(consumerId);
+	assertTransportAccess(
+		transportId: string,
+		roomId: string,
+		peerId: string,
+		direction: 'recv',
+	): WebRtcTransportData;
+	assertTransportAccess(
+		transportId: string,
+		roomId: string,
+		peerId: string,
+		direction: 'send',
+	): TransportData;
+	assertTransportAccess(
+		transportId: string,
+		roomId: string,
+		peerId: string,
+		direction?: 'send' | 'recv',
+	): TransportData;
+	assertTransportAccess(
+		transportId: string,
+		roomId: string,
+		peerId: string,
+		direction?: 'send' | 'recv',
+	): TransportData {
+		const data = this.transportManager.getTransportData(transportId);
+		if (!data) throw new Error(`Transport ${transportId} not found`);
+		if (data.roomId !== roomId || data.peerId !== peerId) {
+			throw new Error('Transport ownership mismatch');
+		}
+		if (direction && data.direction !== direction) {
+			throw new Error(
+				`Transport ${transportId} is not a ${direction} transport`,
+			);
+		}
+		return data;
+	}
+
+	assertProducerAccess(producerId: string, roomId: string, peerId: string) {
+		const data = this.producerManager.getProducerData(producerId);
+		if (!data) throw new Error(`Producer ${producerId} not found`);
+		if (data.roomId !== roomId || data.peerId !== peerId) {
+			throw new Error('Producer ownership mismatch');
+		}
+		return data;
+	}
+
+	private assertConsumerAccess(
+		consumerId: string,
+		roomId: string,
+		peerId: string,
+	) {
+		const data = this.consumerManager.getConsumerData(consumerId);
+		if (!data) throw new Error(`Consumer ${consumerId} not found`);
+		if (data.roomId !== roomId || data.peerId !== peerId) {
+			throw new Error('Consumer ownership mismatch');
+		}
+		return data;
 	}
 
 	async updateConsumerPreferences(options: {
 		consumerId: string;
+		roomId: string;
+		peerId: string;
 		visible: boolean;
 		width: number;
 		height: number;
@@ -548,12 +767,11 @@ export class MediasoupManager {
 		};
 		paused: boolean;
 	}> {
-		const consumerData = this.consumerManager.getConsumerData(
+		const consumerData = this.assertConsumerAccess(
 			options.consumerId,
+			options.roomId,
+			options.peerId,
 		);
-		if (!consumerData) {
-			throw new Error(`Consumer ${options.consumerId} not found`);
-		}
 
 		const { consumer } = consumerData;
 		const wasPaused = consumer.paused;
@@ -780,15 +998,15 @@ export class MediasoupManager {
 			return existingProducers;
 		}
 
-		for (const [peerId, peer] of room.peers) {
+		for (const peer of room.peers.values()) {
 			// Exclude requester
-			if (peerId === userId) continue;
+			if (peer.info.userId === userId) continue;
 
 			for (const producer of peer.producers.values()) {
 				existingProducers.push({
 					id: producer.id,
 					roomId,
-					user_id: peerId,
+					user_id: peer.info.userId,
 					kind: producer.kind,
 					paused: producer.paused,
 					isScreen:
@@ -804,67 +1022,71 @@ export class MediasoupManager {
 		const room = this.roomManager.getRoom(roomId);
 		if (!room) return [];
 
-		return Array.from(room.peers.entries())
-			.filter(([_peerId, peer]) => !peer.info.userId.startsWith('preview-'))
-			.map(([peerId, peer]) => {
-				let audioEnabled = false;
-				let videoEnabled = false;
-				for (const producer of peer.producers.values()) {
-					const isScreen =
-						(producer.appData && producer.appData.type === 'screen') || false;
-					if (producer.kind === 'audio' && !producer.paused)
-						audioEnabled = true;
-					// Count video as enabled only if it's NOT a screen share producer
-					if (producer.kind === 'video' && !producer.paused && !isScreen)
-						videoEnabled = true;
-				}
-
-				return {
-					id: peerId,
-					user_id: peerId,
+		const participants = new Map<string, ParticipantInfo>();
+		for (const peer of room.peers.values()) {
+			const participantId = peer.info.userId;
+			if (participantId.startsWith('preview-')) continue;
+			let participant = participants.get(participantId);
+			if (!participant) {
+				participant = {
+					id: participantId,
+					user_id: participantId,
 					senderId: peer.info.senderId,
 					sender_id: peer.info.senderId,
 					is_host: peer.info.isHost || false,
 					info: {
 						name: peer.info.name,
-						userId: peer.info.userId,
+						userId: participantId,
 						avatar: peer.info.avatar,
-						audio_enabled: audioEnabled,
-						video_enabled: videoEnabled,
+						audio_enabled: false,
+						video_enabled: false,
 						is_guest: peer.info.is_guest || false,
 					},
 				};
-			});
+				participants.set(participantId, participant);
+			}
+			let audioEnabled = false;
+			let videoEnabled = false;
+			for (const producer of peer.producers.values()) {
+				const isScreen =
+					(producer.appData && producer.appData.type === 'screen') || false;
+				if (producer.kind === 'audio' && !producer.paused) audioEnabled = true;
+				// Count video as enabled only if it's NOT a screen share producer
+				if (producer.kind === 'video' && !producer.paused && !isScreen)
+					videoEnabled = true;
+			}
+
+			participant.info.audio_enabled ||= audioEnabled;
+			participant.info.video_enabled ||= videoEnabled;
+			participant.is_host ||= peer.info.isHost || false;
+		}
+		return Array.from(participants.values());
 	}
 
 	applyMediaControl(
 		roomId: string,
-		peerId: string,
+		participantId: string,
 		action: MediaControlAction,
 	): void {
 		const room = this.roomManager.getRoom(roomId);
 		if (!room) return;
 
-		const peer = room.peers.get(peerId);
-		if (!peer) return;
-
-		const setFlag = (k: 'audio_enabled' | 'video_enabled', v: boolean) => {
-			peer.info[k] = v;
-		};
-
-		switch (action) {
-			case 'mute':
-				setFlag('audio_enabled', false);
-				break;
-			case 'unmute':
-				setFlag('audio_enabled', true);
-				break;
-			case 'video_off':
-				setFlag('video_enabled', false);
-				break;
-			case 'video_on':
-				setFlag('video_enabled', true);
-				break;
+		for (const peer of room.peers.values()) {
+			if (peer.info.userId !== participantId) continue;
+			switch (action) {
+				case 'mute':
+					peer.info.audio_enabled = false;
+					break;
+				case 'unmute':
+					peer.info.audio_enabled = true;
+					break;
+				case 'video_off':
+					peer.info.video_enabled = false;
+					break;
+				case 'video_on':
+					peer.info.video_enabled = true;
+					break;
+			}
 		}
 	}
 
@@ -872,27 +1094,22 @@ export class MediasoupManager {
 		return this.roomManager.getRoom(roomId)?.peers;
 	}
 
-	getProducerData(producerId: string): ProducerData | undefined {
-		return this.producerManager.getProducerData(producerId);
-	}
-
-	peerExistsInRoom(roomId: string, peerId: string): boolean {
+	participantExistsInRoom(roomId: string, participantId: string): boolean {
 		const room = this.roomManager.getRoom(roomId);
-		return room?.peers.has(peerId) || false;
+		return Array.from(room?.peers.values() ?? []).some(
+			(peer) => peer.info.userId === participantId,
+		);
 	}
 
 	get rooms() {
 		return this.roomManager;
 	}
 
-	get peers() {
-		return this.peerManager;
-	}
-
 	getResourceCounts(): Record<string, number> {
 		return {
 			rooms: this.roomManager.getRoomCount(),
-			peers: this.peerManager.getPeerCount(),
+			participants: this.roomManager.getParticipantCount(),
+			peers: this.roomManager.getPeerCount(),
 			transports: this.transportManager.getTransportCount(),
 			producers: this.producerManager.getProducerCount(),
 			consumers: this.consumerManager.getConsumerCount(),
@@ -905,7 +1122,7 @@ export class MediasoupManager {
 
 		const initialStats = {
 			rooms: this.roomManager.getRoomCount(),
-			peers: this.peerManager.getPeerCount(),
+			peers: this.roomManager.getPeerCount(),
 			transports: this.transportManager.getTransportCount(),
 			producers: this.producerManager.getProducerCount(),
 			consumers: this.consumerManager.getConsumerCount(),
@@ -920,14 +1137,13 @@ export class MediasoupManager {
 		this.consumerManager.cleanup();
 		this.producerManager.cleanup();
 		this.transportManager.cleanup();
-		this.peerManager.cleanup();
 
 		// Close all workers
 		await this.workerManager.cleanup();
 
 		const finalStats = {
 			rooms: this.roomManager.getRoomCount(),
-			peers: this.peerManager.getPeerCount(),
+			peers: this.roomManager.getPeerCount(),
 			transports: this.transportManager.getTransportCount(),
 			producers: this.producerManager.getProducerCount(),
 			consumers: this.consumerManager.getConsumerCount(),

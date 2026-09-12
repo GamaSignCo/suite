@@ -5,7 +5,7 @@
 from uuid import uuid7
 
 import frappe
-from frappe import Any, _
+from frappe import _
 from frappe.model.document import Document
 from frappe.utils import (
     add_to_date,
@@ -16,6 +16,7 @@ from frappe.utils import (
     now,
     now_datetime,
     random_string,
+    sha256_hash,
     validate_email_address,
 )
 
@@ -23,17 +24,26 @@ from suite.mail.stalwart import create_account, create_app_password, get_roles
 from suite.mail.utils import get_config, is_stalwart_configured
 from suite.mail.utils.logger import log_admin_action
 from suite.mail.utils.validation import is_subaddressed_email
-from suite.utils import execute_with_logging
+from suite.utils import execute_with_logging, generate_otp
 from suite.utils.user import is_suite_admin, is_system_manager
 
 STALWART_DEFAULT_USER_ROLES = ["User"]
-STALWART_DEFAULT_ADMIN_ROLES = ["User", "Tenant Administrator"]
+
+# How long a signup OTP stays valid. Only its hash is kept (in cache); the code itself
+# travels by email and is never stored.
+OTP_TTL_SECONDS = 10 * 60
 
 
 def _lines(value: str | None) -> list[str]:
     """Splits a newline-separated field into its entries, dropping blanks and duplicates."""
 
     return list(dict.fromkeys(line.strip() for line in (value or "").split("\n") if line.strip()))
+
+
+def otp_cache_key(account_request: str) -> str:
+    """Returns the cache key holding the signup OTP hash for an account request."""
+
+    return f"account_request_otp_hash:{account_request}"
 
 
 class MailAccountRequest(Document):
@@ -50,40 +60,36 @@ class MailAccountRequest(Document):
         backup_email: DF.Data
         expires_at: DF.Datetime | None
         groups: DF.SmallText | None
-        invited_by: DF.Link
+        invited_by: DF.Link | None
         ip_address: DF.Data | None
         is_admin: DF.Check
         is_verified: DF.Check
         mailing_lists: DF.SmallText | None
-        quota_gb: DF.Float | None
+        quota_gb: DF.Float
         request_key: DF.Data | None
         roles: DF.SmallText | None
         send_invite: DF.Check
     # end: auto-generated types
+
+    # The freshly generated signup OTP, stashed by `set_otp` for the very next
+    # `send_verification_email` on this instance - it only ever travels by email.
+    _signup_otp: str | None = None
 
     def autoname(self) -> None:
         self.name = str(uuid7())
 
     @property
     def is_expired(self) -> bool:
-        return self.expires_at and get_datetime(self.expires_at) < now_datetime()
+        return bool(self.expires_at and get_datetime(self.expires_at) < now_datetime())
 
     @property
     def _roles(self) -> list[str]:
         """Returns the list of roles for the account request."""
 
-        roles = []
+        if roles := _lines(self.roles):
+            return roles
 
-        if self.roles:
-            roles = [r.strip() for r in self.roles.split("\n")]
-
-        else:
-            if self.is_admin:
-                roles = STALWART_DEFAULT_ADMIN_ROLES
-            else:
-                roles = STALWART_DEFAULT_USER_ROLES
-
-        return list(set(roles))
+        return list(STALWART_DEFAULT_USER_ROLES)
 
     @property
     def domain(self) -> str:
@@ -95,10 +101,7 @@ class MailAccountRequest(Document):
     def _aliases(self) -> list[str]:
         """Returns the additional email addresses to attach as aliases to the account."""
 
-        if not self.aliases:
-            return []
-
-        return [alias.strip() for alias in self.aliases.split("\n") if alias.strip()]
+        return _lines(self.aliases)
 
     @property
     def _groups(self) -> list[str]:
@@ -166,7 +169,12 @@ class MailAccountRequest(Document):
         self.ip_address = frappe.local.request_ip
 
     def validate_invited_by(self) -> None:
-        """Validates the invited_by."""
+        """Records who created the request. A self-signup has no inviter - an empty
+        invited_by is what distinguishes it from an admin-created request."""
+
+        if self.flags.self_signup:
+            self.invited_by = None
+            return
 
         user = frappe.session.user
 
@@ -222,11 +230,11 @@ class MailAccountRequest(Document):
         """Validates the roles."""
 
         roles_to_assign = self._roles
-        server_roles_map = {r["description"]: r["id"] for r in get_roles()}
+        server_roles = {r["description"] for r in get_roles()}
 
         for role in roles_to_assign:
-            if role not in server_roles_map:
-                frappe.throw(_("Role {0} does not exists on the server.").format(frappe.bold(role)))
+            if role not in server_roles:
+                frappe.throw(_("Role {0} does not exist on the server.").format(frappe.bold(role)))
 
         self.roles = "\n".join(roles_to_assign)
 
@@ -238,13 +246,14 @@ class MailAccountRequest(Document):
 
         from suite.mail.stalwart import get_group_service
 
+        group_ids = self._groups
         server_group_ids = {str(g["id"]) for g in get_group_service().get_all_groups(properties=["id"])}
 
-        for group_id in self._groups:
+        for group_id in group_ids:
             if group_id not in server_group_ids:
                 frappe.throw(_("Group {0} does not exist on the server.").format(frappe.bold(group_id)))
 
-        self.groups = "\n".join(self._groups)
+        self.groups = "\n".join(group_ids)
 
     def validate_mailing_lists(self) -> None:
         """Validates the mailing lists the account will be a recipient of and normalizes them."""
@@ -254,19 +263,35 @@ class MailAccountRequest(Document):
 
         from suite.mail.stalwart import get_mailing_list_service
 
+        list_ids = self._mailing_lists
         server_list_ids = {str(ml["id"]) for ml in get_mailing_list_service().get_all(properties=["id"])}
 
-        for list_id in self._mailing_lists:
+        for list_id in list_ids:
             if list_id not in server_list_ids:
                 frappe.throw(_("Mailing list {0} does not exist on the server.").format(frappe.bold(list_id)))
 
-        self.mailing_lists = "\n".join(self._mailing_lists)
+        self.mailing_lists = "\n".join(list_ids)
 
     def validate_expired(self) -> None:
         """Forbids action if the request has expired."""
 
         if self.is_expired:
             frappe.throw(_("This request has expired. Please create a new one."))
+
+    def set_otp(self) -> None:
+        """Generates a fresh signup OTP, caching only its hash (see `verify_otp`).
+
+        The code itself is stashed transiently on the document so the very next
+        `send_verification_email` on this instance can email it - it is never persisted.
+        """
+
+        otp = str(generate_otp(length=6))
+        frappe.cache.set_value(
+            otp_cache_key(self.name),
+            sha256_hash(otp),
+            expires_in_sec=OTP_TTL_SECONDS,
+        )
+        self._signup_otp = otp
 
     @frappe.whitelist()
     def send_verification_email(self) -> None:
@@ -275,35 +300,57 @@ class MailAccountRequest(Document):
         self.validate_expired()
         self.validate_backup_email()
 
-        if self.invited_by:
-            subject = _("You have been invited by {0} to join Frappe Mail").format(self.invited_by)
-            template = "generic"
-            args = {
+        # A freshly generated OTP (see set_otp) takes precedence over the invite link:
+        # the caller is walking the code-verification flow, not the signup-link flow.
+        if self._signup_otp:
+            self._send_otp_email()
+        elif self.invited_by:
+            self._send_invite_email()
+
+    def _send_otp_email(self) -> None:
+        """Emails the pending signup OTP to the backup email, consuming it."""
+
+        frappe.sendmail(
+            recipients=self.backup_email,
+            subject=_("Frappe Mail - Verification Code"),
+            template="generic",
+            args={
+                "title": _("Your verification code is {0}.").format(self._signup_otp),
+                "description": _(
+                    "Enter this code to verify your email address. It expires in {0} minutes."
+                ).format(OTP_TTL_SECONDS // 60),
+            },
+            now=True,
+        )
+        self._signup_otp = None
+
+    def _send_invite_email(self) -> None:
+        """Emails the invite link to the backup email."""
+
+        frappe.sendmail(
+            recipients=self.backup_email,
+            subject=_("You have been invited by {0} to join Frappe Mail").format(self.invited_by),
+            template="generic",
+            args={
                 "title": _("You have been invited by {0} to join Frappe Mail.").format(self.invited_by),
                 "description": _("Please confirm your email address by clicking the button below."),
                 "button": _("Verify Account"),
                 "link": get_url("/mail/signup/" + self.request_key),
-            }
+            },
+            now=True,
+        )
+        frappe.msgprint(_("Verification email sent successfully."), indicator="green", alert=True)
 
-            frappe.sendmail(
-                recipients=self.backup_email,
-                subject=subject,
-                template=template,
-                args=args,
-                now=True,
-            )
-            frappe.msgprint(_("Verification email sent successfully."), indicator="green", alert=True)
-
-            # Sending an invite link is worth recording, but only when an administrator did it: the
-            # signup OTP flow reaches this as Guest and is not part of the admin trail.
-            if is_suite_admin(frappe.session.user) or is_system_manager(frappe.session.user):
-                log_admin_action("send invite email", self.account)
+        # Sending an invite link is worth recording, but only when an administrator did it: the
+        # signup OTP flow reaches this as Guest and is not part of the admin trail.
+        if is_suite_admin(frappe.session.user) or is_system_manager(frappe.session.user):
+            log_admin_action("send invite email", self.account)
 
     @frappe.whitelist()
     def force_verify_and_create_account(
         self,
         first_name: str,
-        last_name: str,
+        last_name: str | None,
         password: str,
         locale: str | None = None,
         time_zone: str | None = None,
@@ -323,7 +370,7 @@ class MailAccountRequest(Document):
     def create_account(
         self,
         first_name: str,
-        last_name: str,
+        last_name: str | None,
         password: str,
         locale: str | None = None,
         time_zone: str | None = None,

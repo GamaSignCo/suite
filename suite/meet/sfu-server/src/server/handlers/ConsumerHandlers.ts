@@ -1,6 +1,7 @@
 import type { Socket } from 'socket.io';
 import { loggers } from '../../utils/logger';
 import type { HandlerDeps } from './Handler';
+import { getPeerId, getRoomId } from './utils';
 
 export function registerConsumerHandlers(deps: HandlerDeps) {
 	return (socket: Socket) => {
@@ -10,9 +11,10 @@ export function registerConsumerHandlers(deps: HandlerDeps) {
 			let source: 'camera' | 'screen' | 'unknown' = 'unknown';
 			let outcome: 'success' | 'failure' = 'failure';
 			try {
-				deps.authManager.ensureFullAccess(socket);
+				deps.authManager.ensureMediaConsumerAccess(socket);
 				enforceE2EEMediaPolicy(socket);
 				const { transportId, producerId, rtpCapabilities } = data;
+				const roomId = getRoomId(socket);
 				const producer = deps.mediasoup.getProducer(producerId);
 				if (producer) {
 					source = producer.appData?.type === 'screen' ? 'screen' : 'camera';
@@ -20,6 +22,8 @@ export function registerConsumerHandlers(deps: HandlerDeps) {
 				const consumer = await deps.mediasoup.createConsumer(
 					transportId,
 					producerId,
+					roomId,
+					getPeerId(socket),
 					rtpCapabilities,
 				);
 				media =
@@ -51,9 +55,13 @@ export function registerConsumerHandlers(deps: HandlerDeps) {
 
 		socket.on('close_consumer', async (data, callback) => {
 			try {
-				deps.authManager.ensureFullAccess(socket);
+				deps.authManager.ensureMediaConsumerAccess(socket);
 				const { consumerId } = data;
-				await deps.mediasoup.closeConsumer(consumerId);
+				await deps.mediasoup.closeConsumer(
+					consumerId,
+					getRoomId(socket),
+					getPeerId(socket),
+				);
 
 				callback({ success: true });
 			} catch (error) {
@@ -67,18 +75,20 @@ export function registerConsumerHandlers(deps: HandlerDeps) {
 
 		socket.on('consumer:update_preferences', async (data, callback) => {
 			try {
+				deps.authManager.ensureMediaConsumerAccess(socket);
 				const consumerId = data?.consumerId;
 				if (!consumerId) {
 					callback({ success: false, error: 'Missing consumerId' });
 					return;
 				}
-
 				const visible = Boolean(data.visible);
 				const width = Math.round(data.width);
 				const height = Math.round(data.height);
 
 				const result = await deps.mediasoup.updateConsumerPreferences({
 					consumerId,
+					roomId: getRoomId(socket),
+					peerId: getPeerId(socket),
 					visible,
 					width,
 					height,
@@ -96,19 +106,13 @@ export function registerConsumerHandlers(deps: HandlerDeps) {
 
 		socket.on('request_consumer_keyframe', async (data, callback) => {
 			try {
-				deps.authManager.ensureFullAccess(socket);
+				deps.authManager.ensureMediaConsumerAccess(socket);
 				const { consumerId } = data;
-				const consumerData = deps.mediasoup.getConsumerData(consumerId);
-				if (!consumerData) {
-					callback({ success: false, error: 'Consumer not found' });
-					return;
-				}
-				if (consumerData.peerId !== socket.userId) {
-					callback({ success: false, error: 'Consumer ownership mismatch' });
-					return;
-				}
-				const requested =
-					await deps.mediasoup.requestConsumerKeyFrame(consumerId);
+				const requested = await deps.mediasoup.requestConsumerKeyFrame(
+					consumerId,
+					getRoomId(socket),
+					getPeerId(socket),
+				);
 				callback({ success: true, requested });
 			} catch (error) {
 				loggers.socketHandler.error(

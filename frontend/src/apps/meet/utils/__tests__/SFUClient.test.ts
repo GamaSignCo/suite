@@ -3,6 +3,7 @@ import {
 	connectionDetailsFromJoinPayload,
 	SFUClient,
 	SFURequestError,
+	SFUResponseError,
 } from "../SFUClient";
 
 const mockSignalChannel = () => ({
@@ -16,15 +17,13 @@ const mockSignalChannel = () => ({
 	updateAuth: vi.fn(),
 });
 
-vi.mock("frappe-ui", () => ({
-	frappeRequest: vi.fn(),
-}));
-
-import { frappeRequest } from "frappe-ui";
+vi.mock("../request", () => ({ request: vi.fn() }));
+import { request } from "../request";
 
 beforeEach(() => {
 	vi.clearAllMocks();
 	vi.useFakeTimers();
+	sessionStorage.clear();
 });
 
 afterEach(() => {
@@ -127,7 +126,7 @@ describe("isTokenExpiringSoon", () => {
 		expect(client.isTokenExpiringSoon()).toBe(false);
 	});
 
-	it("returns true when tokenExpiresAt is within 5 minutes", () => {
+	it("returns true when tokenExpiresAt is within the one-minute refresh buffer", () => {
 		const client = createClient();
 		client.connectionDetails.tokenExpiresAt = Date.now() + 60_000;
 		expect(client.isTokenExpiringSoon()).toBe(true);
@@ -136,7 +135,8 @@ describe("isTokenExpiringSoon", () => {
 	it("returns false when tokenExpiresAt is past", () => {
 		const client = createClient();
 		client.connectionDetails.tokenExpiresAt = Date.now() - 60_000;
-		expect(client.isTokenExpiringSoon()).toBe(true);
+		expect(client.isTokenExpiringSoon()).toBe(false);
+		expect(client.isTokenExpired()).toBe(true);
 	});
 
 	it("parses JWT exp claim when tokenExpiresAt is null", () => {
@@ -148,10 +148,10 @@ describe("isTokenExpiringSoon", () => {
 		expect(client.isTokenExpiringSoon()).toBe(false);
 	});
 
-	it("returns true for JWT expiring within 5 min", () => {
+	it("returns true for JWT expiring within the one-minute refresh buffer", () => {
 		const client = createClient();
 		client.connectionDetails.tokenExpiresAt = null;
-		const soon = Math.floor(Date.now() / 1000) + 120;
+		const soon = Math.floor(Date.now() / 1000) + 30;
 		const payload = btoa(JSON.stringify({ exp: soon }));
 		client.connectionDetails.authToken = `header.${payload}.sig`;
 		expect(client.isTokenExpiringSoon()).toBe(true);
@@ -190,6 +190,25 @@ describe("sendRequest", () => {
 			cb({ success: false, error: "nope" }),
 		);
 		await expect(client.sendRequest("test", {})).rejects.toThrow("nope");
+	});
+
+	it("preserves structured response errors", async () => {
+		const client = createClient();
+		client.connected = true;
+		client.signalChannel.emit = vi.fn((_event, _data, cb) =>
+			cb({
+				success: false,
+				error: "already connected",
+				code: "PARTICIPANT_CONNECTION_CONFLICT",
+				details: { conflictId: "owner-1" },
+			}),
+		);
+
+		await expect(client.sendRequest("join_room", {})).rejects.toMatchObject<SFUResponseError>({
+			code: "PARTICIPANT_CONNECTION_CONFLICT",
+			details: { conflictId: "owner-1" },
+			message: "already connected",
+		});
 	});
 
 	it("rejects with TIMEOUT when an acknowledgement does not arrive", async () => {
@@ -301,12 +320,51 @@ describe("sendChatMessage", () => {
 			success: true,
 			timestamp: "2026-07-28T12:00:00.000Z",
 		});
-		await client.sendChatMessage(42 as unknown as string, {
-			clientId: 99 as unknown as string,
-		});
+		await Reflect.apply(client.sendChatMessage, client, [42, { clientId: 99 }]);
 		expect(sendRequest).toHaveBeenCalledWith("chat:send", {
 			message: "42",
 			clientId: "99",
+		});
+	});
+});
+
+describe("sendChatPin", () => {
+	it("throws when not connected", async () => {
+		const client = createClient();
+		client.connected = false;
+		await expect(client.sendChatPin("msg-1")).rejects.toThrow(
+			"Not connected to SFU",
+		);
+	});
+
+	it("sends chat:pin with the message id", async () => {
+		const client = createClient();
+		client.connected = true;
+		const sendRequest = vi.spyOn(client, "sendRequest").mockResolvedValue({
+			success: true,
+		});
+		await client.sendChatPin("msg-1");
+		expect(sendRequest).toHaveBeenCalledWith("chat:pin", {
+			messageId: "msg-1",
+			action: "pin",
+		});
+	});
+});
+
+describe("sendScreenShare", () => {
+	it("sends stop_share as an acknowledged request", async () => {
+		const client = createClient();
+		const sendRequest = vi
+			.spyOn(client, "sendRequest")
+			.mockResolvedValue({ success: true });
+
+		await client.sendScreenShare("stop_share", {
+			producerId: "screen-producer",
+		});
+
+		expect(sendRequest).toHaveBeenCalledWith("screen_share", {
+			action: "stop_share",
+			shareData: { producerId: "screen-producer" },
 		});
 	});
 });
@@ -421,13 +479,35 @@ describe("scheduleTokenRefresh", () => {
 		client.connectionDetails.tokenExpiresAt = Date.now() + 10_000;
 		client.connectionDetails.meetingId = "meet-1";
 
-		vi.mocked(frappeRequest).mockResolvedValue({
+		vi.mocked(request).mockResolvedValue({
 			auth_token: "new-token",
 			expires_in: 3600,
 			codec_strategy: "svc",
 		});
 		client.scheduleTokenRefresh();
-		expect(frappeRequest).toHaveBeenCalled();
+		expect(request).toHaveBeenCalled();
+	});
+
+	it("does not refresh an already-expired token", () => {
+		const client = createClient();
+		client.connectionDetails.tokenExpiresAt = Date.now() - 1;
+		client.connectionDetails.meetingId = "meet-1";
+
+		client.scheduleTokenRefresh();
+
+		expect(request).not.toHaveBeenCalled();
+		expect(client.tokenRefreshTimer).toBeNull();
+	});
+
+	it("schedules a five-minute guest token one minute before expiry", () => {
+		const client = createClient();
+		client.connectionDetails.tokenExpiresAt = Date.now() + 300_000;
+		client.connectionDetails.meetingId = "meet-1";
+		client.scheduleTokenRefresh();
+
+		expect(vi.getTimerCount()).toBe(1);
+		vi.advanceTimersByTime(239_999);
+		expect(request).not.toHaveBeenCalled();
 	});
 
 	it("clears existing timer before scheduling", () => {
@@ -488,11 +568,11 @@ describe("getConnectionDetails", () => {
 		});
 		expect(details.authToken).toBe("pre-tok");
 		expect(details.isHost).toBe(true);
-		expect(frappeRequest).not.toHaveBeenCalled();
+		expect(request).not.toHaveBeenCalled();
 	});
 
 	it("ignores prefetched details for a different meeting id", async () => {
-		vi.mocked(frappeRequest).mockResolvedValue({
+		vi.mocked(request).mockResolvedValue({
 			auth_token: "tok-1",
 			meeting_id: "meet-1",
 			user_id: "usr-1",
@@ -519,11 +599,11 @@ describe("getConnectionDetails", () => {
 			isCohost: false,
 		});
 		expect(details.authToken).toBe("tok-1");
-		expect(frappeRequest).toHaveBeenCalled();
+		expect(request).toHaveBeenCalled();
 	});
 
 	it("fetches regular connection details", async () => {
-		vi.mocked(frappeRequest).mockResolvedValue({
+		vi.mocked(request).mockResolvedValue({
 			auth_token: "tok-1",
 			meeting_id: "meet-1",
 			user_id: "usr-1",
@@ -544,11 +624,9 @@ describe("getConnectionDetails", () => {
 		expect(details.e2eeRequired).toBe(true);
 		expect(details.isHost).toBe(true);
 		expect(details.isCohost).toBe(false);
-		expect(frappeRequest).toHaveBeenCalledWith(
-			expect.objectContaining({
-				url: "suite.meet.api.meeting.get_sfu_connection_details",
-				params: { meeting_id: "meet-1" },
-			}),
+		expect(request).toHaveBeenCalledWith(
+			"/api/v2/method/suite.meet.api.meeting.get_sfu_connection_details",
+			{ meeting_id: "meet-1" },
 		);
 	});
 
@@ -556,8 +634,11 @@ describe("getConnectionDetails", () => {
 		sessionStorage.setItem("guest_id", "guest-1");
 		sessionStorage.setItem("guest_name", "Guest Alice");
 		sessionStorage.setItem("guest_meeting_id", "meet-2");
+		sessionStorage.setItem("guest_session_token", "private-proof");
 
-		vi.mocked(frappeRequest).mockResolvedValue({
+		vi.mocked(request).mockResolvedValue({
+			auth_token: "fresh-guest-token",
+			expires_in: 300,
 			sfu_url: "https://sfu.example.com",
 			sfu_port: "443",
 			codec_strategy: "svc",
@@ -565,10 +646,18 @@ describe("getConnectionDetails", () => {
 		});
 		const client = createClient();
 		const details = await client.getConnectionDetails("meet-2", "guest-token");
-		expect(details.authToken).toBe("guest-token");
+		expect(details.authToken).toBe("fresh-guest-token");
 		expect(details.userId).toBe("guest-1");
 		expect(details.userData?.is_guest).toBe(true);
 		expect(details.e2eeRequired).toBe(true);
+		expect(request).toHaveBeenCalledWith(
+			"/api/v2/method/suite.meet.api.meeting.refresh_guest_sfu_token",
+			{
+				meeting_id: "meet-2",
+				guest_id: "guest-1",
+				guest_session_token: "private-proof",
+			},
+		);
 	});
 });
 
@@ -590,7 +679,7 @@ describe("connect refresh", () => {
 		};
 		const signalChannel = client.signalChannel;
 
-		vi.mocked(frappeRequest).mockResolvedValue({
+		vi.mocked(request).mockResolvedValue({
 			auth_token: "fresh-token",
 			meeting_id: "meet-1",
 			user_id: "usr-1",
@@ -617,6 +706,7 @@ describe("connect refresh", () => {
 		sessionStorage.setItem("guest_id", "guest-2");
 		sessionStorage.setItem("guest_name", "Guest Bob");
 		sessionStorage.setItem("guest_meeting_id", "meet-2");
+		sessionStorage.setItem("guest_session_token", "private-proof-2");
 
 		const client = createClient();
 		client.connected = true;
@@ -633,7 +723,9 @@ describe("connect refresh", () => {
 			isCohost: false,
 		};
 
-		vi.mocked(frappeRequest).mockResolvedValue({
+		vi.mocked(request).mockResolvedValue({
+			auth_token: "fresh-guest-token-2",
+			expires_in: 300,
 			sfu_url: "https://sfu.example.com",
 			sfu_port: "443",
 			codec_strategy: "svc",
@@ -689,28 +781,16 @@ describe("E2EE signaling payloads", () => {
 		).RTCRtpReceiver;
 
 		try {
-			(
-				globalThis as typeof globalThis & {
-					RTCRtpSender?: {
-						prototype?: { createEncodedStreams?: () => void };
-					};
-				}
-			).RTCRtpSender = {
+			Reflect.set(globalThis, "RTCRtpSender", {
 				prototype: {
 					createEncodedStreams: () => {},
 				},
-			} as unknown as typeof globalThis.RTCRtpSender;
-			(
-				globalThis as typeof globalThis & {
-					RTCRtpReceiver?: {
-						prototype?: { createEncodedStreams?: () => void };
-					};
-				}
-			).RTCRtpReceiver = {
+			});
+			Reflect.set(globalThis, "RTCRtpReceiver", {
 				prototype: {
 					createEncodedStreams: () => {},
 				},
-			} as unknown as typeof globalThis.RTCRtpReceiver;
+			});
 
 			const sendRequestSpy = vi
 				.spyOn(client, "sendRequest")
@@ -750,6 +830,29 @@ describe("E2EE signaling payloads", () => {
 				}
 			).RTCRtpReceiver = originalReceiver;
 		}
+	});
+
+	it("includes Participant Connection ownership in join requests", async () => {
+		const client = createClient();
+		client.connected = true;
+		const sendRequest = vi
+			.spyOn(client, "sendRequest")
+			.mockResolvedValue({ success: true });
+
+		await client.joinRoom(
+			"room-1",
+			{ name: "Alice" },
+			{ audio_enabled: false },
+			{ connectionId: "connection-1", conflictId: "owner-1" },
+		);
+
+		expect(sendRequest).toHaveBeenCalledWith(
+			"join_room",
+			expect.objectContaining({
+				connectionId: "connection-1",
+				conflictId: "owner-1",
+			}),
+		);
 	});
 
 	it("reports RTCRtpScriptTransform capability in join request", async () => {
@@ -843,7 +946,7 @@ describe("E2EE signaling payloads", () => {
 	});
 
 	it("picks up e2ee_required returned by refresh_sfu_token", async () => {
-		vi.mocked(frappeRequest).mockResolvedValue({
+		vi.mocked(request).mockResolvedValue({
 			auth_token: "tok-2",
 			expires_in: 3600,
 			codec_strategy: "svc",
@@ -855,8 +958,44 @@ describe("E2EE signaling payloads", () => {
 		expect(client.connectionDetails.e2eeRequired).toBe(true);
 	});
 
+	it("refreshes guests only with their private session proof", async () => {
+		sessionStorage.setItem("guest_session_token", "private-proof");
+		vi.mocked(request).mockResolvedValue({
+			auth_token: "guest-token-2",
+			expires_in: 300,
+		});
+		const client = createClient();
+		client.connectionDetails.meetingId = "meet-2";
+		client.connectionDetails.userId = "guest-2";
+		client.connectionDetails.userData = { is_guest: true };
+
+		await client.refreshToken();
+
+		expect(request).toHaveBeenCalledWith(
+			"/api/v2/method/suite.meet.api.meeting.refresh_guest_sfu_token",
+			{
+				meeting_id: "meet-2",
+				guest_id: "guest-2",
+				guest_session_token: "private-proof",
+			},
+		);
+		expect(client.connectionDetails.tokenExpiresAt).toBe(Date.now() + 300_000);
+	});
+
+	it("fails guest refresh closed without proof", async () => {
+		const client = createClient();
+		client.connectionDetails.meetingId = "meet-2";
+		client.connectionDetails.userId = "guest-2";
+		client.connectionDetails.userData = { is_guest: true };
+
+		await expect(client.refreshToken()).rejects.toThrow(
+			"Guest session proof required",
+		);
+		expect(request).not.toHaveBeenCalled();
+	});
+
 	it("does not downgrade local e2ee requirement during token refresh", async () => {
-		vi.mocked(frappeRequest).mockResolvedValue({
+		vi.mocked(request).mockResolvedValue({
 			auth_token: "tok-2",
 			expires_in: 3600,
 			codec_strategy: "svc",
@@ -866,6 +1005,71 @@ describe("E2EE signaling payloads", () => {
 		client.connectionDetails.e2eeRequired = true;
 		await client.refreshToken();
 		expect(client.connectionDetails.e2eeRequired).toBe(true);
+	});
+
+	it("forces a post-authorization refresh after an in-flight request", async () => {
+		const refreshResolvers: Array<
+			(value: { auth_token: string; expires_in: number }) => void
+		> = [];
+		vi.mocked(request).mockImplementation(
+			() => new Promise((resolve) => refreshResolvers.push(resolve)),
+		);
+		const client = createClient();
+		client.connected = true;
+		const sendRequestSpy = vi
+			.spyOn(client, "sendRequest")
+			.mockResolvedValue({ success: true });
+
+		const scheduledRefresh = client.refreshToken({ skipServerUpdate: true });
+		const promotionRefresh = client.refreshToken({ forceNewRequest: true });
+		refreshResolvers[0]({ auth_token: "pre-promotion", expires_in: 3600 });
+		await scheduledRefresh;
+		await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+		refreshResolvers[1]({ auth_token: "post-promotion", expires_in: 3600 });
+
+		await expect(
+			Promise.all([scheduledRefresh, promotionRefresh]),
+		).resolves.toEqual(["pre-promotion", "post-promotion"]);
+		expect(sendRequestSpy).toHaveBeenCalledWith("auth:update_token", {
+			token: "post-promotion",
+		});
+	});
+
+	it("discards a token refresh from before disconnect", async () => {
+		let resolveRefresh!: (value: { auth_token: string; expires_in: number }) => void;
+		vi.mocked(request).mockImplementation(
+			() => new Promise((resolve) => (resolveRefresh = resolve)),
+		);
+		const client = createClient();
+		const refresh = client.refreshToken();
+
+		client.disconnect();
+		client.connectionDetails.authToken = "current-token";
+		resolveRefresh({ auth_token: "stale-token", expires_in: 3600 });
+
+		await expect(refresh).rejects.toThrow(
+			"Token refresh superseded by disconnect",
+		);
+		expect(client.connectionDetails.authToken).toBe("current-token");
+		expect(client.signalChannel.updateAuth).not.toHaveBeenCalled();
+	});
+
+	it("does not sync a refreshed token after the connection is rebuilt", async () => {
+		vi.mocked(request).mockResolvedValue({
+			auth_token: "old-connection-token",
+			expires_in: 3600,
+		});
+		const client = createClient();
+		client.connected = true;
+		vi.mocked(client.signalChannel.updateAuth).mockImplementation(() => {
+			client.disconnect();
+		});
+		const sendRequestSpy = vi.spyOn(client, "sendRequest");
+
+		await expect(client.refreshToken()).rejects.toThrow(
+			"Token refresh superseded by disconnect",
+		);
+		expect(sendRequestSpy).not.toHaveBeenCalled();
 	});
 
 	it("setE2EERequired updates connectionDetails for the realtime-event flow", () => {
@@ -909,6 +1113,7 @@ describe("setupDefaultHandlers", () => {
 			"reconnect",
 			"reconnect_error",
 			"reconnect_attempt",
+			"auth:expired",
 			"participant_joined",
 			"participant_left",
 			"producer_created",
@@ -946,6 +1151,45 @@ describe("setupDefaultHandlers", () => {
 		const handler = client.eventHandlers.get("disconnect");
 		handler();
 		expect(client.connected).toBe(false);
+	});
+
+	it("recovers auth:expired through token refresh and server token update", async () => {
+		vi.mocked(request).mockResolvedValue({
+			auth_token: "fresh-token",
+			expires_in: 3600,
+		});
+		const client = createClient();
+		client.connected = true;
+		client.connectionDetails.meetingId = "meet-1";
+		const sendRequest = vi
+			.spyOn(client, "sendRequest")
+			.mockResolvedValue({ success: true });
+
+		client.eventHandlers.get("auth:expired")?.();
+
+		await vi.waitFor(() =>
+			expect(sendRequest).toHaveBeenCalledWith("auth:update_token", {
+				token: "fresh-token",
+			}),
+		);
+	});
+
+	it("refreshes an already-expired token before a reconnect attempt", async () => {
+		vi.mocked(request).mockResolvedValue({
+			auth_token: "reconnect-token",
+			expires_in: 3600,
+		});
+		const client = createClient();
+		client.connectionDetails.meetingId = "meet-1";
+		client.connectionDetails.tokenExpiresAt = Date.now() - 1;
+
+		client.eventHandlers.get("reconnect_attempt")?.();
+
+		await vi.waitFor(() =>
+			expect(client.signalChannel.updateAuth).toHaveBeenCalledWith(
+				"reconnect-token",
+			),
+		);
 	});
 });
 

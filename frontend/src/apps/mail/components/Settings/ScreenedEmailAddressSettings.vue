@@ -111,26 +111,16 @@
 		</div>
 
 		<AddScreenedSenderModal v-model="showAddModal" />
-		<Dialog v-model="showRemoveModal" :options="removeModalOptions" />
-		<Dialog v-model="showMoveToInbox" :options="moveToInboxOptions" />
+		<Dialog v-model:open="showRemoveModal" v-bind="removeModalOptions" />
+		<Dialog v-model:open="showMoveToInbox" v-bind="moveToInboxOptions" />
 	</div>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, useTemplateRef } from 'vue'
 import {
-	Button,
-	Dialog,
-	FeatherIcon,
-	FormControl,
-	ListHeader,
-	ListRows,
-	ListSelectBanner,
-	ListView,
-	SettingsRow,
-	Switch,
-	createResource,
-} from 'frappe-ui'
+	Button, Dialog, FormControl, SettingsRow, Switch, createResource } from 'frappe-ui'
+import { Icon as FeatherIcon, ListHeader, ListRows, ListSelectBanner, ListView } from 'frappe-ui/experimental'
 import AppSettingsHeader from '@/components/settings/AppSettingsHeader.vue'
 
 import AdaptiveDropdown from '@/apps/mail/components/AdaptiveDropdown.vue'

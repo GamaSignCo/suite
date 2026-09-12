@@ -58,7 +58,9 @@ def mark_as_read(name: str | None = None, all: bool = False):
             "Drive Notification", {"to_user": frappe.session.user, "read": False}, "read", True
         )
         return
-    frappe.db.set_value("Drive Notification", name, "read", True)
+    # filter on the recipient too: a bare name would let any caller flip the flag
+    # on someone else's notification
+    frappe.db.set_value("Drive Notification", {"name": name, "to_user": frappe.session.user}, "read", True)
     return
 
 
@@ -103,9 +105,9 @@ def notify_share(entity_name, docperm_name):
 
 
 def create_notification(from_user: str, to_user: str, type: str, entity: str, message: str | None = None):
-    from suite.drive.api.permissions import get_user_access
+    from suite.drive.api.permissions import get_user_access_for_user
 
-    user_access = get_user_access(entity.name, to_user)
+    user_access = get_user_access_for_user(entity.name, to_user)
     if user_access.get("read") == 0:
         return
 
@@ -153,7 +155,6 @@ def send_share_email(to, message, link, type_):
                 "link": link,
             },
             inline_images=drive_logo_inline_images(),
-            now=True,
         )
-    except:
+    except Exception:
         pass

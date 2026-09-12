@@ -60,6 +60,10 @@ RESPONSE_LOGO_EMBED = "event-logo.png"
 # Shared font stack for the event email templates (passed into the render context).
 EMAIL_FONT = "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
 
+# `strip_html_tags` only drops the tags, so the <style> block that carries the templates'
+# responsive rules would otherwise land in the text/plain part as raw CSS.
+STYLE_BLOCK_PATTERN = re.compile(r"<style\b[^>]*>.*?</style>", re.IGNORECASE | re.DOTALL)
+
 
 def custom_event_invites_enabled() -> bool:
     """Returns True when Mail Settings is configured to send invites from the client."""
@@ -89,16 +93,18 @@ def notify_participants(
     action: str,
     event_id: str | None = None,
     event_snapshot: dict | None = None,
-    previous_emails: list[str] | None = None,
+    previous_attendees: dict[str, dict] | None = None,
     recurrence_id: str | None = None,
 ) -> None:
     """Sends invite/update/cancel emails for an event's participants.
 
     `action` is one of "invite", "update", "cancel". Pass `event_id` to fetch the current
     event, or a pre-fetched `event_snapshot` (needed for cancellations after deletion).
-    For updates, `previous_emails` enables new -> invite / kept -> update / gone -> cancel;
-    omit it to send a plain update to everyone. `recurrence_id` scopes a cancellation to a
-    single occurrence of a recurring event.
+    For updates, `previous_attendees` (as `mail_attendees` returned them before the write)
+    enables new -> invite / kept -> update / gone -> cancel; omit it to send a plain update to
+    everyone. A cancellation to someone gone from the event is addressed from their previous
+    record, so a member who left a mailing list still sees the list in the To header.
+    `recurrence_id` scopes a cancellation to a single occurrence of a recurring event.
 
     Note: the snapshot arg is named `event_snapshot`, not `event` — `event` is a reserved
     kwarg of `frappe.enqueue` and would be swallowed before reaching this function.
@@ -112,8 +118,8 @@ def notify_participants(
         event = events[0]
 
     organizer = (event.get("organizerCalendarAddress") or "").lower().replace("mailto:", "")
-    attendees = _attendees(event, organizer)
-    plan = _plan(action, set(attendees), previous_emails)
+    attendees = mail_attendees(event, organizer)
+    plan = _plan(action, set(attendees), None if previous_attendees is None else set(previous_attendees))
     if not plan:
         return
 
@@ -121,10 +127,9 @@ def notify_participants(
     expires_at = _rsvp_expiry(event)
 
     for email, kind in plan.items():
+        participant = attendees.get(email) or (previous_attendees or {}).get(email)
         try:
-            _send(
-                account, user, event, organizer, email, attendees.get(email), kind, expires_at, recurrence_id
-            )
+            _send(account, user, event, organizer, email, participant, kind, expires_at, recurrence_id)
         except Exception:
             log_error("Calendar", title=_("Failed to send event {0} email to {1}").format(kind, email))
 
@@ -183,7 +188,13 @@ def notify_organizer_of_response(account: str, event_id: str, participant_email:
         frappe.set_user(original_user)
 
 
-def notify_organizer_of_reply(account: str, event_id: str, responder_email: str, status: str) -> None:
+def notify_organizer_of_reply(
+    account: str,
+    event_id: str,
+    responder_email: str,
+    status: str,
+    recurrence_id: str | None = None,
+) -> None:
     """Sends the organizer an attendee's RSVP as a custom-template email carrying an iTIP REPLY.
 
     The custom-invite counterpart of the server's iMIP scheduling mail: when Mail Settings sends
@@ -223,7 +234,9 @@ def notify_organizer_of_reply(account: str, event_id: str, responder_email: str,
             logo_src_attr='src="cid:eventlogo"',
         )
 
-        ics = build_event_ics(event, method="REPLY", attendee_email=responder_email)
+        ics = build_event_ics(
+            event, method="REPLY", recurrence_id=recurrence_id, attendee_email=responder_email
+        )
         message = _build_mime(responder_name, responder_email, organizer, subject, html, ics, "REPLY")
 
         MailQueue._create(
@@ -235,6 +248,9 @@ def notify_organizer_of_reply(account: str, event_id: str, responder_email: str,
             raw_message=message,
             via_api=True,
             delivery_mode="Enqueue",
+            # The reply is a mechanical iTIP message, not correspondence — don't leave a copy
+            # in the attendee's Sent folder.
+            destroy_after_submit=True,
         )
     except Exception:
         log_error("Calendar", title=_("Failed to send RSVP reply for event {0}").format(event_id))
@@ -247,7 +263,7 @@ def _response_inline_images() -> list[dict]:
     return [{"filename": RESPONSE_LOGO_EMBED, "filecontent": logo}] if logo else []
 
 
-def _plan(action: str, current: set[str], previous_emails: list[str] | None) -> dict[str, str]:
+def _plan(action: str, current: set[str], previous: set[str] | None) -> dict[str, str]:
     """Maps each recipient email to the email kind (invite/update/cancel) to send."""
 
     if action == "invite":
@@ -256,10 +272,9 @@ def _plan(action: str, current: set[str], previous_emails: list[str] | None) -> 
         return {email: "cancel" for email in current}
 
     # action == "update"
-    if previous_emails is None:
+    if previous is None:
         return {email: "update" for email in current}
 
-    previous = set(previous_emails)
     plan = {email: ("update" if email in previous else "invite") for email in current}
     for email in previous - current:
         plan[email] = "cancel"
@@ -290,7 +305,9 @@ def _send(
 
     from_name = _organizer_name(account, event, organizer)
     subject, html = _render(kind, event, organizer, from_name, participant, links)
-    message = _build_mime(from_name, organizer, email, subject, html, ics, method)
+    # The header may name the mailing list a member came through; the envelope stays theirs.
+    to_header = participant["to"] if participant else email
+    message = _build_mime(from_name, organizer, to_header, subject, html, ics, method)
 
     MailQueue._create(
         user=user,
@@ -301,6 +318,9 @@ def _send(
         raw_message=message,
         via_api=True,
         delivery_mode="Enqueue",
+        # Recipients get the email; the organizer's copy is destroyed after submission so
+        # invite blasts don't pile up in their Sent folder (the event itself is the record).
+        destroy_after_submit=True,
     )
 
 
@@ -397,7 +417,7 @@ def _build_mime(from_name, organizer, to_email, subject, html, ics, method) -> s
     root["Message-ID"] = make_msgid()
 
     alternative = MIMEMultipart("alternative")
-    alternative.attach(MIMEText(strip_html_tags(html), "plain", "utf-8"))
+    alternative.attach(MIMEText(_plain_text(html), "plain", "utf-8"))
     alternative.attach(MIMEText(html, "html", "utf-8"))
 
     # Inline calendar part carries the iTIP method so clients can offer native controls.
@@ -436,6 +456,12 @@ def _build_mime(from_name, organizer, to_email, subject, html, ics, method) -> s
     return root.as_string()
 
 
+def _plain_text(html: str) -> str:
+    """Returns the text/plain alternative for a rendered email body."""
+
+    return strip_html_tags(STYLE_BLOCK_PATTERN.sub("", html))
+
+
 _IMAGE_CACHE: dict[str, bytes] = {}
 
 
@@ -454,17 +480,48 @@ def _image_bytes(*path_parts: str) -> bytes | None:
     return _IMAGE_CACHE[key] or None
 
 
-def _attendees(event: dict, organizer: str) -> dict[str, dict]:
-    """Returns {email: {uid, name}} for every participant except the organizer."""
+def mail_attendees(event: dict, organizer: str) -> dict[str, dict]:
+    """Returns {email: {uid, name, to}} for every participant the organizer mails.
 
+    A participant with scheduling turned off is skipped: that is a mailing list kept on the event
+    for display, whose members are invited one by one. `to` is what the To header shows, the list
+    a member came through when there is one, so the mail reads like any other mail to the list.
+    """
+
+    participants = event.get("participants") or {}
     attendees = {}
-    for uid, participant in (event.get("participants") or {}).items():
-        email = (participant.get("calendarAddress") or "").lower().replace("mailto:", "")
-        email = email or (participant.get("email") or "").lower()
+    for uid, participant in participants.items():
+        if participant.get("scheduleAgent") == "none":
+            continue
+
+        email = _address(participant)
         if email and email != organizer:
-            attendees[email] = {"uid": uid, "name": participant.get("name") or email}
+            attendees[email] = {
+                "uid": uid,
+                "name": participant.get("name") or email,
+                "to": _to_header(participants, participant) or email,
+            }
 
     return attendees
+
+
+def _to_header(participants: dict, participant: dict) -> str | None:
+    """Returns the formatted address of the first group a participant was invited through."""
+
+    for group_id in participant.get("memberOf") or {}:
+        group = participants.get(group_id) or {}
+        if address := _address(group):
+            name = (group.get("name") or "").strip()
+            return formataddr((name, address)) if name and name.lower() != address else address
+
+    return None
+
+
+def _address(participant: dict) -> str:
+    """Returns a participant's bare email address, lowercased."""
+
+    address = (participant.get("calendarAddress") or participant.get("email") or "").lower()
+    return address.replace("mailto:", "")
 
 
 def _format_when(event: dict) -> str:
@@ -486,8 +543,7 @@ def _display_name(event: dict, email: str) -> str:
     """Returns the participant display name for an email, if the event lists one."""
 
     for participant in (event.get("participants") or {}).values():
-        address = (participant.get("calendarAddress") or participant.get("email") or "").lower()
-        if address.replace("mailto:", "") == email and participant.get("name"):
+        if _address(participant) == email and participant.get("name"):
             return participant["name"]
 
     return ""

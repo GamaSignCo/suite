@@ -219,10 +219,16 @@ class ContactCardService(ContactsService):
                 raise RuntimeError(f"ContactCard/parse failed: {body}")
 
             result["parsed"].update(body.get("parsed", {}))
-            if not_found := body.get("notFound", {}):
-                result["notFound"].update(not_found)
-            if not_parsable := body.get("notParsable", {}):
-                result["notParsable"].update(not_parsable)
+            # The server reports notFound/notParsable as blob-id arrays; keep the
+            # dict shape callers read (.keys()) by keying the ids.
+            if not_found := body.get("notFound"):
+                result["notFound"].update(
+                    dict.fromkeys(not_found) if isinstance(not_found, list) else not_found
+                )
+            if not_parsable := body.get("notParsable"):
+                result["notParsable"].update(
+                    dict.fromkeys(not_parsable) if isinstance(not_parsable, list) else not_parsable
+                )
 
             remaining = remaining[batch_size:]
 

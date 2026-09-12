@@ -2,18 +2,14 @@
 {% block card %}
 {% import "templates/emails/_event_macros.html" as m with context %}
 {%- set pill = {'yes': ('#eaf7ef', '#1a7f45'), 'maybe': ('#fdf6ec', '#a9690a'), 'no': ('#fff2f2', '#e03636')}.get(response_state, ('#f0f0f0', '#383838')) -%}
-						<p style="margin: 0 0 6px; font-size: 14px; color: #7c7c7c;">New response to your invitation</p>
-						<h1 style="margin: 0; font-size: 22px; line-height: 1.25; font-weight: 700; color: #171717; letter-spacing: -0.01em;">{{ title }}</h1>
-						<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color: #f8f8f8; border-radius: 12px; margin: 22px 0;">
-							<tr>
-								<td style="padding: 16px 18px; font-family: {{ font }};">
-									<div style="font-size: 15px; color: #171717; font-weight: 600;">{{ responder_name }}</div>
-									{% if responder_name != responder_email %}
-									<div style="font-size: 13px; margin-top: 2px;"><a href="mailto:{{ responder_email }}" style="color: #007be0; text-decoration: none;">{{ responder_email }}</a></div>
-									{% endif %}
-									<div style="margin-top: 12px;"><span style="display: inline-block; padding: 5px 12px; background-color: {{ pill[0] }}; color: {{ pill[1] }}; border-radius: 8px; font-size: 13px; font-weight: 600;">Responded &ldquo;{{ response_label }}&rdquo;</span></div>
-								</td>
-							</tr>
-						</table>
+						{{ m.eyebrow('New response to your invitation') }}
+						{{ m.heading(title) }}
+						{% call m.panel(padding='16px 18px') %}
+							{#- Name and address on one line, separated the way the Organizer row below does
+							    it; weight and color already tell them apart, so a second line only adds
+							    height. `word-break` lets a long address wrap instead of widening the card. -#}
+							<div style="font-size: 15px; color: #171717; font-weight: 600; line-height: 1.5; word-break: break-word;">{{ responder_name }}{% if responder_name != responder_email %} <span style="color: #b5b5b5; font-weight: 400;">&middot;</span> <a href="mailto:{{ responder_email }}" style="color: #007be0; text-decoration: none; font-weight: 400;">{{ responder_email }}</a>{% endif %}</div>
+							<div style="margin-top: 12px;"><span style="display: inline-block; padding: 5px 12px; background-color: {{ pill[0] }}; color: {{ pill[1] }}; border-radius: 8px; font-size: 13px; font-weight: 600;">Responded &ldquo;{{ response_label }}&rdquo;</span></div>
+						{% endcall %}
 						{{ m.details_table('When', when, timezone, location, organizer_name, organizer_email, bold=true) }}
 {% endblock %}

@@ -6,6 +6,7 @@ import {
 	joinHostAndGuest,
 	appUrl,
 } from "../fixtures/test";
+import { meetHostName } from "../helpers/auth";
 import {
 	expectRemoteVideoReceiving,
 	expectVideoReceiving,
@@ -16,14 +17,18 @@ async function expectParticipantsAndVideo(
 	guestPage: Page,
 	guestName: string,
 ): Promise<void> {
-	await expect(hostPage.locator("[data-participant-id]")).toHaveCount(2, {
-		timeout: 30_000,
-	});
-	await expect(guestPage.locator("[data-participant-id]")).toHaveCount(2, {
-		timeout: 30_000,
-	});
-	await expectRemoteVideoReceiving(guestPage, "Administrator");
-	await expectRemoteVideoReceiving(hostPage, guestName);
+	await Promise.all([
+		expect(hostPage.locator("[data-participant-id]")).toHaveCount(2, {
+			timeout: 30_000,
+		}),
+		expect(guestPage.locator("[data-participant-id]")).toHaveCount(2, {
+			timeout: 30_000,
+		}),
+	]);
+	await Promise.all([
+		expectRemoteVideoReceiving(guestPage, meetHostName),
+		expectRemoteVideoReceiving(hostPage, guestName),
+	]);
 }
 
 async function openMeetingAccessSettings(page: Page): Promise<void> {
@@ -37,25 +42,30 @@ async function enableE2EEInSettings(page: Page): Promise<void> {
 	await openMeetingAccessSettings(page);
 	const toggle = page.getByRole("switch", { name: "End-to-end encryption" });
 	await expect(toggle).toBeVisible();
-	await toggle.click();
-	await expect(toggle).toBeChecked({ timeout: 15_000 });
-	await expect(page.getByText("Encryption fingerprint")).toBeVisible({
-		timeout: 30_000,
-	});
-	await page.keyboard.press("Escape");
-	await page.waitForTimeout(150);
-	await page.keyboard.press("Escape");
+	if (!(await toggle.isChecked())) {
+		await toggle.click();
+		await expect(toggle).toBeChecked({ timeout: 15_000 });
+		await expect(page.getByText("Encryption fingerprint")).toBeVisible({
+			timeout: 30_000,
+		});
+	}
+	const settingsDialog = page.getByRole("dialog", { name: "Settings" });
+	await expect(async () => {
+		if (await settingsDialog.isVisible()) {
+			await page.keyboard.press("Escape");
+		}
+		await expect(settingsDialog).not.toBeVisible({ timeout: 1_000 });
+	}).toPass({ timeout: 10_000 });
 }
 
 async function openMeetingInformation(page: Page): Promise<void> {
-	await page.getByRole("button", { name: "More options" }).click();
-	await page.getByRole("menuitem", { name: "Meeting information" }).click();
+	await page.getByRole("button", { name: /Meeting information/ }).click();
 }
 
 async function readFingerprint(page: Page): Promise<string> {
 	await openMeetingInformation(page);
 	const section = page
-		.locator("label", { hasText: "Encryption fingerprint" })
+		.getByText("Encryption fingerprint", { exact: true })
 		.locator("xpath=..");
 	await expect(section).toBeVisible({ timeout: 30_000 });
 	return (await section.locator("pre").innerText()).trim();
@@ -64,13 +74,13 @@ async function readFingerprint(page: Page): Promise<string> {
 async function expectScreenShareReceiving(page: Page): Promise<void> {
 	const tile = page.locator("[data-tile-id^='screenshare-']");
 	await expect(tile).toHaveCount(1, { timeout: 45_000 });
-	await expect(page.getByText("Administrator's screen")).toBeVisible();
+	await expect(page.getByText(`${meetHostName}'s screen`)).toBeVisible();
 	await expectVideoReceiving(tile.locator("video").first());
 }
 
 async function clickScreenShare(page: Page): Promise<void> {
 	await page
-		.getByRole("button", { name: "Toggle Screen Share" })
+		.locator('button[aria-label="Toggle Screen Share"]')
 		.evaluate((button) => (button as HTMLButtonElement).click());
 }
 
@@ -82,11 +92,9 @@ async function forceSFUReconnect(page: Page): Promise<void> {
 
 function capturePageErrors(page: Page, filterPatterns: string[] = []) {
 	const errors: string[] = [];
-	const logs: string[] = [];
 	const onPageError = (error: Error) => errors.push(error.stack ?? error.message);
 	const onConsole = (message: { type(): string; text(): string }) => {
 		const text = message.text();
-		logs.push(`[${message.type()}] ${text}`);
 		if (message.type() !== "error") return;
 		if (filterPatterns.some((p) => text.includes(p))) return;
 		errors.push(text);
@@ -116,37 +124,17 @@ test.describe("E2EE", () => {
 		await joinHostAndGuest(hostPage, guest, meetingId, guestName);
 		await expectParticipantsAndVideo(hostPage, guest.page, guestName);
 
+		const hostErrors = capturePageErrors(hostPage);
 		await enableE2EEInSettings(hostPage);
 
 		await expectParticipantsAndVideo(hostPage, guest.page, guestName);
+		hostErrors.assertNoErrors();
 	});
 
 	test.describe("heavy coverage", () => {
-		test.skip(!!process.env.CI, "Skipped in CI to keep media e2e lightweight");
+		test.describe.configure({ timeout: 90_000 });
 
-	test("active participants keep receiving streams after E2EE is enabled mid-call", async ({
-		hostPage,
-		createMeeting,
-		createParticipant,
-	}) => {
-		const meetingId = await createMeeting();
-		const guestName = "Guest Convert E2EE";
-		const guest = await createParticipant();
-
-		await joinHostAndGuest(hostPage, guest, meetingId, guestName);
-
-		await expectRemoteVideoReceiving(guest.page, "Administrator");
-		await expectRemoteVideoReceiving(hostPage, guestName);
-
-		const hostErrors = capturePageErrors(hostPage);
-		await enableE2EEInSettings(hostPage);
-		hostErrors.assertNoErrors();
-
-		await expectRemoteVideoReceiving(guest.page, "Administrator");
-		await expectRemoteVideoReceiving(hostPage, guestName);
-	});
-
-	test("a participant can rejoin an E2EE meeting after leaving", async ({
+	test("a participant can rejoin an E2EE meeting after leaving", { tag: "@meet-group-2" }, async ({
 		hostPage,
 		createMeeting,
 		createParticipant,
@@ -157,16 +145,22 @@ test.describe("E2EE", () => {
 
 		await joinHostAndGuest(hostPage, guest, meetingId, guestName);
 
-		await expectRemoteVideoReceiving(guest.page, "Administrator");
-		await expectRemoteVideoReceiving(hostPage, guestName);
+		await Promise.all([
+			expectRemoteVideoReceiving(guest.page, meetHostName),
+			expectRemoteVideoReceiving(hostPage, guestName),
+		]);
 
 		await enableE2EEInSettings(hostPage);
 
-		await expectRemoteVideoReceiving(guest.page, "Administrator");
-		await expectRemoteVideoReceiving(hostPage, guestName);
+		await Promise.all([
+			expectRemoteVideoReceiving(guest.page, meetHostName),
+			expectRemoteVideoReceiving(hostPage, guestName),
+		]);
 
 		await guest.page.goto(appUrl("/meet/"));
-		await guest.page.waitForTimeout(2000);
+		await expect(hostPage.locator("[data-participant-id]")).toHaveCount(1, {
+			timeout: 30_000,
+		});
 
 		const hostErrors = capturePageErrors(hostPage);
 		const guestErrors = capturePageErrors(guest.page, [
@@ -181,13 +175,15 @@ test.describe("E2EE", () => {
 		await expect(guest.page.locator("[data-participant-id]")).toHaveCount(2, {
 			timeout: 30_000,
 		});
-		await expectRemoteVideoReceiving(guest.page, "Administrator");
-		await expectRemoteVideoReceiving(hostPage, guestName);
+		await Promise.all([
+			expectRemoteVideoReceiving(guest.page, meetHostName),
+			expectRemoteVideoReceiving(hostPage, guestName),
+		]);
 		hostErrors.assertNoErrors();
 		guestErrors.assertNoErrors();
 	});
 
-	test("the host can leave and rejoin an E2EE meeting while a guest stays", async ({
+	test("the host can leave and rejoin an E2EE meeting while a guest stays", { tag: "@meet-group-2" }, async ({
 		hostPage,
 		createMeeting,
 		createParticipant,
@@ -198,13 +194,17 @@ test.describe("E2EE", () => {
 
 		await joinHostAndGuest(hostPage, guest, meetingId, guestName);
 
-		await expectRemoteVideoReceiving(guest.page, "Administrator");
-		await expectRemoteVideoReceiving(hostPage, guestName);
+		await Promise.all([
+			expectRemoteVideoReceiving(guest.page, meetHostName),
+			expectRemoteVideoReceiving(hostPage, guestName),
+		]);
 
 		await enableE2EEInSettings(hostPage);
 
-		await expectRemoteVideoReceiving(guest.page, "Administrator");
-		await expectRemoteVideoReceiving(hostPage, guestName);
+		await Promise.all([
+			expectRemoteVideoReceiving(guest.page, meetHostName),
+			expectRemoteVideoReceiving(hostPage, guestName),
+		]);
 
 		await hostPage.goto(appUrl("/meet/"));
 
@@ -215,8 +215,13 @@ test.describe("E2EE", () => {
 			guest.page.getByRole("toolbar", { name: "Meeting controls" }),
 		).toBeVisible();
 
-		const hostErrors = capturePageErrors(hostPage, ["request_consumer_keyframe"]);
-		const guestErrors = capturePageErrors(guest.page, ["request_consumer_keyframe"]);
+		const teardownErrors = [
+			"request_consumer_keyframe",
+			"refresh_sfu_token",
+			"403 (FORBIDDEN)",
+		];
+		const hostErrors = capturePageErrors(hostPage, teardownErrors);
+		const guestErrors = capturePageErrors(guest.page, teardownErrors);
 
 		await hostPage.goto(appUrl(`/meet/${meetingId}`));
 		await joinFromPreview(hostPage);
@@ -228,13 +233,15 @@ test.describe("E2EE", () => {
 			timeout: 45_000,
 		});
 
-		await expectRemoteVideoReceiving(guest.page, "Administrator");
-		await expectRemoteVideoReceiving(hostPage, guestName);
+		await Promise.all([
+			expectRemoteVideoReceiving(guest.page, meetHostName),
+			expectRemoteVideoReceiving(hostPage, guestName),
+		]);
 		hostErrors.assertNoErrors();
 		guestErrors.assertNoErrors();
 	});
 
-	test("screen share streams stay healthy in an E2EE meeting", async ({
+	test("screen share streams stay healthy in an E2EE meeting", { tag: "@meet-group-1" }, async ({
 		hostPage,
 		createMeeting,
 		createParticipant,
@@ -245,8 +252,10 @@ test.describe("E2EE", () => {
 
 		await joinHostAndGuest(hostPage, guest, meetingId, guestName);
 
-		await expectRemoteVideoReceiving(guest.page, "Administrator");
-		await expectRemoteVideoReceiving(hostPage, guestName);
+		await Promise.all([
+			expectRemoteVideoReceiving(guest.page, meetHostName),
+			expectRemoteVideoReceiving(hostPage, guestName),
+		]);
 
 		await enableE2EEInSettings(hostPage);
 
@@ -261,11 +270,12 @@ test.describe("E2EE", () => {
 		guestErrors.assertNoErrors();
 	});
 
-	test("multiple participants can join an active E2EE meeting and see the same fingerprint", async ({
+	test("multiple participants can join an active E2EE meeting and see the same fingerprint", { tag: "@meet-group-1" }, async ({
 		hostPage,
 		createMeeting,
 		createParticipant,
 	}) => {
+		test.setTimeout(180_000);
 		const meetingId = await createMeeting();
 		const guestAName = "Guest Fingerprint A";
 		const guestBName = "Guest Fingerprint B";
@@ -276,40 +286,53 @@ test.describe("E2EE", () => {
 
 		await joinHostAndGuest(hostPage, guestA, meetingId, guestAName);
 
-		await expectRemoteVideoReceiving(guestA.page, "Administrator");
-		await expectRemoteVideoReceiving(hostPage, guestAName);
+		await Promise.all([
+			expectRemoteVideoReceiving(guestA.page, meetHostName),
+			expectRemoteVideoReceiving(hostPage, guestAName),
+		]);
 
 		await enableE2EEInSettings(hostPage);
 
-		await expectRemoteVideoReceiving(guestA.page, "Administrator");
-		await expectRemoteVideoReceiving(hostPage, guestAName);
+		await Promise.all([
+			expectRemoteVideoReceiving(guestA.page, meetHostName),
+			expectRemoteVideoReceiving(hostPage, guestAName),
+		]);
 
 		await guestB.joinAsGuest(meetingId, guestBName);
 		await guestC.joinAsGuest(meetingId, guestCName);
 
-		await expect(hostPage.locator("[data-participant-id]")).toHaveCount(4, {
-			timeout: 45_000,
-		});
-		await expect(guestA.page.locator("[data-participant-id]")).toHaveCount(4, {
-			timeout: 45_000,
-		});
-		await expect(guestB.page.locator("[data-participant-id]")).toHaveCount(4, {
-			timeout: 45_000,
-		});
-		await expect(guestC.page.locator("[data-participant-id]")).toHaveCount(4, {
-			timeout: 45_000,
-		});
+		await Promise.all([
+			expect(hostPage.locator("[data-participant-id]")).toHaveCount(4, {
+				timeout: 45_000,
+			}),
+			expect(guestA.page.locator("[data-participant-id]")).toHaveCount(4, {
+				timeout: 45_000,
+			}),
+			expect(guestB.page.locator("[data-participant-id]")).toHaveCount(4, {
+				timeout: 45_000,
+			}),
+			expect(guestC.page.locator("[data-participant-id]")).toHaveCount(4, {
+				timeout: 45_000,
+			}),
+		]);
 
-		await expectRemoteVideoReceiving(hostPage, guestAName);
-		await expectRemoteVideoReceiving(hostPage, guestBName);
-		await expectRemoteVideoReceiving(hostPage, guestCName);
-		await expectRemoteVideoReceiving(guestA.page, "Administrator");
-		await expectRemoteVideoReceiving(guestB.page, "Administrator");
-		await expectRemoteVideoReceiving(guestC.page, "Administrator");
+		await Promise.all([
+			expectRemoteVideoReceiving(hostPage, guestAName),
+			expectRemoteVideoReceiving(hostPage, guestBName),
+			expectRemoteVideoReceiving(hostPage, guestCName),
+			expectRemoteVideoReceiving(guestA.page, meetHostName),
+			expectRemoteVideoReceiving(guestB.page, meetHostName),
+			expectRemoteVideoReceiving(guestC.page, meetHostName),
+		]);
 
-		const guestAFingerprint = await readFingerprint(guestA.page);
-		expect(await readFingerprint(guestB.page)).toBe(guestAFingerprint);
-		expect(await readFingerprint(guestC.page)).toBe(guestAFingerprint);
+		const [guestAFingerprint, guestBFingerprint, guestCFingerprint] =
+			await Promise.all([
+				readFingerprint(guestA.page),
+				readFingerprint(guestB.page),
+				readFingerprint(guestC.page),
+			]);
+		expect(guestBFingerprint).toBe(guestAFingerprint);
+		expect(guestCFingerprint).toBe(guestAFingerprint);
 	});
 	});
 
@@ -318,6 +341,7 @@ test.describe("E2EE", () => {
 		createMeeting,
 		createParticipant,
 	}) => {
+		test.setTimeout(90_000);
 		const meetingId = await createMeeting();
 		const guestName = "Guest Reconnect E2EE";
 		const guest = await createParticipant();

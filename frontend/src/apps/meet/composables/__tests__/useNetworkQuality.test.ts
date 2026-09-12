@@ -1,346 +1,127 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createApp, defineComponent, nextTick, ref, watchEffect } from "vue";
-import { StallDetector } from "../../utils/media/stallDetector";
+import { createApp, nextTick, type Ref, ref } from "vue";
+import type { SFUMeetingManager } from "../../utils/SFUMeetingManager";
+import type { MediaHealthState } from "../../utils/media/MediaHealthMonitor";
 import { useNetworkQuality } from "../useNetworkQuality";
 
 describe("useNetworkQuality", () => {
 	afterEach(() => {
 		vi.useRealTimers();
+		vi.restoreAllMocks();
 	});
 
-	const mountWithStats = (stats: unknown, transportState = "connected") => {
-		vi.useFakeTimers();
-
-		const getNetworkStats = vi.fn().mockResolvedValue(stats);
-		const sfuManager = ref({
-			transportManager: {
-				getTransportStats: () => ({
-					sendTransport: { state: transportState },
-					recvTransport: { state: transportState },
-				}),
-				getNetworkStats,
-			},
-		});
-
-		const observed = ref("unknown");
-		const root = document.createElement("div");
-
-		const TestComponent = defineComponent({
-			setup() {
-				const { networkQuality } = useNetworkQuality();
-				watchEffect(() => {
-					observed.value = networkQuality.value;
+	it("mirrors manager-owned health state and stops it on unmount", () => {
+		const stopMonitoring = vi.fn();
+		const startMediaHealthMonitoring = vi.fn(
+			(listener: (state: MediaHealthState) => void) => {
+				listener({
+					networkQuality: "critical",
+					downlinkQuality: "poor",
+					isTransportFailed: true,
 				});
-				return () => null;
+				return stopMonitoring;
 			},
-		});
-
-		const app = createApp(TestComponent);
-		app.provide("sfuManager", sfuManager);
-		app.mount(root);
-
-		return { observed, getNetworkStats, unmount: () => app.unmount() };
-	};
-
-	it("keeps quality good when RTT is moderately high but video bitrate is healthy", async () => {
-		const { observed, unmount, getNetworkStats } = mountWithStats({
-			rtt: 520,
-			packetLoss: 1,
-			availableOutgoingBitrate: 900_000,
-			timestamp: Date.now(),
-			isValid: true,
-		});
-
-		await vi.advanceTimersByTimeAsync(3000);
-		await nextTick();
-
-		expect(getNetworkStats).toHaveBeenCalledTimes(1);
-		expect(observed.value).toBe("good");
-
-		unmount();
-	});
-
-	it("marks quality poor when RTT is high and available bitrate drops to video degradation levels", async () => {
-		const { observed, unmount } = mountWithStats({
-			rtt: 520,
-			packetLoss: 1,
-			availableOutgoingBitrate: 250_000,
-			timestamp: Date.now(),
-			isValid: true,
-		});
-
-		await vi.advanceTimersByTimeAsync(3000);
-		await nextTick();
-
-		expect(observed.value).toBe("poor");
-
-		unmount();
-	});
-
-	it("marks quality poor when packet loss alone is clearly high", async () => {
-		const { observed, unmount } = mountWithStats({
-			rtt: 150,
-			packetLoss: 10,
-			availableOutgoingBitrate: 900_000,
-			timestamp: Date.now(),
-			isValid: true,
-		});
-
-		await vi.advanceTimersByTimeAsync(3000);
-		await nextTick();
-
-		expect(observed.value).toBe("poor");
-
-		unmount();
-	});
-
-	it("marks quality critical when RTT is severe and bitrate is critically low", async () => {
-		const { observed, unmount } = mountWithStats({
-			rtt: 950,
-			packetLoss: 3,
-			availableOutgoingBitrate: 150_000,
-			timestamp: Date.now(),
-			isValid: true,
-		});
-
-		await vi.advanceTimersByTimeAsync(3000);
-		await nextTick();
-
-		expect(observed.value).toBe("critical");
-
-		unmount();
-	});
-
-	it("suspends stall detection while a transport is failed", async () => {
-		const suspend = vi.spyOn(StallDetector.prototype, "suspend");
-		const { unmount } = mountWithStats({}, "failed");
-
-		await vi.advanceTimersByTimeAsync(3000);
-
-		expect(suspend).toHaveBeenCalledOnce();
-		unmount();
-	});
-
-	it("does not reset receive media when a remote participant is muted", async () => {
-		vi.useFakeTimers();
-
-		const resetReceiveSide = vi.fn().mockResolvedValue(undefined);
-		const stats = new Map<string, { type: string; bytesReceived: number }>([
-			["in", { type: "inbound-rtp", bytesReceived: 1000 }],
-		]);
-		const sfuManager = ref({
-			sfuClient: {},
-			participantManager: {
-				getParticipant: () => ({ audio_enabled: false }),
-			},
-			transportManager: {
-				getTransportStats: () => ({
-					sendTransport: { state: "connected" },
-					recvTransport: { state: "connected" },
-				}),
-				getNetworkStats: vi.fn().mockResolvedValue({
-					rtt: 50,
-					packetLoss: 0,
-					availableOutgoingBitrate: 800_000,
-					timestamp: Date.now(),
-					isValid: true,
-				}),
-			},
-			mediaManager: {
-				consumerManager: {
-					getAllConsumers: () => [
-						{
-							id: "audio-consumer",
-							participantId: "muted-participant",
-							kind: "audio",
-							isScreen: false,
-							track: { muted: false } as MediaStreamTrack,
-							createdAt: Date.now() - 60_000,
-							consumer: {
-								paused: false,
-								getStats: vi.fn().mockResolvedValue(stats),
-							},
-						},
-					],
-				},
-			},
-			connectionManager: { resetReceiveSide },
-		});
-
+		);
+		const manager = ref({
+			startMediaHealthMonitoring,
+		}) as unknown as Ref<SFUMeetingManager | null>;
+		let quality: ReturnType<typeof useNetworkQuality> | undefined;
 		const app = createApp({
-			setup: () => {
-				useNetworkQuality();
+			setup() {
+				quality = useNetworkQuality(manager);
 				return () => null;
 			},
 		});
-		app.provide("sfuManager", sfuManager);
 		app.mount(document.createElement("div"));
 
-		await vi.advanceTimersByTimeAsync(21_000);
-
-		expect(resetReceiveSide).not.toHaveBeenCalled();
-		app.unmount();
-	});
-
-	it("restarts only a stalled remote video consumer", async () => {
-		vi.useFakeTimers();
-
-		const resetReceiveSide = vi.fn().mockResolvedValue(undefined);
-		const requestConsumerKeyFrame = vi.fn().mockResolvedValue(undefined);
-
-		const track = { muted: false } as MediaStreamTrack;
-		const participant = { video_enabled: false };
-		const stats = new Map<string, { type: string; bytesReceived: number }>([
-			["in", { type: "inbound-rtp", bytesReceived: 1000 }],
-		]);
-		const entry = {
-			id: "c1",
-			participantId: "remote-participant",
-			kind: "video",
-			isScreen: false,
-			track,
-			createdAt: Date.now() - 60_000,
-			consumer: {
-				id: "c1",
-				paused: false,
-				getStats: vi.fn().mockResolvedValue(stats),
-			},
-		};
-
-		const sfuManager = ref({
-			sfuClient: { requestConsumerKeyFrame },
-			participantManager: {
-				getParticipant: () => participant,
-			},
-			transportManager: {
-				getTransportStats: () => ({
-					sendTransport: { state: "connected" },
-					recvTransport: { state: "connected" },
-				}),
-				getNetworkStats: vi.fn().mockResolvedValue({
-					rtt: 50,
-					packetLoss: 0,
-					availableOutgoingBitrate: 800_000,
-					timestamp: Date.now(),
-					isValid: true,
-				}),
-			},
-			mediaManager: {
-				consumerManager: {
-					getAllConsumers: () => [entry],
-				},
-			},
-			connectionManager: { resetReceiveSide },
-		});
-
-		const observed = ref("unknown");
-		const root = document.createElement("div");
-
-		const TestComponent = defineComponent({
-			setup() {
-				const { networkQuality } = useNetworkQuality();
-				watchEffect(() => {
-					observed.value = networkQuality.value;
-				});
-				return () => null;
-			},
-		});
-
-		const app = createApp(TestComponent);
-		app.provide("sfuManager", sfuManager);
-		app.mount(root);
-
-		await vi.advanceTimersByTimeAsync(21_000);
-		expect(resetReceiveSide).not.toHaveBeenCalled();
-
-		participant.video_enabled = true;
-		await vi.advanceTimersByTimeAsync(21_000);
-		expect(requestConsumerKeyFrame).toHaveBeenCalledOnce();
-		expect(requestConsumerKeyFrame).toHaveBeenCalledWith("c1");
-		expect(resetReceiveSide).not.toHaveBeenCalled();
-
-		await vi.advanceTimersByTimeAsync(30_000);
-		expect(requestConsumerKeyFrame).toHaveBeenCalledTimes(2);
-		expect(resetReceiveSide).not.toHaveBeenCalled();
-
-		await vi.advanceTimersByTimeAsync(30_000);
-		expect(resetReceiveSide).toHaveBeenCalledOnce();
-
-		await vi.advanceTimersByTimeAsync(21_000);
-		expect(resetReceiveSide).toHaveBeenCalledOnce();
+		expect(quality?.networkQuality.value).toBe("critical");
+		expect(quality?.downlinkQuality.value).toBe("poor");
+		expect(quality?.isTransportFailed.value).toBe(true);
+		expect(startMediaHealthMonitoring).toHaveBeenCalledOnce();
 
 		app.unmount();
+		expect(stopMonitoring).toHaveBeenCalledOnce();
 	});
 
-	it("waits for a fresh stall window after network quality recovers", async () => {
-		vi.useFakeTimers();
-
-		const resetReceiveSide = vi.fn().mockResolvedValue(undefined);
-		const requestConsumerKeyFrame = vi.fn().mockResolvedValue(undefined);
-		const track = { muted: false } as MediaStreamTrack;
-		const stats = new Map<string, { type: string; bytesReceived: number }>([
-			["in", { type: "inbound-rtp", bytesReceived: 1000 }],
-		]);
-		const qualityStats = {
-			rtt: 1300,
-			packetLoss: 20,
-			availableOutgoingBitrate: 100_000,
-			timestamp: Date.now(),
-			isValid: true,
-		};
-		const sfuManager = ref({
-			sfuClient: { requestConsumerKeyFrame },
-			participantManager: {
-				getParticipant: () => ({ video_enabled: true }),
-			},
-			transportManager: {
-				getTransportStats: () => ({
-					sendTransport: { state: "connected" },
-					recvTransport: { state: "connected" },
-				}),
-				getNetworkStats: vi.fn().mockImplementation(async () => qualityStats),
-			},
-			mediaManager: {
-				consumerManager: {
-					getAllConsumers: () => [
-						{
-							id: "c1",
-							kind: "video",
-							track,
-							createdAt: Date.now() - 60_000,
-							consumer: {
-								paused: false,
-								getStats: vi.fn().mockResolvedValue(stats),
-							},
-						},
-					],
-				},
-			},
-			connectionManager: { resetReceiveSide },
-		});
-
+	it("stops the old monitor and resets state when the manager is removed", async () => {
+		let listener!: (state: MediaHealthState) => void;
+		const stopMonitoring = vi.fn();
+		const manager = ref({
+			startMediaHealthMonitoring: vi.fn((nextListener) => {
+				listener = nextListener;
+				return stopMonitoring;
+			}),
+		}) as unknown as Ref<SFUMeetingManager | null>;
+		let quality!: ReturnType<typeof useNetworkQuality>;
 		const app = createApp({
-			setup: () => {
-				useNetworkQuality();
+			setup() {
+				quality = useNetworkQuality(manager);
 				return () => null;
 			},
 		});
-		app.provide("sfuManager", sfuManager);
+		app.mount(document.createElement("div"));
+		listener({
+			networkQuality: "critical",
+			downlinkQuality: "poor",
+			isTransportFailed: true,
+		});
+
+		manager.value = null;
+		await nextTick();
+
+		expect(stopMonitoring).toHaveBeenCalledOnce();
+		expect(quality.networkQuality.value).toBe("good");
+		expect(quality.downlinkQuality.value).toBe("good");
+		expect(quality.isTransportFailed.value).toBe(false);
+		app.unmount();
+	});
+
+	it("ignores the old listener and starts monitoring a replacement manager", async () => {
+		let oldListener!: (state: MediaHealthState) => void;
+		let nextListener!: (state: MediaHealthState) => void;
+		const stopOld = vi.fn();
+		const stopNext = vi.fn();
+		const first = {
+			startMediaHealthMonitoring: vi.fn((listener) => {
+				oldListener = listener;
+				return stopOld;
+			}),
+		};
+		const second = {
+			startMediaHealthMonitoring: vi.fn((listener) => {
+				nextListener = listener;
+				return stopNext;
+			}),
+		};
+		const manager = ref(first) as unknown as Ref<SFUMeetingManager | null>;
+		let quality!: ReturnType<typeof useNetworkQuality>;
+		const app = createApp({
+			setup() {
+				quality = useNetworkQuality(manager);
+				return () => null;
+			},
+		});
 		app.mount(document.createElement("div"));
 
-		await vi.advanceTimersByTimeAsync(30_000);
-		expect(resetReceiveSide).not.toHaveBeenCalled();
+		manager.value = second as never;
+		await nextTick();
+		oldListener({
+			networkQuality: "critical",
+			downlinkQuality: "critical",
+			isTransportFailed: true,
+		});
+		nextListener({
+			networkQuality: "poor",
+			downlinkQuality: "good",
+			isTransportFailed: false,
+		});
 
-		qualityStats.rtt = 50;
-		qualityStats.packetLoss = 0;
-		qualityStats.availableOutgoingBitrate = 800_000;
-		await vi.advanceTimersByTimeAsync(18_000);
-		expect(resetReceiveSide).not.toHaveBeenCalled();
-
-		await vi.advanceTimersByTimeAsync(3000);
-		expect(requestConsumerKeyFrame).toHaveBeenCalledTimes(1);
-		expect(resetReceiveSide).not.toHaveBeenCalled();
-
+		expect(stopOld).toHaveBeenCalledOnce();
+		expect(second.startMediaHealthMonitoring).toHaveBeenCalledOnce();
+		expect(quality.networkQuality.value).toBe("poor");
+		expect(quality.downlinkQuality.value).toBe("good");
+		expect(quality.isTransportFailed.value).toBe(false);
 		app.unmount();
+		expect(stopNext).toHaveBeenCalledOnce();
 	});
 });

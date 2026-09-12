@@ -1,6 +1,6 @@
 <template>
   <nav id="navbar" ondragstart="return false;" ondrop="return false;"
-    class="bg-surface-base border-b px-5 py-2.5 h-12 shrink-0 flex justify-between">
+    class="sticky top-0 z-20 bg-surface-base border-b px-5 py-2.5 h-12 shrink-0 flex justify-between">
     <slot name="breadcrumbs">
       <EditableBreadcrumbs :items="breadcrumbItems" :entity="rootEntity || null"
         class="select-none truncate max-w-[80%]" />
@@ -22,7 +22,7 @@
         <Button class="hidden md:block" variant="solid" label="Try out Drive"
           @click="open('https://frappecloud.com/dashboard/signup?product=drive')" />
       </template>
-      <Dropdown v-else-if="defaultActions" :options="defaultActions" placement="right" :button="{
+      <Dropdown v-else-if="defaultActions" :options="defaultActions" align="end" :button="{
         variant: 'ghost',
         icon: LucideMoreHorizontal,
         label: 'Entity actions',
@@ -39,7 +39,7 @@
           id: 'create-button',
           label: 'Create',
           iconLeft: h(LucidePlus, { class: 'size-4' }),
-        }" :options="newEntityOptions" placement="right" />
+        }" :options="newEntityOptions" align="end" />
       <Button v-else-if="$route.name === 'drive-Documents' || $route.name === 'drive-Presentations'" id="create-button"
         label="Create" variant="solid" :icon-left="h(LucidePlus, { class: 'size-4' })"
         @click="newExternal($route.name === 'drive-Documents' ? 'Document' : 'Presentation')" />
@@ -64,6 +64,7 @@ import { shareView } from '@/apps/drive/data/prefs'
 import { startRename } from '@/apps/drive/data/selection'
 const { systemUser } = useCurrentUser()
 import emitter from '@/apps/drive/emitter'
+import { useEmitter } from '@/apps/drive/utils/useEmitter'
 import { ref, computed, inject, h } from 'vue'
 import { entitiesDownload } from '@/apps/drive/utils/download'
 import { getRecents, getTrash, getFavourites, toggleFav, rootInfo } from '@/apps/drive/resources/files'
@@ -179,17 +180,17 @@ function removeCurrentEntities() {
   })
 }
 
-emitter.on('share', () => routeDialog('s'))
+useEmitter('share', () => routeDialog('s'))
 // Rename is inline everywhere: a list row in list/grid views, the last
 // breadcrumb on an entity page.
-emitter.on('rename', () => {
+useEmitter('rename', () => {
   const target = dialogEntities.value[0]
   if (target) startRename(target.name)
 })
-emitter.on('remove', removeCurrentEntities)
-emitter.on('move', () => routeDialog('m'))
-emitter.on('newFolder', () => openListDialog('f'))
-emitter.on('newLink', () => openListDialog('l'))
+useEmitter('remove', removeCurrentEntities)
+useEmitter('move', () => routeDialog('m'))
+useEmitter('newFolder', () => openListDialog('f'))
+useEmitter('newLink', () => openListDialog('l'))
 
 const defaultActions = computed(() => {
   if (!rootEntity.value?.file_name) return
@@ -200,9 +201,9 @@ const defaultActions = computed(() => {
   }
   return [
     {
-      group: true,
+      group: '',
       hideLabel: true,
-      items: [
+      options: [
         {
           label: __('Open in Desk'),
           icon: LucideMonitorCog,
@@ -241,9 +242,9 @@ const defaultActions = computed(() => {
       ],
     },
     {
-      group: true,
+      group: '',
       hideLabel: true,
-      items: [
+      options: [
         {
           label: __('Share'),
           icon: LucideShare2,
@@ -288,9 +289,9 @@ const defaultActions = computed(() => {
       ],
     },
     {
-      group: true,
+      group: '',
       hideLabel: true,
-      items: [
+      options: [
         {
           label: __('Delete'),
           icon: LucideTrash,
@@ -302,7 +303,7 @@ const defaultActions = computed(() => {
     },
     ...actions,
   ].map((k) => {
-    return { ...k, items: k.items.filter((l) => !l.isEnabled || l.isEnabled()) }
+    return { ...k, options: k.options.filter((l) => !l.isEnabled || l.isEnabled()) }
   })
 })
 const isPrivate = computed(() => (isHomeContext() ? 1 : 0))
@@ -339,7 +340,7 @@ const button = computed(() => possibleButtons.find((k) => k.route == route.name)
 const newEntityOptions = computed(() => [
   {
     group: 'Create',
-    items: dynamicList([
+    options: dynamicList([
       {
         label: 'Document',
         icon: LucideFilePlus2,
@@ -371,7 +372,7 @@ const newEntityOptions = computed(() => [
   },
   {
     group: 'Upload',
-    items: [
+    options: [
       {
         label: 'Upload File',
         icon: LucideFileUp,

@@ -1,12 +1,10 @@
 {% extends "templates/emails/_event_base.html" %}
 {% block card %}
 {% import "templates/emails/_event_macros.html" as m with context %}
-						<p style="margin: 0 0 6px; font-size: 14px; color: #7c7c7c;">{{ organizer_name }} invited you to</p>
-						<h1 style="margin: 0; font-size: 22px; line-height: 1.25; font-weight: 700; color: #171717; letter-spacing: -0.01em;">{{ title }}</h1>
+						{{ m.eyebrow(organizer_name ~ ' invited you to') }}
+						{{ m.heading(title) }}
 						{{ m.details_table('When', when, timezone, location, organizer_name, organizer_email, bold=true) }}
-						{% if description %}
-						<p style="margin: 4px 0 0; font-size: 15px; line-height: 1.6; color: #383838;">{{ description }}</p>
-						{% endif %}
+						{{ m.description(description) }}
 						{{ m.meet_card(meet) }}
 						{{ m.rsvp_block(rsvp, 'Will you attend?') }}
 {% endblock %}

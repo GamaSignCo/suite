@@ -1,18 +1,18 @@
 <template>
 	<AppSettingsHeader
-		title="Background"
-		description="Customize your video background with blur effects or virtual backgrounds"
+		title="Video effects"
+		description="Keep yourself framed and customize your video background"
 	/>
 	<AppSettingsBody>
 			<!-- Video Preview -->
 			<div class="flex justify-center mb-4">
-				<div class="w-96 h-auto aspect-video bg-surface-gray-10 rounded-lg overflow-hidden shadow-sm relative">
+				<div class="video-preview w-full max-w-md h-auto aspect-video bg-surface-gray-10 rounded-6 overflow-hidden shadow-sm relative">
 					<video
 						ref="videoPreviewRef"
 						autoplay
 						muted
 						playsinline
-						class="w-full h-full object-cover transform scale-x-[-1]"
+						class="video-preview-media w-full h-full object-cover transform scale-x-[-1]"
 					/>
 					<div v-if="!previewStream"
 						class="absolute inset-0 bg-black bg-opacity-20 flex items-center justify-center">
@@ -21,6 +21,59 @@
 							<p class="text-sm">
 								Loading preview...
 							</p>
+						</div>
+					</div>
+					<div
+						class="absolute inset-x-0 bottom-0 flex items-end justify-end bg-gradient-to-t from-black/70 via-black/30 to-transparent p-3 pt-8"
+					>
+						<div class="flex items-center gap-2">
+							<Tooltip
+								:text="autoFramingEnabledLocal ? 'Auto framing on' : 'Auto framing off'"
+							>
+								<Button
+									variant="outline"
+									theme="gray"
+									:aria-pressed="autoFramingEnabledLocal"
+									:aria-label="autoFramingEnabledLocal ? 'Auto framing on' : 'Auto framing off'"
+									@click="autoFramingEnabledLocal = !autoFramingEnabledLocal"
+								>
+									<template #icon>
+										<span
+											:class="[
+												autoFramingEnabledLocal ? 'lucide-scan-face' : 'lucide-scan',
+												'text-ink-gray-6 size-4',
+											]"
+											aria-hidden="true"
+										/>
+									</template>
+								</Button>
+							</Tooltip>
+							<Tooltip
+								:text="!autoFramingEnabledLocal
+									? 'Turn on auto framing to lock it'
+									: autoFramingPausedLocal
+										? 'Framing locked'
+										: 'Framing unlocked'"
+							>
+								<Button
+									variant="outline"
+									theme="gray"
+									:disabled="!autoFramingEnabledLocal"
+									:aria-pressed="autoFramingPausedLocal"
+									:aria-label="autoFramingPausedLocal ? 'Framing locked' : 'Framing unlocked'"
+									@click="autoFramingPausedLocal = !autoFramingPausedLocal"
+								>
+									<template #icon>
+										<span
+											:class="[
+												autoFramingPausedLocal ? 'lucide-locate-fixed' : 'lucide-locate',
+												'text-ink-gray-6 size-4',
+											]"
+											aria-hidden="true"
+										/>
+									</template>
+								</Button>
+							</Tooltip>
 						</div>
 					</div>
 				</div>
@@ -34,7 +87,7 @@
 				<div class="grid grid-cols-4 gap-3">
 					<div v-for="option in allBackgroundOptionsTyped" :key="option.name"
 						@click="handleBackgroundOptionClick(option)"
-						class="relative cursor-pointer rounded-lg border-2 overflow-hidden transition-all duration-200 hover:shadow-sm group"
+						class="relative cursor-pointer rounded-6 border-2 overflow-hidden transition-all duration-200 hover:shadow-sm group"
 						:class="[
 							selectedBackgroundOption === option.name
 								? 'border-outline-gray-3 ring-1 ring-outline-gray-2'
@@ -79,7 +132,7 @@
 
 						<!-- Label -->
 						<div class="p-2 bg-surface-gray-1">
-							<p class="text-sm-medium text-center text-ink-gray-8 truncate">
+							<p class="text-sm-medium text-center text-ink-gray-8 truncate leading-4">
 								{{ option.label }}
 							</p>
 						</div>
@@ -87,7 +140,7 @@
 				</div>
 			</div>
 
-			<div class="bg-surface-amber-2 border border-outline-amber-2 rounded-lg p-3 mt-4">
+			<div class="bg-surface-amber-2 border border-outline-amber-2 rounded-6 p-3 mt-4">
 				<div class="flex">
 					<div class="flex-shrink-0">
 						<lucide-alert-triangle class="h-5 w-5 text-ink-amber-5" />
@@ -106,13 +159,18 @@
 <script setup lang="ts">
 import AppSettingsHeader from '@/components/settings/AppSettingsHeader.vue'
 import AppSettingsBody from '@/components/settings/AppSettingsBody.vue'
-import { toast } from 'frappe-ui';
+import { Button, Tooltip, toast } from 'frappe-ui';
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import { useBackgroundEffects } from "../../composables/useBackgroundEffects";
+import {
+	type BackgroundEffectOptions,
+	useBackgroundEffects,
+} from "../../composables/useBackgroundEffects";
 import { useMeetingContext } from "../../composables/useMeetingContext";
 import {
 	addCustomBackgroundImage,
 	allBackgroundOptions,
+	autoFramingEnabled,
+	autoFramingPaused,
 	availableBackgroundImages,
 	backgroundBlurEnabled,
 	backgroundImageEnabled,
@@ -122,6 +180,8 @@ import {
 	selectedBackgroundImage,
 	setBackgroundBlurEnabled,
 	setBackgroundImageEnabled,
+	setAutoFramingEnabled,
+	setAutoFramingPaused,
 	setBlurIntensity,
 	setSelectedBackgroundImage,
 } from "../../data/backgroundEffects";
@@ -136,11 +196,6 @@ interface BackgroundOption {
 	isCustom?: boolean;
 }
 
-interface BackgroundImageOption {
-	label: string;
-	value: string;
-}
-
 const props = withDefaults(
 	defineProps<{
 		isVisible?: boolean;
@@ -152,7 +207,7 @@ const props = withDefaults(
 
 const meetingContext = useMeetingContext();
 const isInMeeting = computed(() => !!meetingContext?.isInMeeting?.value);
-const processedStream = computed(() => meetingContext?.processedStream || null);
+const processedStream = computed(() => meetingContext?.processedStream.value || null);
 const onBackgroundEffectsChanged = meetingContext?.onBackgroundEffectsChanged;
 
 // Video preview
@@ -163,34 +218,39 @@ const pendingPreviewRefresh = ref(false);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 let previewSession: {
 	cleanup: () => void;
-	updateOptions?: (opts: unknown) => Promise<void>;
-	stream?: MediaStream;
+	updateOptions: (opts: BackgroundEffectOptions) => Promise<void>;
+	stream: MediaStream;
 } | null = null;
 let previewInputStream: MediaStream | null = null; // Raw stream feeding the preview pipeline
 let isPreviewStreamDedicated = false; // Track if preview stream is dedicated (not meeting's processed stream; needed when cam is off in meeting)
+let previewRequestId = 0;
+let isMounted = false;
+let previewController: AbortController | null = null;
 
 // Background effects
 const backgroundBlurEnabledLocal = ref(backgroundBlurEnabled.value);
 const backgroundImageEnabledLocal = ref(backgroundImageEnabled.value);
-const selectedBackgroundImageLocal = ref<BackgroundImageOption | string | null>(
+const selectedBackgroundImageLocal = ref<string | null>(
 	selectedBackgroundImage.value,
 );
 const blurIntensityLocal = ref(blurIntensity.value);
+const autoFramingEnabledLocal = ref(autoFramingEnabled.value);
+const autoFramingPausedLocal = ref(autoFramingPaused.value);
 
-const allBackgroundOptionsTyped = computed(
-	() => allBackgroundOptions.value as unknown as BackgroundOption[],
+const allBackgroundOptionsTyped = computed<BackgroundOption[]>(() =>
+	allBackgroundOptions.value.map((option) => ({
+		name: option.name,
+		label: option.label,
+		type: "type" in option ? option.type : undefined,
+		url: option.url,
+		isAddButton: "isAddButton" in option ? option.isAddButton : undefined,
+		isCustom: "isCustom" in option ? option.isCustom : undefined,
+	})),
 );
 
 // Background effects composable
 const { applyBackgroundEffects, stopProcessing: stopBackgroundProcessing } =
 	useBackgroundEffects();
-
-const backgroundImageOptions = computed<BackgroundImageOption[]>(() =>
-	availableBackgroundImages.map((image) => ({
-		label: image.label,
-		value: image.name,
-	})),
-);
 
 // Selected background option
 const selectedBackgroundOption = computed({
@@ -202,11 +262,7 @@ const selectedBackgroundOption = computed({
 			backgroundImageEnabledLocal.value &&
 			selectedBackgroundImageLocal.value
 		) {
-			const img = selectedBackgroundImageLocal.value;
-			if (typeof img === "string") {
-				return img;
-			}
-			return img.value || img;
+			return selectedBackgroundImageLocal.value;
 		}
 		return "none";
 	},
@@ -229,25 +285,13 @@ const selectedBackgroundOption = computed({
 			return;
 		}
 
-		const predefinedImage = backgroundImageOptions.value.find(
-			(opt) => opt.value === value,
-		);
-		if (predefinedImage) {
-			selectedBackgroundImageLocal.value = predefinedImage;
-			setSelectedBackgroundImage(predefinedImage.value);
-			handleBackgroundImageToggle(true);
-			return;
-		}
-
-		const customImage = customBackgroundImages.value.find(
-			(img) => img.name === value,
-		);
-		if (customImage) {
-			selectedBackgroundImageLocal.value = {
-				label: customImage.label,
-				value: customImage.name,
-			};
-			setSelectedBackgroundImage(customImage.name);
+		if (
+			[...availableBackgroundImages, ...customBackgroundImages.value].some(
+				(image) => image.name === value,
+			)
+		) {
+			selectedBackgroundImageLocal.value = value;
+			setSelectedBackgroundImage(value);
 			handleBackgroundImageToggle(true);
 		}
 	},
@@ -272,7 +316,11 @@ async function handleFileSelect(event: Event) {
 		toast.success(`Added custom background: ${file.name}`);
 	} catch (error) {
 		console.error("Failed to add custom image:", error);
-		toast.error(error.message || "Failed to add custom background image");
+		toast.error(
+			error instanceof Error
+				? error.message
+				: "Failed to add custom background image",
+		);
 	}
 
 	target.value = "";
@@ -289,32 +337,14 @@ async function handleDeleteCustomImage(imageId: string) {
 }
 
 async function startVideoPreview(deviceId: string) {
+	if (!props.isVisible) return;
+	stopVideoPreview();
+	const requestId = ++previewRequestId;
+	const controller = new AbortController();
+	previewController = controller;
+	let rawStream: MediaStream | null = null;
 	try {
 		isLoadingPreview.value = true;
-
-		// Stop any existing processing before creating a new preview session
-		stopBackgroundProcessing();
-
-		if (previewSession) {
-			previewSession.cleanup();
-			previewSession = null;
-		}
-
-		if (previewStream.value && isPreviewStreamDedicated) {
-			for (const track of previewStream.value.getTracks()) {
-				track.stop();
-			}
-		}
-
-		if (previewInputStream) {
-			for (const track of previewInputStream.getTracks()) {
-				track.stop();
-			}
-			previewInputStream = null;
-		}
-
-		previewStream.value = null;
-		isPreviewStreamDedicated = false;
 
 		// If in a meeting, don't create a new stream
 		// Reuse processedStream to avoid breaking
@@ -336,27 +366,41 @@ async function startVideoPreview(deviceId: string) {
 			audio: false,
 		};
 
-		const rawStream = await navigator.mediaDevices.getUserMedia(constraints);
+		rawStream = await navigator.mediaDevices.getUserMedia(constraints);
+		if (requestId !== previewRequestId || !props.isVisible) {
+			for (const track of rawStream.getTracks()) track.stop();
+			return;
+		}
 		previewInputStream = rawStream;
 
 		const hasBackgroundEffects =
-			backgroundBlurEnabledLocal.value || backgroundImageEnabledLocal.value;
+			backgroundBlurEnabledLocal.value ||
+			backgroundImageEnabledLocal.value ||
+			autoFramingEnabledLocal.value;
 
 		if (hasBackgroundEffects) {
 			try {
-				previewSession = await applyBackgroundEffects(rawStream, {
-					backgroundBlurEnabled: backgroundBlurEnabledLocal.value,
-					backgroundImageEnabled: backgroundImageEnabledLocal.value,
-					selectedBackgroundImage: (() => {
-						const img = selectedBackgroundImageLocal.value;
-						if (typeof img === "string") return img;
-						if (img && typeof img === "object") return img.value;
-						return null;
-					})(),
-					blurIntensity: blurIntensityLocal.value,
-				});
+				const session = await applyBackgroundEffects(
+					rawStream,
+					{
+						backgroundBlurEnabled: backgroundBlurEnabledLocal.value,
+						backgroundImageEnabled: backgroundImageEnabledLocal.value,
+						selectedBackgroundImage: selectedBackgroundImageLocal.value,
+						blurIntensity: blurIntensityLocal.value,
+						autoFramingEnabled: autoFramingEnabledLocal.value,
+						autoFramingPaused: autoFramingPausedLocal.value,
+					},
+					controller.signal,
+				);
+				if (requestId !== previewRequestId || !props.isVisible) {
+					session.cleanup();
+					for (const track of rawStream.getTracks()) track.stop();
+					return;
+				}
+				previewSession = session;
 				previewStream.value = previewSession.stream;
 			} catch (error) {
+				if (controller.signal.aborted || requestId !== previewRequestId) return;
 				console.error("Failed to apply background effects to preview:", error);
 				previewSession = null;
 				previewStream.value = rawStream;
@@ -371,6 +415,7 @@ async function startVideoPreview(deviceId: string) {
 
 		isLoadingPreview.value = false;
 	} catch (error) {
+		if (controller.signal.aborted || requestId !== previewRequestId) return;
 		console.error("Failed to start video preview:", error);
 		previewStream.value = null;
 		previewSession = null;
@@ -385,6 +430,11 @@ async function startVideoPreview(deviceId: string) {
 }
 
 function stopVideoPreview() {
+	previewRequestId++;
+	previewController?.abort(
+		new DOMException("Video preview was stopped", "AbortError"),
+	);
+	previewController = null;
 	isLoadingPreview.value = false;
 	stopBackgroundProcessing();
 
@@ -397,9 +447,9 @@ function stopVideoPreview() {
 		for (const track of previewStream.value.getTracks()) {
 			track.stop();
 		}
-		previewStream.value = null;
-		isPreviewStreamDedicated = false;
 	}
+	previewStream.value = null;
+	isPreviewStreamDedicated = false;
 
 	if (previewInputStream) {
 		for (const track of previewInputStream.getTracks()) {
@@ -429,19 +479,14 @@ async function applyPreviewOptions() {
 		return;
 	}
 
-	const selectedImageValue = (() => {
-		const img = selectedBackgroundImageLocal.value;
-		if (typeof img === "string") return img;
-		if (img && typeof img === "object") return img.value;
-		return null;
-	})();
-
 	try {
 		await previewSession.updateOptions({
 			backgroundBlurEnabled: backgroundBlurEnabledLocal.value,
 			backgroundImageEnabled: backgroundImageEnabledLocal.value,
-			selectedBackgroundImage: selectedImageValue,
+			selectedBackgroundImage: selectedBackgroundImageLocal.value,
 			blurIntensity: blurIntensityLocal.value,
+			autoFramingEnabled: autoFramingEnabledLocal.value,
+			autoFramingPaused: autoFramingPausedLocal.value,
 		});
 	} catch (error) {
 		console.error("Failed to update preview background options:", error);
@@ -498,10 +543,7 @@ function handleBackgroundImageToggle(enabled: boolean) {
 		availableBackgroundImages.length > 0
 	) {
 		const firstImage = availableBackgroundImages[0];
-		const firstOption = backgroundImageOptions.value.find(
-			(option) => option.value === firstImage.name,
-		);
-		selectedBackgroundImageLocal.value = firstOption || null;
+		selectedBackgroundImageLocal.value = firstImage.name;
 		setSelectedBackgroundImage(firstImage.name);
 	}
 }
@@ -513,6 +555,8 @@ watch(
 		backgroundImageEnabledLocal,
 		selectedBackgroundImageLocal,
 		blurIntensityLocal,
+		autoFramingEnabledLocal,
+		autoFramingPausedLocal,
 	],
 	() => {
 		const shouldUpdateMeeting =
@@ -552,41 +596,31 @@ watch(backgroundImageEnabled, (newVal) => {
 	backgroundImageEnabledLocal.value = newVal;
 });
 
-watch(selectedBackgroundImage, (newVal) => {
-	// for autocomplete
-	const matchingOption = backgroundImageOptions.value.find(
-		(option) => option.value === newVal,
-	);
+watch(autoFramingEnabledLocal, (newVal) => {
+	setAutoFramingEnabled(newVal);
+	if (!newVal) setAutoFramingPaused(false);
+}, { flush: "sync" });
 
-	if (matchingOption) {
-		selectedBackgroundImageLocal.value = matchingOption;
-	} else if (newVal) {
-		// if custom image, create a local option object
-		const customImage = customBackgroundImages.value.find(
-			(img) => img.name === newVal,
-		);
-		if (customImage) {
-			selectedBackgroundImageLocal.value = {
-				label: customImage.label,
-				value: customImage.name,
-			};
-		} else {
-			// no custom image found
-			selectedBackgroundImageLocal.value = null;
-		}
-	} else {
-		// No selection
-		selectedBackgroundImageLocal.value = null;
-	}
+watch(autoFramingPausedLocal, (newVal) => {
+	setAutoFramingPaused(newVal);
+}, { flush: "sync" });
+
+watch(autoFramingEnabled, (newVal) => {
+	autoFramingEnabledLocal.value = newVal;
 });
 
-watch(selectedBackgroundImageLocal, (newImageOption) => {
-	const imageValue = (() => {
-		if (typeof newImageOption === "string") return newImageOption;
-		if (newImageOption && typeof newImageOption === "object")
-			return newImageOption.value;
-		return "";
-	})();
+watch(autoFramingPaused, (newVal) => {
+	autoFramingPausedLocal.value = newVal;
+});
+
+watch(selectedBackgroundImage, (newVal) => {
+	selectedBackgroundImageLocal.value = [
+		...availableBackgroundImages,
+		...customBackgroundImages.value,
+	].some((image) => image.name === newVal) ? newVal : null;
+});
+
+watch(selectedBackgroundImageLocal, (imageValue) => {
 	if (imageValue && imageValue !== selectedBackgroundImage.value) {
 		setSelectedBackgroundImage(imageValue);
 		setBackgroundImageEnabled(true);
@@ -600,31 +634,39 @@ watch(selectedBackgroundImageLocal, (newImageOption) => {
 	}
 });
 
-watch(processedStream, (newStream) => {
-	if (isInMeeting.value && newStream && videoPreviewRef.value) {
-		previewStream.value = newStream;
-		videoPreviewRef.value.srcObject = newStream;
-	}
-});
-
 onMounted(() => {
-	if (selectedCameraId.value) {
-		startVideoPreview(selectedCameraId.value);
+	isMounted = true;
+	if (props.isVisible && selectedCameraId.value) {
+		void startVideoPreview(selectedCameraId.value);
 	}
 });
 
 onUnmounted(() => {
+	isMounted = false;
 	stopVideoPreview();
 	stopBackgroundProcessing();
 });
 
 watch(
-	() => props.isVisible,
-	(isVisible) => {
-		if (!isVisible) {
+	[() => props.isVisible, selectedCameraId, processedStream],
+	([isVisible, deviceId]) => {
+		if (!isMounted) return;
+		if (!isVisible || !deviceId) {
 			stopVideoPreview();
-			stopBackgroundProcessing();
+			return;
 		}
+		void startVideoPreview(deviceId);
 	},
 );
 </script>
+
+<style scoped>
+.video-preview {
+	clip-path: inset(0 round 0.5rem);
+}
+
+.video-preview-media {
+	border-radius: inherit;
+	clip-path: inset(0 round 0.5rem);
+}
+</style>

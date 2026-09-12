@@ -4,16 +4,21 @@
 
   <ErrorPage v-if="verify?.error || getEntities.error" :error="verify?.error || getEntities.error" />
 
-  <div v-else id="drop-area" ref="container" class="flex flex-col flex-1 min-h-0 overflow-hidden bg-surface-base"
+  <div v-else id="drop-area" ref="container" class="flex min-h-full flex-col bg-surface-base"
     @dragover="onDragOverScroll" @drop="stopAutoScroll" @dragend="stopAutoScroll">
     <DriveToolBar v-model:sort-order="sortOrder" v-model:search="search" v-model:filters="filters"
-      :action-items="actionItems" :selections="selectedEntitities" :get-entities="getEntities || { data: [] }" />
+      :selection-mode="selectionMode" :action-items="actionItems" :selections="selectedEntitities"
+      :selectable-count="selectableNames.length" :all-selected="allVisibleSelected"
+      :get-entities="getEntities || { data: [] }" @select-all="toggleSelectAll" />
 
     <DriveListSkeleton v-if="!props.getEntities.data" />
     <NoFilesSection v-else-if="!props.getEntities.data?.length" v-bind="empty" />
-    <ListView v-else-if="view === 'list'" ref="viewEl" v-model="selections" v-model:sort-order="sortOrder" :folder-contents="rows && grouper(rows)"
+    <ListView v-else-if="view === 'list'" ref="viewEl" v-model="selections" v-model:sort-order="sortOrder"
+      :folder-contents="groupedRows"
       :action-items="actionItems" :root-entity="verify?.data" :loading-more="loadingMore" @dropped="onDrop" />
-    <GridView v-else ref="viewEl" v-model="selections" :folder-contents="rows" :action-items="actionItems" @dropped="onDrop" />
+    <GridView v-else ref="viewEl" v-model="selections" :selection-mode="selectionMode"
+      :folder-contents="rows" :action-items="actionItems"
+      :loading-more="loadingMore" @dropped="onDrop" />
   </div>
   <p class="hidden absolute text-center top-1/2 left-[calc(50%-4rem)] w-32 z-10 font-bold">
     Drop to upload
@@ -45,14 +50,20 @@ import {
   isVirtual,
   isManaged,
   isAttachmentRef,
+  isModKey,
 } from '@/apps/drive/utils/files'
-import { toggleFav, clearRecent, PAGE_SIZE } from '@/apps/drive/resources/files'
+import {
+  toggleFav,
+  clearRecent,
+  PAGE_SIZE,
+  formatRows,
+} from '@/apps/drive/resources/files'
 import { confirmRestore, confirmRemove, confirmDeleteForever } from '@/apps/drive/utils/confirmActions'
 import { entitiesDownload } from '@/apps/drive/utils/download'
-import { ref, computed, watch, watchEffect, provide, inject, nextTick } from 'vue'
+import { ref, computed, watch, watchEffect, provide, inject, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
-import { onKeyDown, useEventListener, useInfiniteScroll } from '@vueuse/core'
-import { request } from 'frappe-ui'
+import { onKeyDown, useEventListener } from '@vueuse/core'
+import { frappeRequest, shellScrollContainer as scrollHost } from 'frappe-ui'
 import { useSessionStore, useCurrentUser } from '@/boot/session'
 import { activeEntity, startRename } from '@/apps/drive/data/selection'
 import { uploads } from '@/apps/drive/data/uploads'
@@ -66,18 +77,20 @@ import {
   refreshExpanded,
   refreshFolder,
   removeFromTree,
-  resetTree,
 } from '@/apps/drive/data/folderTree'
+import { getPageFilters } from '@/apps/drive/data/pageState'
 import { toast } from '@/apps/drive/utils/toasts'
 import { move } from '@/apps/drive/resources/files'
 import DriveListSkeleton from '@/apps/drive/components/DriveListSkeleton.vue'
 import { settings } from '@/apps/drive/resources/permissions'
 import emitter from '@/apps/drive/emitter'
+import { useEmitter } from '@/apps/drive/utils/useEmitter'
 import { getFileLink } from '@/apps/drive/ui/drive/js/utils'
 
 import LucideClock from '~icons/lucide/clock'
 import LucideDownload from '~icons/lucide/download'
 import LucideExternalLink from '~icons/lucide/external-link'
+import LucideSquareArrowOutUpRight from '~icons/lucide/square-arrow-out-up-right'
 import LucideEye from '~icons/lucide/eye'
 import LucideInfo from '~icons/lucide/info'
 import LucideLink2 from '~icons/lucide/link-2'
@@ -104,8 +117,8 @@ provide('listDialog', listDialog)
 provide('dialog', listDialog)
 
 const sortId = computed(() => route.params.entityName || route.name)
-const inIframe = inject('inIframe')
-const DEFAULT_SORT = inIframe.value
+const inIframe = inject('inIframe', false)
+const DEFAULT_SORT = inIframe
   ? {
     label: 'Name',
     field: 'name',
@@ -118,7 +131,7 @@ const DEFAULT_SORT = inIframe.value
   }
 const sortOrder = ref(getSortOrder(sortId.value) || DEFAULT_SORT)
 const search = ref('')
-const filters = ref([])
+const filters = getPageFilters(sortId.value)
 
 const rows = computed(() => {
   let out = props.getEntities.data ?? []
@@ -134,10 +147,14 @@ const rows = computed(() => {
   return out
 })
 
+// Computed, not inline in the template: a grouper that builds a fresh object
+// (Recents) would give ListView a new prop identity every render, and this
+// component reads that prop back via `selectableNames` — an infinite loop.
+const groupedRows = computed(() => rows.value && props.grouper(rows.value))
+
 watch(
   sortId,
   (id) => {
-    resetTree()
     const saved = getSortOrder(id)
     if (saved) sortOrder.value = saved
   },
@@ -165,6 +182,8 @@ watch(
 )
 
 const selections = ref(new Set())
+const selectionMode = computed(() => selections.value.size > 0)
+const viewEl = ref(null)
 const allRows = computed(() => [
   ...(props.getEntities.data ?? []),
   ...loadedChildRows.value,
@@ -172,6 +191,31 @@ const allRows = computed(() => [
 const selectedEntitities = computed(() =>
   allRows.value.filter(({ name }) => selections.value.has(name))
 )
+watch(allRows, (entities) => {
+  const names = new Set(entities.map(({ name }) => name))
+  if ([...selections.value].some((name) => !names.has(name))) {
+    selections.value = new Set(
+      [...selections.value].filter((name) => names.has(name))
+    )
+  }
+})
+const selectableNames = computed(
+  () => viewEl.value?.visibleNames ?? rows.value.map(({ name }) => name)
+)
+const allVisibleSelected = computed(
+  () => selectableNames.value.length > 0 && selectableNames.value.every((name) => selections.value.has(name))
+)
+
+function toggleSelectAll() {
+  const next = new Set(selections.value)
+  if (allVisibleSelected.value) selectableNames.value.forEach((name) => next.delete(name))
+  else selectableNames.value.forEach((name) => next.add(name))
+  selections.value = next
+}
+
+function clearSelection() {
+  selections.value = new Set()
+}
 
 // Shared by both views, as selections is Drive's own Set-based model.
 const isTyping = (e) =>
@@ -179,10 +223,16 @@ const isTyping = (e) =>
   e.target.tagName === 'INPUT' ||
   e.target.tagName === 'TEXTAREA'
 
+// Links keep their own confirm flow and virtual nodes have no standalone
+// page, so neither can be opened in a new tab. Shared by the context-menu
+// action and the mod+Enter shortcut.
+const canOpenInNewTab = (entity) =>
+  !isVirtual(entity) && entity.file_type !== 'Link'
+
 onKeyDown('a', (e) => {
   if (isTyping(e)) return
-  if (e.metaKey) {
-    selections.value = new Set(rows.value.map((k) => k.name))
+  if (e.metaKey || e.ctrlKey) {
+    toggleSelectAll()
     e.preventDefault()
   }
 })
@@ -194,11 +244,21 @@ onKeyDown('m', (e) => {
   if (isTyping(e)) return
   if (e.ctrlKey) emitter.emit('move')
 })
+onKeyDown('Enter', (e) => {
+  if (isTyping(e)) return
+  if (document.querySelector('.dialog-content[data-state="open"]')) return
+  if (route.name === 'drive-Trash' || !isModKey(e)) return
+  if (selectedEntitities.value.length !== 1) return
+  const [entity] = selectedEntitities.value
+  if (!canOpenInNewTab(entity)) return
+  e.preventDefault()
+  openEntity(entity, true)
+})
 onKeyDown('Escape', (e) => {
   if (isTyping(e)) return
   // Let an open dialog handle its own Escape.
   if (document.querySelector('.dialog-content[data-state="open"]')) return
-  selections.value = new Set()
+  clearSelection()
   e.preventDefault()
 })
 
@@ -210,27 +270,52 @@ watchEffect(() => {
 const pageStart = ref(0)
 const hasNextPage = ref(false)
 const loadingMore = ref(false)
+// Bumped by every refresh (search, sort, the refresh event). A page request in
+// flight when the query changes belongs to the old query: its rows would be
+// appended onto the new result set and its cursor would overwrite the reset
+// pagination state, mixing two queries together and skipping a page of the
+// current one. Responses that come back against a stale epoch are dropped.
+let queryEpoch = 0
 
-const refreshData = () => {
-  const res = props.getEntities
+const queryParams = () => {
   const params = {}
   if (sortOrder.value) {
     params.order_by = sortOrder.value.field
     params.ascending = sortOrder.value.ascending
   }
   params.search = search.value || ''
+  return params
+}
+
+const refreshData = () => {
+  const res = props.getEntities
+  const params = queryParams()
+  const epoch = ++queryEpoch
   pageStart.value = 0
   hasNextPage.value = false
+  // The new epoch owns the in-flight flag: a stale loadMore deliberately leaves
+  // it alone on the way out, so it has to be cleared here or the first stale
+  // response would wedge pagination shut.
+  loadingMore.value = false
   if (res.paginated) {
     params.start = 0
     params.limit = PAGE_SIZE
+    params.paginated = 1
   }
   res.fetch(
     { ...res.params, ...params },
     res.paginated
       ? {
+          // onSuccess receives the untransformed payload, so this reads the
+          // server's own signal rather than counting rows. A page can be short
+          // while more rows remain: the server dedupes and permission-filters
+          // *after* LIMIT/OFFSET, so any dropped row would otherwise look like
+          // the end of the list and freeze infinite scroll for good.
           onSuccess: (data) => {
-            hasNextPage.value = (data?.length || 0) >= PAGE_SIZE
+            if (epoch !== queryEpoch) return
+            hasNextPage.value = !!data?.has_next
+            pageStart.value = data?.next_start ?? PAGE_SIZE
+            nextTick(fillViewport)
           },
         }
       : {}
@@ -242,57 +327,90 @@ async function loadMore() {
   if (!res?.paginated || res.loading || loadingMore.value || !hasNextPage.value)
     return
   loadingMore.value = true
-  const next = pageStart.value + PAGE_SIZE
+  const epoch = queryEpoch
+  // Resume from the offset the server stopped at, not start + PAGE_SIZE: filling
+  // a page can consume several raw windows when rows are filtered out.
+  const next = pageStart.value
   try {
     const path = res.url.startsWith('/') ? res.url : `/api/method/${res.url}`
-    const resp = await request({
+    const resp = await frappeRequest({
       url: path,
       method: 'GET',
-      params: { ...res.params, start: next, limit: PAGE_SIZE },
+      params: {
+        ...res.params,
+        ...queryParams(),
+        start: next,
+        limit: PAGE_SIZE,
+        paginated: 1,
+      },
       credentials: 'include',
     })
-    // request() is a raw fetch that skips the resource's transform, so the page
-    // rows arrive unformatted — run prettyData before appending.
-    const page = prettyData(Array.isArray(resp) ? resp : resp?.message ?? [])
-    pageStart.value = next
-    hasNextPage.value = page.length >= PAGE_SIZE
+    // frappeRequest() skips the resource's transform, so the page
+    // rows arrive unformatted — run them through the same formatter the resource
+    // uses, or this page would keep the dotfiles page 1 hides.
+    // The query moved on while this was in flight — these rows belong to the
+    // previous search/sort. Appending them would mix two result sets.
+    if (epoch !== queryEpoch) return
+    const payload = resp?.message ?? resp
+    const page = formatRows(payload?.rows ?? [])
+    pageStart.value = payload?.next_start ?? next + PAGE_SIZE
+    // The server's signal, not the row count — see the note in refreshData.
+    hasNextPage.value = !!payload?.has_next
     if (page.length) res.setData([...(res.data || []), ...page])
   } catch {
-    hasNextPage.value = false
+    if (epoch === queryEpoch) hasNextPage.value = false
   } finally {
-    loadingMore.value = false
+    if (epoch === queryEpoch) loadingMore.value = false
   }
 }
 
-const viewEl = ref(null)
-const scrollHost = ref(null)
-const resolveScrollHost = () => {
-  let el = viewEl.value?.scrollEl
-  let outermost = null
-  while (el && el !== document.body) {
-    const { overflowY } = getComputedStyle(el)
-    if (/(auto|scroll)/.test(overflowY)) {
-      if (el.scrollHeight > el.clientHeight) {
-        scrollHost.value = el
-        return
-      }
-      outermost = el
-    }
-    el = el.parentElement
-  }
-  scrollHost.value = outermost
+// Infinite scroll is driven off the shell's scroll container directly rather
+// than through `useInfiniteScroll`. That composable resolves its target once, at
+// setup — but `shellScrollContainer` is a module-level ref the *shell* fills
+// in, and on a cold mount the shell registers a tick after this component sets
+// up. So it bound to `null`, its internal `arrivedState` never updated again,
+// and the list loaded page 1 and then never paginated no matter how far you
+// scrolled. It only appeared to work on a revisit, where the cached rows let the
+// container register before setup ran. Binding on the ref's transitions instead
+// survives both orders, and the layout swap the registry exists for.
+const NEAR_BOTTOM_PX = 200
+
+const onHostScroll = async () => {
+  const el = scrollHost.value
+  if (!el) return
+  if (el.scrollHeight - el.scrollTop - el.clientHeight > NEAR_BOTTOM_PX) return
+  await loadMore()
+  await nextTick()
+  fillViewport()
 }
-watch([() => props.getEntities.data, view], () => nextTick(resolveScrollHost), {
-  immediate: true,
-})
-useEventListener(window, 'resize', resolveScrollHost)
-useInfiniteScroll(scrollHost, () => loadMore(), {
-  distance: 200,
-  canLoadMore: () =>
-    !!props.getEntities?.paginated &&
-    hasNextPage.value &&
-    !loadingMore.value &&
-    !props.getEntities.loading,
+
+// A page can also arrive too short to scroll — 50 rows in a tall window, or a
+// page thinned by the server's post-LIMIT permission filter. No scroll event can
+// ever follow, so top up until the container overflows or the list runs out.
+const fillViewport = async () => {
+  const epoch = queryEpoch
+  for (let i = 0; i < 20; i++) {
+    const el = scrollHost.value
+    if (epoch !== queryEpoch) return
+    if (!el || !hasNextPage.value || loadingMore.value) return
+    if (el.scrollHeight - el.scrollTop - el.clientHeight > NEAR_BOTTOM_PX) return
+    const before = pageStart.value
+    await loadMore()
+    if (pageStart.value === before) return
+  }
+}
+
+watch(
+  scrollHost,
+  (el, prev) => {
+    prev?.removeEventListener('scroll', onHostScroll)
+    el?.addEventListener('scroll', onHostScroll, { passive: true })
+  },
+  { immediate: true }
+)
+onBeforeUnmount(() => {
+  queryEpoch++
+  scrollHost.value?.removeEventListener('scroll', onHostScroll)
 })
 
 watch(
@@ -300,10 +418,11 @@ watch(
   ([data]) => {
     if (!data) return
     refreshData()
+    refreshExpanded(sortOrder.value)
   },
   { immediate: true, deep: false }
 )
-emitter.on('refresh', refreshData)
+useEmitter('refresh', refreshData)
 
 // Removes entities from the currently rendered list once a confirm-dialog
 // write (remove/restore/delete forever) succeeds server-side. Provided so
@@ -317,7 +436,7 @@ function removeFromList(entities) {
 }
 provide('removeFromList', removeFromList)
 
-emitter.on('remove-file', (item) => {
+useEmitter('remove-file', (item) => {
   const names = Array.isArray(item) ? item : [item]
   const entities = allRows.value.filter((e) => names.includes(e.name))
   if (!entities.length) return
@@ -359,22 +478,13 @@ const onDrop = (targetFile, draggedItem) => {
     refreshFolder(targetFile.name, sortOrder.value)
   selections.value = new Set()
 }
-emitter.on('remove-file-ui', removeFile)
+useEmitter('remove-file-ui', removeFile)
 
 // Auto-scroll the file area while dragging near its top/bottom edge, so files
 // can be dropped into folders that aren't currently in view.
 let scrollRAF = null
 let scrollTarget = null
 let scrollSpeed = 0
-function getScrollableParent(el) {
-  while (el && el !== document.body) {
-    const { overflowY } = getComputedStyle(el)
-    if (/(auto|scroll)/.test(overflowY) && el.scrollHeight > el.clientHeight)
-      return el
-    el = el.parentElement
-  }
-  return null
-}
 function autoScrollTick() {
   if (!scrollTarget || !scrollSpeed) return stopAutoScroll()
   scrollTarget.scrollTop += scrollSpeed
@@ -387,7 +497,7 @@ function stopAutoScroll() {
   scrollSpeed = 0
 }
 function onDragOverScroll(e) {
-  const target = getScrollableParent(e.target)
+  const target = scrollHost.value
   if (!target) return stopAutoScroll()
   const rect = target.getBoundingClientRect()
   const edge = 60
@@ -402,6 +512,7 @@ function onDragOverScroll(e) {
   if (speed && !scrollRAF) autoScrollTick()
   else if (!speed) stopAutoScroll()
 }
+onBeforeUnmount(stopAutoScroll)
 
 // Action Items
 const actionItems = computed(() => {
@@ -436,6 +547,12 @@ const actionItems = computed(() => {
         icon: LucideExternalLink,
         action: ([entity]) => openEntity(entity),
         isEnabled: (e) => e.file_type === 'Link',
+      },
+      {
+        label: __('Open in new tab'),
+        icon: LucideSquareArrowOutUpRight,
+        action: ([entity]) => openEntity(entity, true),
+        isEnabled: canOpenInNewTab,
       },
       {
         label: __('Show Info'),

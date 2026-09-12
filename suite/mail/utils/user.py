@@ -2,12 +2,18 @@ from typing import Literal
 
 import frappe
 from frappe import _
+from frappe.utils import cint
 from frappe.utils.caching import request_cache
 
 from suite.mail.store import Entity, get_data_store
 from suite.utils import reconnect_on_failure
 from suite.utils.dt import utcnow
 from suite.utils.user import is_system_manager
+
+# Undo send: the choices offered for how long a plain Send is held before delivery (User
+# Settings.undo_send_period). The same list backs the Select's options and the Mail UI's dropdown.
+UNDO_SEND_PERIODS = (5, 10, 20, 30)
+DEFAULT_UNDO_SEND_PERIOD = 5
 
 
 def has_user_settings(user: str, raise_exception: bool = False) -> bool:
@@ -20,6 +26,17 @@ def has_user_settings(user: str, raise_exception: bool = False) -> bool:
         frappe.throw(_("User {0} does not have User Settings configured.").format(frappe.bold(user)))
 
     return False
+
+
+def get_undo_send_period(user: str) -> int:
+    """Returns the seconds the user's plain Send is held so it can be undone.
+
+    Falls back to the default when the user has no settings row yet or the stored value is off
+    the list (a direct DB edit): the hold must never be zero or unbounded.
+    """
+
+    period = cint(frappe.db.get_value("User Settings", {"user": user}, "undo_send_period"))
+    return period if period in UNDO_SEND_PERIODS else DEFAULT_UNDO_SEND_PERIOD
 
 
 def get_jmap_configured_users() -> list[str]:

@@ -5,14 +5,24 @@
   data-theme="{{ desk_theme.lower() if desk_theme else 'light' }}"
 >
   <head>
+    <script>
+      if (document.documentElement.dataset.theme === 'automatic') {
+        document.documentElement.dataset.theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+      }
+    </script>
     <meta charset="UTF-8" />
     <title>Frappe Suite</title>
     <link rel="icon" type="image/svg+xml" href="/src/assets/app-logos/suite.svg" />
     <!-- viewport-fit=cover: draw edge-to-edge in iOS standalone — required for the
-         env(safe-area-inset-*) paddings to be non-zero at all. -->
+         env(safe-area-inset-*) paddings to be non-zero at all.
+
+         interactive-widget=resizes-content: the on-screen keyboard shrinks the layout viewport
+         instead of leaving it full-height and sliding the visible part around underneath. Without
+         it a full-screen pane runs on under the keyboard, and iOS pans the whole page to reveal a
+         focused field — the compose sheet jumping on every focus change. -->
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover"
+      content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content"
     />
     <!-- Status-bar/browser-chrome color; kept in sync with the active scheme at
          runtime (see mail's MailLayout) so the bar never sits white over a dark app. -->

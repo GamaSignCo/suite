@@ -30,7 +30,12 @@ from frappe.utils import (
 )
 
 from suite.mail.doctype.user_account.user_account import is_jmap_account_belongs_to_user
-from suite.mail.jmap import get_email_service, get_identities, get_jmap_connection
+from suite.mail.jmap import (
+    get_email_service,
+    get_email_submission_service,
+    get_identities,
+    get_jmap_connection,
+)
 from suite.mail.jmap.models import (
     EmailAddress,
     EmailAttachment,
@@ -42,6 +47,7 @@ from suite.mail.jmap.services.mail.email import EmailService
 from suite.mail.jmap.services.mail.mailbox import MailboxService
 from suite.mail.utils import get_config, log_mail_error
 from suite.mail.utils.dt import parsedate_to_datetime
+from suite.mail.utils.html_to_text import html_to_text, to_flowed
 from suite.mail.utils.user import is_jmap_configured
 from suite.utils.permissions import OwnerFromUser
 from suite.utils.user import is_administrator
@@ -60,6 +66,7 @@ class MailQueue(OwnerFromUser, Document):
         account: DF.Link
         attachments: DF.JSON | None
         blob_id: DF.Data | None
+        cancelled_at: DF.Datetime | None
         delivery_mode: DF.Literal["Immediate", "Enqueue", "Batch"]
         destroy_after_submit: DF.Check
         drafted_at: DF.Datetime | None
@@ -85,12 +92,21 @@ class MailQueue(OwnerFromUser, Document):
         reply_to: DF.JSON | None
         retries: DF.Int
         save_as_draft: DF.Check
+        send_at: DF.Datetime | None
         sent_at: DF.Datetime | None
         size: DF.Int
         status: DF.Literal[
-            "", "Pending", "Queued", "Failed", "Drafted", "Failed to Draft", "Submitted", "Failed to Submit"
+            "",
+            "Pending",
+            "Queued",
+            "Failed",
+            "Drafted",
+            "Failed to Draft",
+            "Submitted",
+            "Failed to Submit",
         ]
         subject: DF.SmallText | None
+        submission_id: DF.Data | None
         submitted_at: DF.Datetime | None
         text_body: DF.Code | None
         thread_id: DF.Data | None
@@ -101,12 +117,10 @@ class MailQueue(OwnerFromUser, Document):
     @staticmethod
     def clear_old_logs(days: int = 3) -> None:
         MQ = frappe.qb.DocType("Mail Queue")
+        cutoff = get_datetime(add_to_date(now(), days=-days))
         (
             frappe.qb.from_(MQ)
-            .where(
-                (MQ.status.isin(["Drafted", "Submitted"]))
-                & (MQ.creation < get_datetime(add_to_date(now(), days=-days)))
-            )
+            .where((MQ.status.isin(["Drafted", "Submitted"])) & (MQ.creation < cutoff))
             .delete()
         ).run()
 
@@ -159,7 +173,9 @@ class MailQueue(OwnerFromUser, Document):
                 setattr(doc, field, json.dumps(kwargs[field]))
 
         doc.html_body = kwargs.html_body
-        doc.text_body = kwargs.text_body
+        doc.text_body = (
+            to_flowed(kwargs.text_body) if kwargs.text_body else html_to_text(kwargs.html_body, flowed=True)
+        ) or None
         doc.forwarded_from_id = kwargs.forwarded_from_id
         doc.message_id = kwargs.message_id
         doc.id = kwargs.id
@@ -167,6 +183,7 @@ class MailQueue(OwnerFromUser, Document):
         doc.newsletter = cint(kwargs.newsletter)
         doc.priority = kwargs.priority
         doc.sent_at = kwargs.sent_at
+        doc.send_at = kwargs.send_at
         doc.in_reply_to = kwargs.in_reply_to
         doc.in_reply_to_id = kwargs.in_reply_to_id
         doc.save_as_draft = cint(kwargs.save_as_draft)
@@ -201,6 +218,17 @@ class MailQueue(OwnerFromUser, Document):
             "High": 4,
         }
         return mt_priority_map.get(self.priority, 0)
+
+    @property
+    def _hold_until(self) -> int | None:
+        """Returns the scheduled delivery time as epoch seconds (the RFC 4865 HOLDUNTIL value), or None if not scheduled."""
+
+        if not self.send_at:
+            return None
+
+        from suite.utils.dt import convert_to_utc
+
+        return int(convert_to_utc(get_datetime(self.send_at)).timestamp())
 
     @property
     def identity(self) -> dict:
@@ -314,6 +342,7 @@ class MailQueue(OwnerFromUser, Document):
             self.validate_raw_message()
             self.validate_from_email()
             self.validate_from_name()
+            self.validate_send_at_window()
             self.validate_destroy_after_submit()
             self.validate_delivery_mode()
             self.validate_reply_to()
@@ -421,10 +450,40 @@ class MailQueue(OwnerFromUser, Document):
 
         self.from_name = self.from_name or self.identity["_name"]
 
+    def validate_send_at_window(self) -> None:
+        """Validates the scheduled delivery time (FUTURERELEASE)."""
+
+        if not self.send_at:
+            return
+
+        if self.save_as_draft:
+            frappe.throw(_("Cannot schedule an email that is being saved as a draft."))
+
+        if self.destroy_after_submit:
+            frappe.throw(_("Cannot schedule an email that is set to be destroyed after submission."))
+
+        self.send_at = get_datetime_str(get_datetime(self.send_at))
+        if get_datetime(self.send_at) <= now_datetime():
+            frappe.throw(_("Send At must be in the future."))
+
+        max_delay = 2_592_000
+        try:
+            max_delay = get_email_submission_service(self.account).max_delayed_send
+        except Exception:
+            pass  # best-effort; the server enforces its own limit at submission
+
+        if time_diff_in_seconds(self.send_at, now()) > max_delay:
+            frappe.throw(_("Send At cannot be more than {0} days in the future.").format(max_delay // 86400))
+
     def validate_destroy_after_submit(self) -> None:
         """Validates the destroy after submit setting."""
 
         if self.save_as_draft or self.destroy_after_submit:
+            return
+
+        if self.send_at:
+            # A scheduled email must outlive submission: cancel reverts it to Drafts and
+            # reschedule/send-now reference it by id, so never auto-destroy it.
             return
 
         if self.newsletter:
@@ -746,6 +805,7 @@ class MailQueue(OwnerFromUser, Document):
                 destroy_after_submit=bool(self.destroy_after_submit),
                 forwarded_id=self.forwarded_from_id,
                 reply_to_id=self.in_reply_to_id,
+                hold_until=self._hold_until,
             )
 
             response = email_service.create([email])
@@ -775,12 +835,16 @@ class MailQueue(OwnerFromUser, Document):
 
             if not self.save_as_draft:
                 idx = 2 if self.raw_message and self.id else 1
-                if response["methodResponses"][idx][1].get("created", {}).get(f"submit-{self.name}"):
+                if data := response["methodResponses"][idx][1].get("created", {}).get(f"submit-{self.name}"):
+                    # For a scheduled send the server holds delivery (FUTURERELEASE); the row
+                    # is still Submitted — the EmailSubmission object is the source of truth
+                    # for the hold's state, and send_at merely logs it.
                     kwargs.update(
                         {
+                            "submission_id": data["id"],
+                            "mailbox_id": sent_mailbox_id,
                             "status": "Submitted",
                             "submitted_at": now(),
-                            "mailbox_id": sent_mailbox_id,
                         }
                     )
                 elif response["methodResponses"][idx][1].get("notCreated", {}).get(f"submit-{self.name}"):

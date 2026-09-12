@@ -19,7 +19,7 @@
 					<button
 						v-for="item in group.items"
 						:key="item.label"
-						class="active:bg-surface-gray-1 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-base"
+						class="active:bg-surface-gray-1 flex w-full items-center gap-3 rounded-6 px-3 py-2.5 text-base"
 						:class="item.theme === 'red' ? 'text-ink-red-6' : 'text-ink-gray-8'"
 						@click="run(item)"
 					>
@@ -30,6 +30,9 @@
 							:class="item.theme === 'red' ? 'text-ink-red-6' : 'text-ink-gray-6'"
 						/>
 						<span class="flex-1 truncate text-left">{{ sheetLabel(item.label) }}</span>
+						<!-- Which one you're already on. Desktop takes this from the Menu's own
+						     selected styling; a sheet row has no such state, so it shows a tick. -->
+						<Check v-if="item.selected" class="text-ink-gray-6 h-4 w-4 shrink-0" />
 					</button>
 				</template>
 			</div>
@@ -39,25 +42,32 @@
 
 <script setup lang="ts">
 import { computed, h, isVNode, type Component, type VNode } from 'vue'
-import { BottomSheet, Dropdown, FeatherIcon } from 'frappe-ui'
+import { Check } from 'lucide-vue-next'
+import { BottomSheet, Dropdown } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
 
 import { stripShortcutHint } from '@/apps/mail/utils'
 import { useScreenSize } from '@/apps/mail/utils/composables'
 
 // Drop-in Dropdown replacement: desktop renders a frappe-ui Dropdown untouched,
 // mobile renders the same options as a bottom sheet (popup menus at the bottom
-// edge are thumb-hostile). Supports flat and grouped option arrays; `component`
-// items (custom rendered entries) are not supported here.
+// edge are thumb-hostile). Supports flat and grouped option arrays.
 
 interface OptionItem {
 	label: string
 	icon?: string | Component | VNode
 	onClick?: () => void
 	condition?: () => boolean
+	/**
+	 * The option currently in effect. Same field frappe-ui's Menu reads on desktop (it
+	 * coerces with `Boolean()`, so this must stay a plain boolean — pass a computed
+	 * options array rather than a getter here).
+	 */
+	selected?: boolean
 	theme?: string
 }
 
-type Options = (OptionItem | { group: string; items: OptionItem[] })[]
+type Options = (OptionItem | { group: string; options: OptionItem[] })[]
 
 defineOptions({ inheritAttrs: false })
 
@@ -78,8 +88,8 @@ const groups = computed(() => {
 	const flat: OptionItem[] = []
 	const grouped: { label: string; items: OptionItem[] }[] = []
 	for (const entry of options ?? []) {
-		if (entry && 'items' in entry) {
-			const items = visible(entry.items ?? [])
+		if (entry && 'options' in entry) {
+			const items = visible(entry.options ?? [])
 			if (items.length) grouped.push({ label: entry.group, items })
 		} else if (entry) {
 			flat.push(entry as OptionItem)

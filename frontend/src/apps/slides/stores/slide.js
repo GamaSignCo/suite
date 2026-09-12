@@ -8,10 +8,11 @@ import {
 	presentationTheme,
 	transformElements,
 } from '@/apps/slides/stores/presentation'
-import { resetFocus } from '@/apps/slides/stores/element'
+import { flushPendingBlur, resetFocus } from '@/apps/slides/stores/element'
 import { saveChanges, dirty, saveFailed } from '@/apps/slides/stores/saving'
 import { commandHistory } from '@/apps/slides/stores/historyMeta'
-import { generateUniqueId, cloneObj } from '@/apps/slides/utils/helpers'
+import { cloneObj } from '@/apps/slides/utils/helpers'
+import { remapElementIds } from '@/apps/slides/utils/connectors'
 import { router } from '@/apps/slides/router'
 
 import { toast } from 'frappe-ui'
@@ -34,7 +35,10 @@ const selectionBounds = reactive({
 
 const slideBounds = reactive({})
 
+// an element measures zero in one axis while its text editor is swapped out, and
+// a selection box never legitimately collapses, so keep the last known size
 const updateSelectionBounds = (newBounds) => {
+	if (newBounds.width === 0 || newBounds.height === 0) return
 	Object.assign(selectionBounds, newBounds)
 }
 
@@ -62,10 +66,6 @@ const getNewSlide = (toDuplicate = false, layoutObject, source = currentSlide.va
 
 	if (toDuplicate) {
 		layout = { ...source }
-		layout.elements = source.elements.map((e) => ({
-			...e,
-			id: generateUniqueId(),
-		}))
 	} else {
 		layout = layoutObject || null
 		layout.elements =
@@ -75,11 +75,11 @@ const getNewSlide = (toDuplicate = false, layoutObject, source = currentSlide.va
 	let slide = {}
 	if (layout) {
 		slide = { ...layout }
-		slide.elements = layout.elements.map((e) => ({ ...e }))
+		// the same layout is inserted more than once, so its stored ids can't carry over
+		slide.elements = remapElementIds(layout.elements.map(cloneObj))
 	}
 
 	// override metadata and generate unique IDs for elements
-	slide.name = ''
 	slide.clientId = uuid4()
 	slide.parent = presentationId.value
 	slide.fadeUnmatchedElements = 1
@@ -95,18 +95,21 @@ const setSlideIndex = (index) => {
 	slideIndex.value = index
 }
 
-const changeSlide = async (index, focus = true) => {
+const changeSlide = (index, focus = true) => {
 	index = Math.max(0, Math.min(index, slidesLength.value - 1))
 
-	await router.replace({
-		query: { slide: index + 1 },
-	})
+	slideIndex.value = index
 
 	if (focus) {
 		focusedSlide.value = index
 	} else {
 		focusedSlide.value = null
 	}
+
+	// the query only mirrors the slide we already landed on, so nothing waits on it
+	router.replace({
+		query: { slide: index + 1 },
+	})
 }
 
 const resetAndSave = async () => {
@@ -165,9 +168,10 @@ const deleteSlide = (deleteActive, index) => {
 	)
 }
 
-const changeEditorSlide = async (index, focus = true) => {
+const changeEditorSlide = (index, focus = true) => {
 	if (!inReadonlyMode.value) {
-		await resetFocus()
+		flushPendingBlur()
+		resetFocus()
 	}
 	return changeSlide(index, focus)
 }

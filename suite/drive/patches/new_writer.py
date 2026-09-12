@@ -7,6 +7,10 @@ import pycrdt
 
 
 def execute():
+    if not frappe.db.table_exists("Drive File"):
+        # Site never had the legacy Drive schema — nothing to migrate.
+        return
+
     files = frappe.get_all("Drive File", filters={"document": ("!=", "")}, fields=["name", "document"])
     yjs_map = {k["name"]: frappe.get_doc("Drive Document", k["document"]).content for k in files}
 

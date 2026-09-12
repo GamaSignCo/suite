@@ -13,6 +13,7 @@
 import { ref, useTemplateRef, nextTick } from 'vue'
 
 import { handleUploadedMedia } from '@/apps/slides/utils/mediaUploads'
+import { inCropMode } from '@/apps/slides/stores/imageCrop'
 import { currentSlide } from '@/apps/slides/stores/slide'
 import { selectionColor } from '@/apps/slides/utils/constants'
 
@@ -33,7 +34,7 @@ const getTargetElement = (e) => {
 	const elementId = target.getAttribute('data-index')
 	const element = currentSlide.value.elements.find((el) => el.id == elementId)
 
-	if (element && ['image', 'video'].includes(element.type)) {
+	if (element && !element.locked && ['image', 'video'].includes(element.type)) {
 		return element
 	}
 }
@@ -41,6 +42,10 @@ const getTargetElement = (e) => {
 const handleMediaDrop = async (e) => {
 	e.preventDefault()
 	emit('hideOverlay')
+
+	// a drop would steal the selection from the crop session mid-interaction
+	if (inCropMode.value) return
+
 	nextTick(() => {
 		const targetElement = getTargetElement(e)
 		handleUploadedMedia(e.dataTransfer.files, targetElement)

@@ -1,11 +1,14 @@
 <template>
 	<div
-		class="group relative rounded-md overflow-hidden min-h-0"
+		class="group relative rounded-4 overflow-hidden min-h-0"
 		:class="tileBackgroundClass"
 		:data-testid="`participant-tile-${participant.user_id}`"
+		:data-active-speaker="String(isActiveSpeaker)"
 		:data-audio-enabled="String(isAudioEnabled)"
 		:data-video-enabled="String(isVideoEnabled)"
 		:data-tile-id="`${pinType}-${tileId}`"
+		@mouseenter="isTileHovered = true"
+		@mouseleave="isTileHovered = false"
 	>
 		<video
 			:ref="videoRef"
@@ -26,7 +29,7 @@
 			<lucide-monitor-up class="w-8 h-8 text-white mb-6" />
 			<div
 				v-if="showScreenShareCopy"
-				class="text-white text-xl-medium mb-1"
+				class="text-white text-lg-medium mb-1"
 			>
 				You are sharing your screen
 			</div>
@@ -71,12 +74,12 @@
 		<!-- Reaction -->
 		<div
 			v-if="showReaction && currentReaction"
-			class="absolute top-1 px-2 py-1 rounded-md text-3xl pointer-events-none animate-pop"
+			class="absolute top-1 px-2 py-1 rounded-4 text-2xl pointer-events-none animate-pop"
 			:class="{ 'left-2': !isHandRaised, 'left-10': isHandRaised }"
 			:aria-label="`Reaction ${currentReaction.emoji} from ${resolvedDisplayName}`"
 			role="img"
 		>
-			<span class="text-4xl">{{ currentReaction.emoji }}</span>
+			<span class="text-3xl">{{ currentReaction.emoji }}</span>
 		</div>
 
 		<!-- Raised Hand -->
@@ -108,7 +111,7 @@
 				size="xs"
 				class="!rounded-full !text-white hover:!bg-gray-600"
 				:class="{ '!bg-gray-600': isPinned }"
-				:tooltip="isPinned ? 'Unpin participant' : 'Pin participant'"
+				:tooltip="isTileHovered ? (isPinned ? 'Unpin participant' : 'Pin participant') : undefined"
 				@click="togglePin"
 			>
 				<template #icon>
@@ -121,7 +124,7 @@
 				variant="ghost"
 				size="xs"
 				class="!rounded-full !text-white hover:!bg-gray-600"
-				tooltip="Mute participant"
+				:tooltip="isTileHovered ? 'Mute participant' : undefined"
 				@click="handleMute"
 			>
 				<template #icon>
@@ -133,7 +136,7 @@
 				variant="ghost"
 				size="xs"
 				class="!rounded-full !text-white hover:!bg-gray-600"
-				tooltip="Remove participant"
+				:tooltip="isTileHovered ? 'Remove participant' : undefined"
 				@click="showKickDialog = true"
 			>
 				<template #icon>
@@ -147,6 +150,7 @@
 			v-if="canShowHostControls"
 			v-model="showKickDialog"
 			:participant-name="resolvedDisplayName || 'this participant'"
+			:can-ban="participant.is_guest === true"
 			@confirm="handleKick"
 		/>
 	</div>
@@ -226,6 +230,7 @@ const hostControls = inject<{
 const tileId = computed(() => props.pinId || props.participant.user_id);
 
 const showBlur = ref(props.participant.isLocalScreenShare);
+const isTileHovered = ref(false);
 
 const showScreenShareCopy = computed(() => {
 	return !meetingCtx?.gridLayout.pinnedTiles.value.length || isPinned.value;
@@ -235,10 +240,6 @@ const { stream } = useAudioStream(props.participant.user_id, {
 	mediaState: meetingCtx?.mediaState,
 	currentUser: meetingCtx?.currentUser,
 });
-
-const networkQuality = computed(
-	() => meetingCtx?.networkQuality.value ?? "good",
-);
 
 const resolvedDisplayName = computed(() => {
 	return (
@@ -250,7 +251,7 @@ const resolvedDisplayName = computed(() => {
 
 const computedNetworkQuality = computed(() => {
 	if (props.isLocal) {
-		return networkQuality.value;
+		return meetingCtx?.localNetworkQuality.value ?? "good";
 	}
 	return props.participant.networkQuality || "good";
 });
@@ -337,7 +338,7 @@ const handleMute = () => {
 	hostControls?.muteParticipant(props.participant.user_id);
 };
 
-const handleKick = (ban) => {
+const handleKick = (ban: boolean) => {
 	hostControls?.kickParticipant(props.participant.user_id, ban);
 	showKickDialog.value = false;
 };

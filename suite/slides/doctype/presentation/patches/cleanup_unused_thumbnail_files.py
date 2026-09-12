@@ -45,6 +45,12 @@ def is_generated_thumbnail_file(file):
 
 def get_referenced_file_urls():
     referenced_urls = set()
+
+    # move_slide_thumbnail_to_presentation runs before this patch and lifts the first
+    # slide's thumbnail onto the deck, so the deck is the only holder of that URL
+    for thumbnail in frappe.get_all("Presentation", pluck="thumbnail"):
+        add_referenced_url(referenced_urls, thumbnail)
+
     slides = frappe.get_all(
         "Slide",
         filters={"parenttype": "Presentation"},

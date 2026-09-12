@@ -1,31 +1,97 @@
 name: Meet E2E Tests
 
 on:
+  schedule:
+    - cron: "7 2 * * *"
   push:
     branches:
       - develop
       - main
     paths:
       - "suite/meet/**"
+      - "suite/api/**"
+      - "suite/suite_core/**"
+      - "suite/utils/**"
+      - "suite/www/suite.py"
+      - "suite/calendar/**"
+      - "suite/public/meet/**"
+      - "suite/hooks.py"
+      - "suite/tests/ci_smoke.py"
+      - "realtime/**"
       - "e2e/meet/**"
       - "e2e/shared/**"
       - "e2e/package.json"
       - "e2e/yarn.lock"
       - "e2e/tsconfig.json"
       - "frontend/src/apps/meet/**"
+      - "frontend/src/apps/calendar/**"
+      - "frontend/src/boot/**"
+      - "frontend/src/router/**"
+      - "frontend/src/shell/**"
+      - "frontend/src/components/**"
+      - "frontend/src/composables/**"
+      - "frontend/src/utils/**"
+      - "frontend/src/stores/**"
+      - "frontend/src/assets/**"
+      - "frontend/src/shims/**"
+      - "frontend/src/main.ts"
+      - "frontend/src/App.vue"
+      - "frontend/src/index.css"
+      - "frontend/src/env.d.ts"
+      - "frontend/src/apps/registry.ts"
+      - "frontend/index.html"
+      - "frontend/tailwind.config.js"
+      - "frontend/postcss.config.js"
+      - "frontend/tsconfig.json"
+      - "frontend/tsconfig.node.json"
+      - "frontend/scripts/copy-noise-suppression-assets.mjs"
+      - "frontend/package.json"
+      - "frontend/vite.config.ts"
       - "package.json"
       - "yarn.lock"
       - "pyproject.toml"
       - ".github/workflows/meet-e2e.yml"
-  pull_request:
+  pull_request_target:
     paths:
       - "suite/meet/**"
+      - "suite/api/**"
+      - "suite/suite_core/**"
+      - "suite/utils/**"
+      - "suite/www/suite.py"
+      - "suite/calendar/**"
+      - "suite/public/meet/**"
+      - "suite/hooks.py"
+      - "suite/tests/ci_smoke.py"
+      - "realtime/**"
       - "e2e/meet/**"
       - "e2e/shared/**"
       - "e2e/package.json"
       - "e2e/yarn.lock"
       - "e2e/tsconfig.json"
       - "frontend/src/apps/meet/**"
+      - "frontend/src/apps/calendar/**"
+      - "frontend/src/boot/**"
+      - "frontend/src/router/**"
+      - "frontend/src/shell/**"
+      - "frontend/src/components/**"
+      - "frontend/src/composables/**"
+      - "frontend/src/utils/**"
+      - "frontend/src/stores/**"
+      - "frontend/src/assets/**"
+      - "frontend/src/shims/**"
+      - "frontend/src/main.ts"
+      - "frontend/src/App.vue"
+      - "frontend/src/index.css"
+      - "frontend/src/env.d.ts"
+      - "frontend/src/apps/registry.ts"
+      - "frontend/index.html"
+      - "frontend/tailwind.config.js"
+      - "frontend/postcss.config.js"
+      - "frontend/tsconfig.json"
+      - "frontend/tsconfig.node.json"
+      - "frontend/scripts/copy-noise-suppression-assets.mjs"
+      - "frontend/package.json"
+      - "frontend/vite.config.ts"
       - "package.json"
       - "yarn.lock"
       - "pyproject.toml"
@@ -33,20 +99,41 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: meet-e2e-${{ github.event.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  e2e:
+  author_check:
     runs-on: ubuntu-latest
-    # Playwright --shard=N/M splits the suite; each job is self-contained.
+    permissions:
+      contents: read
+    outputs:
+      trusted: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository || steps.vouch.outputs.vouched == 'true' }}
+    steps:
+      - if: github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - if: github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository
+        id: vouch
+        uses: mitchellh/vouch/action/check-user@d66fa29a64600490892131ad87597c30c91fcac4 # v1.5.0
+        with:
+          user: ${{ github.event.pull_request.user.login }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  e2e:
+    needs: author_check
+    if: needs.author_check.outputs.trusted == 'true'
+    runs-on: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || 'suite-e2e-meet' }}
+    # Historical durations keep each self-contained group near the same runtime.
     strategy:
       fail-fast: false
       matrix:
-        shardIndex: [1, 2, 3]
-        shardTotal: [3]
-    name: E2E Tests (${{ matrix.shardIndex }}/${{ matrix.shardTotal }})
+        group: [1, 2, 3]
+    name: E2E Tests (group ${{ matrix.group }})
     timeout-minutes: 60
+    permissions:
+      contents: read
 
     services:
       redis-cache:
@@ -67,82 +154,73 @@ jobs:
 
     steps:
       - name: Clone
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository }}
+
+      - name: Clone Frappe
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: frappe/frappe
+          path: .frappe-source
+          persist-credentials: false
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          python-version: "3.14"
+          python-version: "3.14.7"
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
-          check-latest: true
+          node-version: "24.12.0"
+
+      - name: Setup Yarn
+        run: corepack enable && corepack prepare yarn@1.22.22 --activate
+
+      - name: Install GitHub-hosted dependencies
+        if: runner.environment == 'github-hosted'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mariadb-client
+          python -m pip install uv
 
       - name: Add to Hosts
         run: echo "127.0.0.1 meet.test" | sudo tee -a /etc/hosts
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/*requirements.txt', '**/pyproject.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Get yarn cache directory path
-        id: yarn-cache-dir-path
-        run: 'echo "dir=$(yarn cache dir)" >> $GITHUB_OUTPUT'
-
-      - name: Cache yarn
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.yarn-cache-dir-path.outputs.dir }}
-          key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-yarn-
-
-      - name: Cache bench directory
-        id: cache-bench
-        uses: actions/cache@v4
-        with:
-          path: ~/frappe-bench
-          key: ${{ runner.os }}-bench-${{ hashFiles('**/pyproject.toml', '**/yarn.lock', '**/requirements.txt', '**/package.json') }}
-          restore-keys: |
-            ${{ runner.os }}-bench-
-
-      - name: Install MariaDB Client
-        run: |
-          sudo apt update
-          sudo apt-get install -y mariadb-client
-
       - name: Setup Bench
         run: |
-          pip install frappe-bench
-          if [ "${{ steps.cache-bench.outputs.cache-hit }}" != "true" ]; then
-            bench init --skip-redis-config-generation --skip-assets --python "$(which python)" ~/frappe-bench
+          rm -rf "$RUNNER_TEMP/frappe-bench"
+          if [ "$(bench --version 2>/dev/null || true)" != "5.31.0" ]; then
+            python -m pip install "frappe-bench==5.31.0"
           fi
+          bench init --frappe-path "$GITHUB_WORKSPACE/.frappe-source" --skip-redis-config-generation --skip-assets --python "$(which python)" "$RUNNER_TEMP/frappe-bench"
 
       - name: Install Suite
-        working-directory: /home/runner/frappe-bench
+        working-directory: ${{ runner.temp }}/frappe-bench
         run: |
           rm -rf apps/suite sites/meet.test sites/assets/suite
-          bench get-app suite $GITHUB_WORKSPACE
+          git clone "$GITHUB_WORKSPACE" apps/suite
+          uv pip install --quiet -e "$PWD/apps/suite" --python "$PWD/env/bin/python"
+          cache_key=$(cd apps/suite && { node --version; yarn --version; sha256sum package.json yarn.lock frontend/package.json; } | sha256sum | cut -d ' ' -f 1)
+          if [ -f /var/cache/suite-node-modules/key ] && [ "$cache_key" = "$(cat /var/cache/suite-node-modules/key)" ]; then
+            tar -xzf /var/cache/suite-node-modules/node_modules.tar.gz -C apps/suite
+          else
+            yarn --cwd apps/suite install --check-files
+          fi
+          python -c 'from bench.bench import Bench; Bench(".").apps.sync(app_name="suite", app_dir="suite")'
+          bench build --app suite
           mariadb --host 127.0.0.1 --port 3306 -u root -proot -e "SET GLOBAL character_set_server = 'utf8mb4'"
           mariadb --host 127.0.0.1 --port 3306 -u root -proot -e "SET GLOBAL collation_server = 'utf8mb4_unicode_ci'"
           bench new-site --db-root-password root --admin-password admin meet.test
           bench --site meet.test install-app suite
-          cd apps/suite
-          yarn install --frozen-lockfile --non-interactive
-          yarn build
-          cd /home/runner/frappe-bench
-          bench build
         env:
           CI: "Yes"
 
       - name: Configure Site for E2E
-        working-directory: /home/runner/frappe-bench
+        working-directory: ${{ runner.temp }}/frappe-bench
         run: |
           bench --site meet.test set-config sfu_secret "e2e-test-secret-key-12345"
           bench --site meet.test set-config sfu_server_url "http://localhost"
@@ -150,6 +228,12 @@ jobs:
           bench --site meet.test set-config ignore_csrf 1
           bench --site meet.test set-config allow_tests true
           bench --site meet.test set-config host_name "http://meet.test:8000"
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            bench set-config -g scheduler_tick_interval 5
+            bench --site meet.test enable-scheduler
+            bench --site meet.test execute suite.tests.ci_smoke.enable_scheduler_smoke_logging
+          fi
+          bench --site meet.test clear-cache
 
       - name: Build SFU Server
         working-directory: ${{ github.workspace }}/suite/meet/sfu-server
@@ -162,14 +246,21 @@ jobs:
         timeout-minutes: 20
         run: |
           yarn install --frozen-lockfile --non-interactive
-          yarn playwright install-deps chromium
           google-chrome --version
 
+      - name: Install Playwright system dependencies
+        if: runner.environment == 'github-hosted'
+        working-directory: ${{ github.workspace }}/e2e
+        run: yarn playwright install-deps chromium
+
       - name: Start Frappe Server
-        working-directory: /home/runner/frappe-bench
+        id: start-frappe
+        working-directory: ${{ runner.temp }}/frappe-bench
         run: |
           sed -i 's/^watch:/# watch:/g' Procfile
-          sed -i 's/^schedule:/# schedule:/g' Procfile
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            sed -i 's/^schedule:/# schedule:/g' Procfile
+          fi
           bench start &> bench_start.log &
           echo "Waiting for Frappe server to start..."
           timeout 60 bash -c 'until curl -s http://meet.test:8000 > /dev/null; do sleep 2; done'
@@ -183,33 +274,50 @@ jobs:
           timeout 30 bash -c 'until curl -s http://localhost:3000/health > /dev/null 2>&1; do sleep 2; done'
           echo "SFU server is ready"
         env:
+          NODE_ENV: development
           PORT: 3000
           HOST: 0.0.0.0
           JWT_SECRET: e2e-test-secret-key-12345
-          WEBRTC_LISTEN_IP: 127.0.0.1
-          WEBRTC_ANNOUNCED_IP: 127.0.0.1
+          WEBRTC_LISTEN_IP: 0.0.0.0
+          WEBRTC_ANNOUNCED_IP: ""
           MEDIASOUP_NUM_WORKERS: 1
           SOCKET_PING_INTERVAL: 1000
           SOCKET_PING_TIMEOUT: 3000
 
       - name: Run E2E Tests
         working-directory: ${{ github.workspace }}/e2e
-        run: yarn test:meet --shard=${{ matrix.shardIndex }}/${{ matrix.shardTotal }}
+        run: yarn test:meet
         env:
           BASE_URL: http://meet.test:8000
           SFU_URL: http://localhost:3000
           CI: true
+          MEET_E2E_GROUP: ${{ matrix.group }}
           SFU_E2E_DISCONNECT_TEST: true
           SFU_E2E_DISCONNECT_WAIT_MS: 7000
 
+      - name: Check Scheduled Job Execution
+        if: always() && github.event_name == 'schedule' && steps.start-frappe.outcome == 'success'
+        working-directory: ${{ runner.temp }}/frappe-bench
+        run: timeout 90 bash -c 'until [ "$(bench --site meet.test execute suite.tests.ci_smoke.scheduler_smoke_ran)" = "true" ]; do sleep 5; done'
+
       - name: Upload Test Results
-        uses: actions/upload-artifact@v4
-        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always() && !cancelled()
         with:
-          name: meet-playwright-report-shard-${{ matrix.shardIndex }}
+          name: meet-playwright-report-group-${{ matrix.group }}
           path: |
             e2e/meet/playwright-report/
             e2e/meet/test-results/
             e2e/meet/results.xml
+            ${{ runner.temp }}/frappe-bench/bench_start.log
           compression-level: 1
-          retention-days: 7
+          retention-days: 14
+
+      - name: Upload JUnit Results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: meet-junit-group-${{ matrix.group }}
+          path: e2e/meet/results.xml
+          if-no-files-found: warn
+          retention-days: 14

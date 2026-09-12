@@ -11,12 +11,13 @@ from suite.drive.api.files import get_file_type
 from suite.drive.api.permissions import (
     exceeds_grant_ceiling,
     get_entity_with_permissions,
-    get_user_access,
+    get_user_access_for_user,
     user_has_permission,
 )
 from suite.drive.api.product import create_invites
 from suite.drive.utils import (
     ATTACHMENT_CONTENT_DOCTYPE,
+    FRAMEWORK_FOLDERS,
     GENERAL_USER,
     GROUP_PREFIX,
     ROOT_FOLDER,
@@ -33,10 +34,6 @@ from suite.drive.utils import (
 )
 from suite.drive.utils.files import S3_URL_PREFIX, FileManager, get_s3_url, storage_key
 
-# Framework-created folders (the site root and its attachments folder);
-# uploads still sitting in them haven't been adopted into a user folder yet.
-FRAMEWORK_FOLDERS = ("Home", "Home/Attachments")
-
 
 class File(FrappeFile):
     """Every File is Drive-managed. Files created by Drive itself (marked with
@@ -45,8 +42,16 @@ class File(FrappeFile):
     `after_file_upload`."""
 
     def validate(self):
+        self._validate_content_link()
         if self.is_new() and not self.flags.file_created:
             return super().validate()
+        if (
+            not self.is_new()
+            and not self.flags.file_created
+            and self.has_value_changed("file_url")
+            and not self._not_in_disk()
+        ):
+            self.manager.get_local_path(self.file_url)
         # Blob-backed Drive files must be private: they're served only through
         # Drive's permission layer, never the public /files/ path. Folders, links
         # and content-doctype files have no on-disk blob, and adopted framework
@@ -65,10 +70,40 @@ class File(FrappeFile):
                 frappe.ValidationError,
             )
 
+    def _validate_content_link(self):
+        """`content_doctype`/`content_docname` are the sole permission delegation
+        point for content documents (see `content_has_permission`): whoever's
+        File claims a document effectively owns it, and `after_delete` cascades
+        deletion through them. They must only ever be set — or cleared — by
+        Drive's own trusted paths (`create_for_doc`, the attachment-reference
+        branch of `after_file_upload`, or a migration patch), never by a plain
+        user-driven insert or update. Otherwise any user could forge a link to
+        someone else's document and inherit full access to it, or (since File
+        write access can come from a Drive share, not just ownership) sever an
+        existing link to break the permission/deletion delegation and orphan
+        the content document."""
+        if self.is_new() and not (self.content_doctype or self.content_docname):
+            return
+        if not self.is_new() and not (
+            self.has_value_changed("content_doctype") or self.has_value_changed("content_docname")
+        ):
+            return
+        if self.flags.file_created or self.flags.allow_content_link:
+            return
+        if frappe.session.user == "Administrator":
+            return
+        frappe.throw(
+            "content_doctype/content_docname can only be set by Drive's own file-creation flow.",
+            frappe.PermissionError,
+        )
+
     def before_insert(self):
         # Drive's upload flow owns storage; framework uploads keep core's flow.
         if not self.flags.file_created:
-            return super().before_insert()
+            super().before_insert()
+            if not self.mime_type:
+                self.mime_type = mimemapper.get_mime_type(self.file_name, native_first=False)
+            self.file_type = get_file_type(self.mime_type)
 
     def autoname(self):
         if not self.flags.file_created:
@@ -94,6 +129,8 @@ class File(FrappeFile):
         super().on_trash()
 
     def after_delete(self):
+        if self.status == STATUS_REMOVED and not self._not_in_disk():
+            self._delete_blob_after_commit(not self.manager.flat)
         if self.is_folder:
             for child_name in frappe.get_all("File", filters={"folder": self.name}, pluck="name"):
                 frappe.delete_doc("File", child_name, ignore_permissions=True)
@@ -103,6 +140,8 @@ class File(FrappeFile):
         frappe.db.delete("Drive Permission", {"entity": self.name})
         frappe.db.delete("Drive Notification", {"notif_doctype_name": self.name})
         frappe.db.delete("Drive Entity Activity Log", {"entity": self.name})
+        frappe.db.delete("Drive DAV Property", {"entity": self.name})
+        frappe.db.delete("Drive DAV Lock", {"entity": self.name})
 
         if (
             self.content_doctype
@@ -209,7 +248,7 @@ class File(FrappeFile):
             # Dropping this file's own general rows is enough unless read is
             # inherited from a folder above (e.g. anything inside Site); then
             # restricting still needs an explicit deny to cut the inheritance.
-            if get_user_access(self, "Guest")["read"]:
+            if get_user_access_for_user(self, "Guest")["read"]:
                 self._insert_deny("")
             if generate_upward_path(self.name, GENERAL_USER)[-1]["read"]:
                 self._insert_deny(GENERAL_USER)
@@ -252,6 +291,12 @@ class File(FrappeFile):
         """
         Move file to a new folder.
         """
+        # Row lock BEFORE any disk transfer: WebDAV promotion and settlement
+        # serialize on this lock, and a relocation whose disk op ran outside
+        # it was observable mid-flight — old bytes already carried while the
+        # row still pointed at the source (see webdav/put.py). Lock order
+        # stays globally consistent: row first, folder rollups after.
+        frappe.db.get_value("File", self.name, "name", for_update=True)
         new_parent = new_parent or get_user_folder().name
 
         if new_parent == self.name:
@@ -307,33 +352,14 @@ class File(FrappeFile):
 
         return frappe.get_value("File", new_parent, ["file_name", "name", "folder"], as_dict=True)
 
-    def toggle_favourite(self):
-        existing_doc = frappe.db.exists(
-            {
-                "doctype": "Drive Favourite",
-                "entity": self.name,
-                "user": frappe.session.user,
-            }
-        )
-        if existing_doc:
-            frappe.delete_doc("Drive Favourite", existing_doc)
-            return False
-        else:
-            frappe.get_doc(
-                {
-                    "doctype": "Drive Favourite",
-                    "entity": self.name,
-                    "user": frappe.session.user,
-                }
-            ).insert()
-            return True
-
     @frappe.whitelist()
     @_update_modified
     def rename(self, new_file_name: str):
         """
         Rename file or folder
         """
+        # row lock before the disk transfer — same discipline as move()
+        frappe.db.get_value("File", self.name, "name", for_update=True)
         if not user_has_permission(self, "write"):
             frappe.throw("You cannot rename this file", frappe.PermissionError)
 
@@ -371,11 +397,32 @@ class File(FrappeFile):
         if not (write_access or parent_write_access):
             frappe.throw("Not permitted", frappe.PermissionError)
 
+        delete_blob = not self._not_in_disk()
+        blob_is_trashed = self.status == STATUS_TRASHED and not self.manager.flat
         self.status = STATUS_REMOVED
         if self.is_folder:
             for child in self.get_children():
                 child.permanent_delete()
         self.save()
+        if delete_blob:
+            self._delete_blob_after_commit(blob_is_trashed)
+
+    def _delete_blob_after_commit(self, blob_is_trashed: bool):
+        entity = frappe._dict(name=self.name, file_url=self.file_url)
+
+        def delete_blob():
+            try:
+                if blob_is_trashed:
+                    self.manager.delete_from_trash(entity)
+                else:
+                    self.manager.delete_file(entity)
+            except Exception:
+                frappe.log_error(
+                    "Drive: could not permanently delete blob",
+                    frappe.get_traceback(),
+                )
+
+        frappe.db.after_commit.add(delete_blob)
 
     # Utils
     @property
@@ -589,6 +636,10 @@ def after_file_upload(doc):
         doc.modified = library_doc.modified
         doc.content_doctype = ATTACHMENT_CONTENT_DOCTYPE
         doc.content_docname = frappe.form_dict.library_file_name
+        # `File` has no has_permission hook keyed on content_doctype, so this
+        # self-referential "original" link (unlike Writer/Presentation links)
+        # can't grant elevated access to library_doc — safe to allow here.
+        doc.flags.allow_content_link = True
     else:
         # Adopt any framework upload — attachment or loose — into the uploader's
         # private folder; the blob stays where the framework wrote it.

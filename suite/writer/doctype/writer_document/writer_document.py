@@ -19,6 +19,12 @@ AUTOVERSION_DURATION = 10
 
 
 class WriterDocument(Document):
+    def on_trash(self):
+        # Versions are a standalone doctype linking back here, so the framework's
+        # link check would refuse the delete before anything cleaned them up —
+        # and nothing outside this document references a version.
+        frappe.db.delete("Writer Version", {"doc": self.name})
+
     @frappe.whitelist(methods=["POST"])
     def save_doc(self, data: str, html: str | None = None):
         self.check_permission("write")
@@ -124,9 +130,6 @@ class WriterDocument(Document):
                     )
         except COLLISION_ERRORS:
             pass
-
-    def rename(self):
-        frappe.get_value({"doc": self.name}).rename()
 
     def as_dict(self, *args, **kwargs):
         result = super().as_dict(*args, **kwargs)

@@ -50,6 +50,7 @@ class EmailCreateModel:
     destroy_after_submit: bool = False
     forwarded_id: str | None = None
     reply_to_id: str | None = None
+    hold_until: int | None = None
 
 
 @dataclass

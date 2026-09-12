@@ -3,9 +3,10 @@ import type * as mediasoup from 'mediasoup';
 import type {
 	AppData,
 	CloseProducerResult,
+	ProducerAppData,
 	ProducerData,
 	RtpParameters,
-	WebRtcTransport,
+	TransportData,
 } from '../types';
 import { loggers } from '../utils/logger';
 
@@ -13,14 +14,18 @@ export class ProducerManager extends EventEmitter {
 	private producers = new Map<string, ProducerData>();
 
 	async createProducer(
-		transport: WebRtcTransport,
+		transport: TransportData['transport'],
 		roomId: string,
 		peerId: string,
 		rtpParameters: RtpParameters,
 		kind: 'audio' | 'video',
-		appData: AppData = {},
+		appData: ProducerAppData = {},
 		paused = false,
-	): Promise<{ id: string; kind: 'audio' | 'video'; appData: AppData }> {
+	): Promise<{
+		id: string;
+		kind: 'audio' | 'video';
+		appData: ProducerAppData;
+	}> {
 		loggers.producerManager.info(
 			'Creating %s producer for peer %s',
 			kind,
@@ -51,11 +56,14 @@ export class ProducerManager extends EventEmitter {
 		producer.on('score', (scores) => {
 			this.emit('score', roomId, peerId, kind, scores);
 		});
+		producer.on('transportclose', () => {
+			this.emit('producer_transport_closed', producer.id);
+		});
 
 		return {
 			id: producer.id,
 			kind: producer.kind,
-			appData: producer.appData || appData,
+			appData: sanitizedAppData(producer.appData),
 		};
 	}
 
@@ -65,18 +73,19 @@ export class ProducerManager extends EventEmitter {
 
 		const { producer } = producerData;
 		const isScreen = producer?.appData?.type === 'screen';
-
-		try {
-			producer.close();
-		} catch (error) {
-			loggers.producerManager.warn(
-				'Error closing producer %s: %s',
-				producerId,
-				(error as Error).message,
-			);
-		}
-
 		this.producers.delete(producerId);
+
+		if (!producer.closed) {
+			try {
+				producer.close();
+			} catch (error) {
+				loggers.producerManager.warn(
+					'Error closing producer %s: %s',
+					producerId,
+					(error as Error).message,
+				);
+			}
+		}
 
 		loggers.producerManager.info(
 			'Producer closed: %s%s',
@@ -157,6 +166,18 @@ export class ProducerManager extends EventEmitter {
 		return this.producers.size;
 	}
 
+	getProducerCountsByWorker(
+		roomWorkerIds: Map<string, number>,
+	): Map<number, number> {
+		const counts = new Map<number, number>();
+		for (const data of this.producers.values()) {
+			const workerId = roomWorkerIds.get(data.roomId);
+			if (workerId === undefined) continue;
+			counts.set(workerId, (counts.get(workerId) ?? 0) + 1);
+		}
+		return counts;
+	}
+
 	getProducerIdsByPeer(roomId: string, peerId: string): string[] {
 		return Array.from(this.producers.entries())
 			.filter(
@@ -180,4 +201,19 @@ export class ProducerManager extends EventEmitter {
 		}
 		this.producers.clear();
 	}
+}
+
+function sanitizedAppData(value: AppData): ProducerAppData {
+	const appData: ProducerAppData = {};
+	if (value.type === 'screen') appData.type = 'screen';
+	if (typeof value.e2eeStartPaused === 'boolean') {
+		appData.e2eeStartPaused = value.e2eeStartPaused;
+	}
+	if (
+		typeof value.senderId === 'number' &&
+		Number.isSafeInteger(value.senderId)
+	) {
+		appData.senderId = value.senderId;
+	}
+	return appData;
 }

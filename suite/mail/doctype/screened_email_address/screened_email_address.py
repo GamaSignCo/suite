@@ -47,7 +47,7 @@ class ScreenedEmailAddress(Document):
         if not (is_system_manager(user) or is_suite_admin(user)):
             frappe.throw(
                 _(
-                    "Only a System Manager or Mail Admin can manage global screened email addresses (without an account)."
+                    "Only a System Manager or Suite Admin can manage global screened email addresses (without an account)."
                 ),
                 frappe.PermissionError,
             )

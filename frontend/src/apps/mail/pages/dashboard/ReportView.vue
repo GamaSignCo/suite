@@ -4,7 +4,7 @@
 			<DashboardDetailHeader :title="detailTitle" :meta="[data.domain || data.from, reportId]">
 				<template #icon><FileChartColumn class="h-5 w-5" /></template>
 				<template #actions>
-					<Dropdown :options="dropdownOptions" :button="{ icon: 'more-horizontal' }" />
+					<Dropdown :options="dropdownOptions" :button="{ icon: 'lucide-more-horizontal' }" />
 				</template>
 			</DashboardDetailHeader>
 
@@ -33,17 +33,18 @@
 						<Button variant="ghost" :label="__('Copy')" @click="copyToClipBoard(reportJson)" />
 					</template>
 					<pre
-						class="bg-surface-gray-2 max-h-[60vh] overflow-auto rounded p-4 text-xs whitespace-pre-wrap"
+						class="bg-surface-gray-2 max-h-[60vh] overflow-auto rounded-4 p-4 text-xs whitespace-pre-wrap"
 						>{{ reportJson }}</pre
 					>
 				</DashboardCard>
 			</div>
 		</template>
 	</DashboardLayout>
-	<Dialog v-model="showDelete" :options="deleteOptions" />
+	<Dialog v-model:open="showDelete" v-bind="deleteOptions" />
 </template>
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { useRouter } from 'vue-router'
 import { Button, Dialog, Dropdown, createResource, usePageMeta } from 'frappe-ui'
 
@@ -85,7 +86,7 @@ const detailTitle = computed(() => {
 	return `${dir} ${KIND_LABELS[kind] || kind} ${__('Report')}`
 })
 
-usePageMeta(() => ({ title: listTitle.value }))
+usePageMeta(() => appPageMeta(listTitle.value, 'Mail'))
 
 const showDelete = ref(false)
 
@@ -125,11 +126,11 @@ const deleteReport = createResource({
 const deleteOptions = computed(() => ({
 	title: __('Delete Report'),
 	message: __('Delete this report? This cannot be undone.'),
-	icon: { name: 'alert-triangle', appearance: 'warning' },
+	icon: { name: 'lucide-alert-triangle', theme: 'amber' },
 	actions: [{ label: __('Confirm'), variant: 'solid', theme: 'red', onClick: deleteReport.submit }],
 }))
 
 const dropdownOptions = computed(() => [
-	{ group: '', items: [{ label: __('Delete'), icon: 'trash-2', onClick: () => (showDelete.value = true) }] },
+	{ group: '', options: [{ label: __('Delete'), icon: 'lucide-trash-2', onClick: () => (showDelete.value = true) }] },
 ])
 </script>

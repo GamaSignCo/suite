@@ -1,7 +1,7 @@
 <template>
 	<Dialog
-		v-model="show"
-		:options="{
+		v-model:open="show"
+	 v-bind="{
 			title: __('Add Member'),
 			actions: [
 				{
@@ -13,7 +13,7 @@
 			],
 		}"
 	>
-		<template #body-content>
+		<template #default>
 			<div class="space-y-4">
 				<div class="space-y-3">
 					<div v-for="(email, index) in emails" :key="index" class="space-y-1.5">
@@ -148,16 +148,8 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import {
-	Button,
-	Combobox,
-	Dialog,
-	ErrorMessage,
-	FeatherIcon,
-	FormControl,
-	MultiSelect,
-	Switch,
-	createResource,
-} from 'frappe-ui'
+	Button, Combobox, Dialog, ErrorMessage, FormControl, MultiSelect, Switch, createResource } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
 
 import { raiseToast } from '@/apps/mail/utils'
 import { fromLocalInput, toLocalInput, utcFromNow } from '@/apps/mail/utils/datetime'

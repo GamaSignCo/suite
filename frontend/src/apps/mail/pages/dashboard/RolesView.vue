@@ -41,25 +41,17 @@
 </template>
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { watchDebounced } from '@vueuse/core'
-import {
-	FeatherIcon,
-	FormControl,
-	ListEmptyState,
-	ListHeader,
-	ListRow,
-	ListRowItem,
-	ListRows,
-	ListView,
-	createResource,
-	usePageMeta,
-} from 'frappe-ui'
+import { FormControl, createResource, usePageMeta } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
+import { ListEmptyState, ListHeader, ListRow, ListRowItem, ListRows, ListView } from 'frappe-ui/experimental'
 
 import DashboardLayout from '@/apps/mail/components/DashboardLayout.vue'
 import DashboardListSkeleton from '@/apps/mail/components/DashboardListSkeleton.vue'
 import AddRoleModal from '@/apps/mail/components/Modals/AddRoleModal.vue'
 
-usePageMeta(() => ({ title: __('Roles') }))
+usePageMeta(() => appPageMeta(__('Roles'), 'Mail'))
 
 const showAdd = ref(false)
 const search = ref('')

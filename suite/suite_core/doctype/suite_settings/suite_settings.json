@@ -1,0 +1,48 @@
+{
+ "actions": [],
+ "creation": "2026-06-26 16:09:48.495762",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "workspace_name",
+  "workspace_logo",
+  "is_onboarded"
+ ],
+ "fields": [
+  {
+   "fieldname": "workspace_name",
+   "fieldtype": "Data",
+   "label": "Workspace Name"
+  },
+  {
+   "fieldname": "workspace_logo",
+   "fieldtype": "Attach Image",
+   "label": "Workspace Logo"
+  },
+  {
+   "default": "0",
+   "fieldname": "is_onboarded",
+   "fieldtype": "Check",
+   "label": "Onboarded",
+   "read_only": 1
+  }
+ ],
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-06-26 18:26:27.000000",
+ "modified_by": "Administrator",
+ "module": "Suite Core",
+ "name": "Suite Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

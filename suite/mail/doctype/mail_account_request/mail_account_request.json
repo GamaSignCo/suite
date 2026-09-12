@@ -1,41 +1,41 @@
 {
  "actions": [],
- "creation": "2025-01-14 15:10:13.672435",
+ "creation": "2026-08-05 13:05:47.407555",
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
-  "section_break_ikiq",
-  "column_break_cqhu",
-  "column_break_0kvc",
+  "request_details_section",
+  "request_details_column_break_1",
   "ip_address",
-  "user_details_section",
+  "request_details_column_break_2",
+  "account_details_section",
   "backup_email",
   "roles",
   "is_admin",
-  "column_break_hswp",
+  "account_details_column_break",
   "invited_by",
   "account",
   "aliases",
   "quota_gb",
   "membership_details_section",
   "groups",
-  "column_break_mlgr",
+  "membership_details_column_break",
   "mailing_lists",
   "verification_details_section",
   "send_invite",
   "is_verified",
   "is_expired",
-  "column_break_vcxy",
+  "verification_details_column_break",
   "expires_at",
   "request_key"
  ],
  "fields": [
   {
-   "fieldname": "column_break_hswp",
+   "fieldname": "account_details_column_break",
    "fieldtype": "Column Break"
   },
   {
-   "description": "Secret token embedded in the verification link, used to look up and verify this request.",
+   "description": "Secret token that authorizes completing this request via the guest account-setup form. Embedded in the invite link; for self-signups it is only released after the emailed verification code is confirmed.",
    "fieldname": "request_key",
    "fieldtype": "Data",
    "in_standard_filter": 1,
@@ -45,7 +45,7 @@
    "unique": 1
   },
   {
-   "description": "Alternate email the invite/verification link is sent to; also saved on the created account's settings.",
+   "description": "Alternate email that receives the invite link or the signup verification code; saved on the created account's settings and used for password resets.",
    "fieldname": "backup_email",
    "fieldtype": "Data",
    "in_list_view": 1,
@@ -58,7 +58,7 @@
    "set_only_once": 1
   },
   {
-   "description": "The Suite Admin or System Manager who created this request.",
+   "description": "The Suite Admin or System Manager who created this request. Empty for self-signup requests.",
    "fieldname": "invited_by",
    "fieldtype": "Link",
    "in_list_view": 1,
@@ -67,14 +67,13 @@
    "link_filters": "[[\"User\",\"role\",\"=\",\"Suite Admin\"]]",
    "no_copy": 1,
    "options": "User",
-   "reqd": 1,
    "search_index": 1,
    "set_only_once": 1
   },
   {
    "default": "0",
    "depends_on": "eval: !doc.__islocal",
-   "description": "Whether the backup email has been verified via the invite link or OTP.",
+   "description": "Set when the request is completed: ownership of the backup email proven via the invite link or signup code, or force-verified by an admin creating the account directly.",
    "fieldname": "is_verified",
    "fieldtype": "Check",
    "label": "Is Verified",
@@ -83,7 +82,7 @@
    "search_index": 1
   },
   {
-   "fieldname": "column_break_vcxy",
+   "fieldname": "verification_details_column_break",
    "fieldtype": "Column Break"
   },
   {
@@ -98,16 +97,16 @@
    "read_only": 1
   },
   {
-   "fieldname": "section_break_ikiq",
+   "fieldname": "request_details_section",
    "fieldtype": "Section Break"
   },
   {
-   "description": "Primary email address; becomes the Frappe User and the Stalwart account's primary address.",
+   "description": "The email address of the mail account to create; becomes the Frappe User and the Stalwart account's primary address.",
    "fieldname": "account",
    "fieldtype": "Data",
    "in_list_view": 1,
    "in_standard_filter": 1,
-   "label": "Account",
+   "label": "Account Email",
    "length": 255,
    "options": "Email",
    "reqd": 1,
@@ -144,7 +143,7 @@
    "set_only_once": 1
   },
   {
-   "fieldname": "column_break_mlgr",
+   "fieldname": "membership_details_column_break",
    "fieldtype": "Column Break"
   },
   {
@@ -156,9 +155,9 @@
    "set_only_once": 1
   },
   {
-   "fieldname": "user_details_section",
+   "fieldname": "account_details_section",
    "fieldtype": "Section Break",
-   "label": "User Details"
+   "label": "Account Details"
   },
   {
    "fieldname": "verification_details_section",
@@ -167,7 +166,7 @@
   },
   {
    "default": "1",
-   "description": "If enabled, emails a verification link to the backup email; otherwise the account is created immediately.",
+   "description": "If enabled, an invite link is emailed to the backup email when the request is created. Left off, an admin-created account is provisioned immediately, while a self-signup proceeds by verifying an emailed code.",
    "fieldname": "send_invite",
    "fieldtype": "Check",
    "label": "Send Invite",
@@ -183,11 +182,11 @@
    "set_only_once": 1
   },
   {
-   "fieldname": "column_break_0kvc",
+   "fieldname": "request_details_column_break_2",
    "fieldtype": "Column Break"
   },
   {
-   "description": "When this request stops being valid and can no longer create an account.",
+   "description": "When this request stops being valid and can no longer create an account. Defaults to one day after creation.",
    "fieldname": "expires_at",
    "fieldtype": "Datetime",
    "label": "Expires At",
@@ -195,20 +194,20 @@
    "search_index": 1
   },
   {
-   "fieldname": "column_break_cqhu",
+   "fieldname": "request_details_column_break_1",
    "fieldtype": "Column Break"
   },
   {
-   "description": "Stalwart roles (one per line) assigned to the account on creation; defaults are chosen by the admin flag.",
+   "description": "Stalwart roles (one per line) assigned to the account on creation. Left blank, defaults to User.",
    "fieldname": "roles",
    "fieldtype": "Small Text",
-   "label": "Roles",
+   "label": "Stalwart Roles",
    "no_copy": 1,
    "read_only": 1
   },
   {
    "default": "0",
-   "description": "If enabled, the created user gets the Suite Admin role and admin Stalwart roles.",
+   "description": "If enabled, the created user gets the Suite Admin role in Frappe.",
    "fieldname": "is_admin",
    "fieldtype": "Check",
    "label": "Is Admin",
@@ -220,7 +219,7 @@
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-07-24 20:37:34.829154",
+ "modified": "2026-08-05 13:12:57.666618",
  "modified_by": "Administrator",
  "module": "Mail",
  "name": "Mail Account Request",

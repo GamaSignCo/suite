@@ -1,10 +1,11 @@
 <template>
   <Dialog
-    v-model="show"
-    :options="{ title: pivotId ? 'Edit pivot table' : 'Create pivot table', size: 'lg' }"
-    :disable-outside-click-to-close="pickerOpenCount > 0"
+    v-model:open="show"
+    :title="pivotId ? 'Edit pivot table' : 'Create pivot table'"
+    size="lg"
+    :dismissible="pickerOpenCount === 0"
   >
-    <template #body-content>
+    <template #default>
 
       <!-- ── Source range ─────────────────────────────────────────────────── -->
       <div class="pv-section">
@@ -39,7 +40,7 @@
         <!-- Rows -->
         <div class="pv-bucket">
           <p class="pv-bucket-label">
-            <FeatherIcon name="align-left" class="pv-bucket-icon" /> Rows
+            <FeatherIcon name="text-align-start" class="pv-bucket-icon" /> Rows
           </p>
           <div class="pv-bucket-body">
             <div v-for="f in rowFields" :key="f" class="pv-chip">
@@ -50,7 +51,7 @@
             </div>
             <PivotFieldPicker :fields="pickableFields('rows')" @select="f => addTo('rows', f)" @opened="pickerOpenCount++" @closed="pickerOpenCount--">
               <template #default="{ isOpen }">
-                <Button size="sm" :variant="isOpen ? 'subtle' : 'ghost'" icon="plus" label="Add field" class="pv-add-btn" />
+                <Button size="sm" :variant="isOpen ? 'subtle' : 'ghost'" icon="lucide-plus" label="Add field" class="pv-add-btn" />
               </template>
             </PivotFieldPicker>
           </div>
@@ -59,7 +60,7 @@
         <!-- Columns -->
         <div class="pv-bucket">
           <p class="pv-bucket-label">
-            <FeatherIcon name="columns" class="pv-bucket-icon" /> Columns
+            <FeatherIcon name="columns-2" class="pv-bucket-icon" /> Columns
           </p>
           <div class="pv-bucket-body">
             <div v-for="f in colFields" :key="f" class="pv-chip">
@@ -70,7 +71,7 @@
             </div>
             <PivotFieldPicker :fields="pickableFields('cols')" @select="f => addTo('cols', f)" @opened="pickerOpenCount++" @closed="pickerOpenCount--">
               <template #default="{ isOpen }">
-                <Button size="sm" :variant="isOpen ? 'subtle' : 'ghost'" icon="plus" label="Add field" class="pv-add-btn" />
+                <Button size="sm" :variant="isOpen ? 'subtle' : 'ghost'" icon="lucide-plus" label="Add field" class="pv-add-btn" />
               </template>
             </PivotFieldPicker>
           </div>
@@ -85,7 +86,6 @@
             <div v-for="v in valueFields" :key="v.field" class="pv-chip pv-chip--value">
               <Dropdown
                 :options="aggOpts(v)"
-                placement="bottom-start"
                 @update:open="onAggDropdownToggle"
               >
                 <template #default="{ open }">
@@ -102,7 +102,7 @@
             </div>
             <PivotFieldPicker :fields="pickableFields('values')" @select="f => addTo('values', f)" @opened="pickerOpenCount++" @closed="pickerOpenCount--">
               <template #default="{ isOpen }">
-                <Button size="sm" :variant="isOpen ? 'subtle' : 'ghost'" icon="plus" label="Add field" class="pv-add-btn" />
+                <Button size="sm" :variant="isOpen ? 'subtle' : 'ghost'" icon="lucide-plus" label="Add field" class="pv-add-btn" />
               </template>
             </PivotFieldPicker>
           </div>
@@ -149,7 +149,8 @@
 
 <script setup>
 import { ref, computed, watch } from 'vue'
-import { Button, Dialog, FormControl, FeatherIcon, Dropdown } from 'frappe-ui'
+import { Button, Dialog, FormControl, Dropdown } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
 import { AGG_OPTIONS, computePivot } from '../../engine/pivot.js'
 import PivotFieldPicker from './PivotFieldPicker.vue'
 

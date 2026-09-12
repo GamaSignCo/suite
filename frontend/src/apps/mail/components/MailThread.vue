@@ -27,23 +27,34 @@
 		<!-- Mobile: the subject is part of the fixed chrome — scrolling starts below it,
 		     and its border is the separator content passes under. -->
 		<div v-if="isMobile && thread?.length" class="shrink-0 border-b px-3.5 pb-3.5 pt-1.5">
-			<!-- !leading-7: subjects wrap, and both text-xl-semibold (line-height 1.15
+			<!-- !leading-7: subjects wrap, and both text-lg-semibold (line-height 1.15
 			     baked in) and the global body.mail-app h2 rule outrank a plain leading-*
 			     utility — wrapped lines sat nearly touching. -->
-			<h2 class="text-xl-semibold !leading-7">
+			<h2 class="text-lg-semibold !leading-7">
 				{{ thread[0].subject || __('[No subject]') }}
 			</h2>
 		</div>
 		<div ref="threadContainer" class="flex-1 overflow-y-auto">
 
+			<!-- The composer window floats over the app, so while one is up the thread keeps a
+			     little room under its last message — enough to scroll clear of a minimised bar
+			     rather than ending beneath it. Not reserved otherwise, or every thread would
+			     end in a gap explaining nothing. -->
 			<div
-				class="sm:space-y-4 sm:px-5 sm:py-6"
-				:class="{ 'pb-16': isMobile && !thread?.at(-1)?.draft }"
+				class="sm:space-y-3 sm:px-5 sm:pt-6"
+				:class="{
+					'pb-16': isMobile && !thread?.at(-1)?.draft,
+					'sm:pb-24': isComposeWindowOpen(),
+					'sm:pb-6': !isComposeWindowOpen(),
+				}"
 			>
 				<template v-for="group in mailsByDay" :key="group.date">
+					<!-- Borderless: the date is a label, not a control — only the
+					     more-messages toggle keeps the pill outline. -->
 					<ThreadDivider
 						v-if="shouldShowDateDivider(group.mails)"
 						:message="getFormattedDate(group.date)"
+						class="[&_span:not(.border-t)]:text-ink-gray-4 [&_span:not(.border-t)]:border-0 [&_span:not(.border-t)]:text-xs"
 					/>
 					<template v-for="mail in group.mails" :key="mail.name">
 						<ThreadDivider
@@ -64,16 +75,32 @@
 								class="hover:text-ink-gray-8"
 							/>
 						</button>
+						<!-- A draft that is popped out drops out of the thread entirely: it is being
+						     written in the composer window, and it must be the card that goes, not
+						     just the editor inside it — the wrapper carries the draft's own border,
+						     padding and shadow, so hiding only its contents left an empty white
+						     card sitting in the thread. -->
 						<div
-							v-if="!collapsedMailNames.has(mail.name)"
+							v-if="!collapsedMailNames.has(mail.name) && !isPoppedOut(mail)"
 							:data-mail-name="mail.name"
+							class="group/card"
 							:class="{
-								'px-3.5 py-5': isMobile,
+								'px-3.5': isMobile,
+								// Same tightening the desktop rows got: reading padding for
+								// open mail, slimmer rows for collapsed ones.
+								'py-5': isMobile && !isCollapsed(mail),
+								'py-3.5': isMobile && isCollapsed(mail),
 								'max-sm:border-b':
 									(thread.length > 1 || mail.draft) &&
 									mail.name !== mailBeforeCollapsedGroup &&
 									mail.name !== mailBeforeUnseenMarker,
-								'sm:rounded-xl sm:p-5': thread.length > 1 || mail.draft,
+								'sm:rounded-7': thread.length > 1 || mail.draft,
+								// A collapsed row only holds one line — reading-card padding
+								// around it is what made the thread feel loose.
+								'sm:px-4 sm:py-5': (thread.length > 1 || mail.draft) && !isCollapsed(mail),
+								// The list rows' hover, so a clickable row answers the cursor.
+								'sm:hover:bg-surface-gray-1 sm:px-4 sm:py-3':
+									thread.length > 1 && isCollapsed(mail),
 								'sm:border':
 									(thread.length > 1 && !mail.draft) ||
 									(mail.draft && dataTheme === 'dark'),
@@ -126,8 +153,8 @@
 										:reload-mails="handleReload"
 										:thread="thread"
 										@set-flagged="
-											(id: string, flagged: boolean) =>
-												emit('setFlagged', [id], flagged)
+											(ids: string[], flagged: boolean) =>
+												emit('setFlagged', ids, flagged)
 										"
 										@sync-unseen="handleSyncUnseen"
 										@move-mail="(m: Mail, target: string) => emit('moveMail', m, target)"
@@ -141,27 +168,50 @@
 								<div
 									class="flex items-center space-x-3"
 									:class="{
-										'cursor-pointer': mail !== thread[thread.length - 1],
-										'pb-6': mail.preview || !isCollapsed(mail),
+										'cursor-pointer': mail !== lastMessage,
+										'pb-6': !isCollapsed(mail),
+										// Mobile collapsed rows: a step, not a chasm, between the
+										// name row and its preview line.
+										'pb-2': isCollapsed(mail) && isMobile && !!mail.preview,
 									}"
 									@click.stop="mail.collapsed = !mail.collapsed"
 								>
 									<Avatar
 										:label="getSenderInitial(mail)"
 										:image="mail.user_image"
-										size="xl"
+										:size="isCollapsed(mail) ? (isMobile ? 'lg' : 'md') : 'xl'"
 									/>
-									<div class="flex flex-1 justify-between truncate text-sm">
-										<div class="mr-3 flex flex-col space-y-1 truncate">
+									<!-- Collapsed rows align everything on one text baseline —
+									     name, preview and timestamp are three sizes with three
+									     line boxes, and centered boxes leave baselines adrift. -->
+									<!-- min-w-0, not truncate: the flex item still shrinks so the
+									     nested spans can ellipsize, but overflow stays visible — the
+									     hover actions overhang this box and were clipped by it. -->
+									<div
+										class="flex min-w-0 flex-1 justify-between text-sm"
+										:class="{ 'items-baseline': isCollapsed(mail) && !isMobile }"
+									>
+										<div
+											class="mr-3 flex truncate"
+											:class="
+												isCollapsed(mail) && !isMobile
+													? 'flex-1 items-baseline space-x-3'
+													: 'flex-col space-y-1'
+											"
+										>
 											<div class="flex items-center space-x-1.5">
 												<span
 													class="truncate text-[15px] !font-semibold sm:text-base"
 												>
 													{{ mail.from_name || mail.from_email }}
 												</span>
+												<!-- leading-4: truncate is overflow-hidden, and the preset's 1.15 puts 13px
+												     text in a 14.95px box while Inter's glyph box wants ~15.7 — so the
+												     descenders of a g or a p were shaved off. 16px still sits under the
+												     sender name beside it, so the row does not grow. -->
 												<span
-													v-if="!isMobile"
-													class="text-ink-gray-5 truncate"
+													v-if="!isMobile && !isCollapsed(mail)"
+													class="text-ink-gray-5 truncate leading-4"
 												>
 													<span>&lt;</span>
 													<Tooltip :text="__('Filter messages from this sender')">
@@ -172,12 +222,23 @@
 													</Tooltip>
 													<span>&gt;</span>
 												</span>
-												<template
-													v-if="!(isCollapsed(mail) || mail.draft)"
-												>
+											</div>
+											<!-- Same 13px truncate, same shaved descenders. Collapsed
+											     mails keep just sender + preview — recipients belong to
+											     the expanded reading view. A compact summary, not the
+											     roster: two names carry the line, the rest fold into
+											     "and x others" behind the chevron beside it. -->
+											<div
+												v-if="!isCollapsed(mail)"
+												class="flex items-center space-x-1.5 truncate leading-4"
+											>
+												<span class="truncate">
+													{{ recipientsSummary(mail) }}
+												</span>
+												<template v-if="!mail.draft">
 													<ChevronDown
 														v-if="isMobile"
-														class="text-ink-gray-6 h-3.5 w-3.5 rounded-sm transition-transform duration-200"
+														class="text-ink-gray-6 mt-px h-3.5 w-3.5 shrink-0 rounded-1 transition-transform duration-200"
 														:class="{
 															'rotate-180':
 																showMailDetails === mail.name,
@@ -192,20 +253,68 @@
 													<MailDetailsPopover v-else :mail />
 												</template>
 											</div>
-											<div class="truncate">
-												{{ getFormattedRecipients(mail.recipients) }}
-											</div>
+											<!-- Desktop collapsed rows are one line: the preview rides
+											     beside the name instead of on a row of its own.
+											     leading-5: truncate is overflow-hidden and the preset's
+											     1.15 puts 14px text in a ~16.1px box while Inter's glyph
+											     box wants ~16.4 — descenders were shaved. The row is
+											     avatar-tall, so the stated 20px adds no height. -->
+											<span
+												v-if="isCollapsed(mail) && !isMobile"
+												class="text-ink-gray-7 min-w-0 flex-1 truncate leading-5"
+											>
+												{{ mail.preview }}
+											</span>
 										</div>
-										<div class="flex items-center space-x-1 self-start">
-											<MailDate
+										<!-- self-start suits the expanded card's two-line header; on
+										     a collapsed row the block inherits the parent's baseline
+										     alignment (its own baseline is the timestamp's). -->
+										<div
+											class="flex items-center space-x-1"
+											:class="{
+												'self-start': !isCollapsed(mail),
+												'self-center': isCollapsed(mail) && isMobile,
+												/* Hovered collapsed rows swap text for icon buttons —
+												   no baseline to join, so center the block instead.
+												   group-has [data-state=open]: the ⋯ menu is portaled,
+												   so opening it ends the hover — without this the
+												   trigger unmounts and the menu loses its anchor. */
+												'sm:group-hover/card:self-center sm:group-has-[[data-state=open]]/card:self-center':
+													isCollapsed(mail) && !isMobile,
+											}"
+										>
+											<!-- The timestamp yields to the actions on hover (fixed
+											     right edge), so the row never moves. -->
+											<!-- flex, not a bare span: MailDate's own mr-1 doesn't
+											     count inside an inline wrapper, and the gap between
+											     time and actions went with it. -->
+											<span
 												v-if="!isMobile || isCollapsed(mail)"
-												:datetime="mail.received_at"
-											/>
-											<MailActions
+												class="flex"
+												:class="{
+													'sm:group-hover/card:hidden sm:group-has-[[data-state=open]]/card:hidden':
+														isCollapsed(mail),
+												}"
+											>
+												<MailDate
+													:datetime="mail.received_at"
+													:clock="showsClockTime"
+												/>
+											</span>
+											<!-- h-5: the 28px ghost buttons overhang the padding
+											     instead of growing the one-line row on hover. -->
+											<div
 												v-if="!isMobile && !readonly"
+												:class="
+													isCollapsed(mail)
+														? 'hidden h-5 items-center gap-1 sm:group-hover/card:flex sm:group-has-[[data-state=open]]/card:flex'
+														: 'flex gap-1'
+												"
+											>
+											<MailActions
 												:mailbox
 												:mail
-												:is-collapsed="isCollapsed(mail)"
+												:is-collapsed="false"
 												:show-reply-all="showReplyAll(mail)"
 												:pop-out-draft
 												:reply
@@ -214,14 +323,15 @@
 												:reload-mails="handleReload"
 												:thread="thread"
 												@set-flagged="
-													(id: string, flagged: boolean) =>
-														emit('setFlagged', [id], flagged)
+													(ids: string[], flagged: boolean) =>
+														emit('setFlagged', ids, flagged)
 												"
 												@sync-unseen="handleSyncUnseen"
 												@move-mail="(m: Mail, target: string) => emit('moveMail', m, target)"
 												@mark-mail-spam="(m: Mail, spam: boolean) => emit('markMailSpam', m, spam)"
 												@delete-mail="(m: Mail) => emit('deleteMail', m)"
 											/>
+											</div>
 										</div>
 									</div>
 								</div>
@@ -232,9 +342,14 @@
 									class="mb-4"
 								/>
 
-								<div v-show="isCollapsed(mail)" class="truncate">
+								<div
+									v-show="isCollapsed(mail) && isMobile"
+									class="truncate text-base"
+								>
 									{{ mail.preview }}
 								</div>
+
+
 
 								<div v-show="!isCollapsed(mail)">
 									<Alert
@@ -281,19 +396,34 @@
 										:attachment="icsAttachment(mail)"
 										:account="scopeAccountId"
 									/>
-									<EmailContent
-										v-if="hasHtmlContent(mail.html_body)"
-										:content="mail.html_body"
-										:block-images="shouldBlockImages(mail)"
-										:can-trust="!readonly"
-										@trust="trustSender.submit(mail.from_email)"
+									<DeliveryStatusBanner
+										v-if="showsDsnCard(mail)"
+										:key="`dsn-${mail.name}`"
+										:blob-id="mail.dsn_blob_id!"
+										:account="scopeAccountId"
+										@loaded="dsnCardRendered[mail.name] = $event"
 									/>
+									<template v-if="!dsnReplacesBody(mail)">
+										<EmailContent
+											v-if="hasHtmlContent(mail.html_body)"
+											:content="mail.html_body"
+											:block-images="shouldBlockImages(mail)"
+											:can-trust="!readonly"
+											@trust="trustSender.submit(mail.from_email)"
+										/>
 
-									<LinkifiedText
-										v-else
-										:text="mail.html_body || mail.text_body"
-										class="pt-4 font-sans text-base !leading-5 sm:text-sm"
-									/>
+										<!-- font-sans is the system stack, not Inter: the preset leaves
+										     fontFamily.sans alone and puts InterVar on <html> instead. So this is
+										     deliberately off the variable font — and text-base's 420 then has no
+										     face to land on, which CSS resolves upward to the system Medium,
+										     rendering the body bolder than everything around it. font-normal pins
+										     it to Regular. -->
+										<PlainTextBody
+											v-else
+											:text="getPlainTextBody(mail)"
+											class="pt-4 font-sans !font-normal text-base !leading-5 sm:text-sm"
+										/>
+									</template>
 
 									<div v-if="filteredAttachments(mail).length" class="mt-8">
 										<div
@@ -346,6 +476,24 @@
 								</div>
 							</template>
 						</div>
+
+						<!-- Stands in for the card while the reply is being written in the composer
+						     window, so the conversation still shows there is a draft in it — and offers
+						     the way back. Same border, radius and horizontal padding as the card it
+						     replaces, so it keeps the thread's rhythm and its text lines up with the
+						     messages above; only the vertical padding is slimmer, because it is a line
+						     about a message rather than a message. v-else-if, so it appears only where
+						     the card was withheld; the collapsed test tells that reason from this one. -->
+						<div
+							v-else-if="!collapsedMailNames.has(mail.name)"
+							class="text-ink-gray-8 rounded-7 border px-5 py-3 text-sm"
+						>
+							{{ __('This draft is open in another window.') }}
+							<button
+								class="text-ink-blue-6 cursor-pointer font-medium hover:underline"
+								@click="showDraftInThread()"
+							>{{ __('Edit here instead') }}</button>.
+						</div>
 					</template>
 				</template>
 
@@ -376,10 +524,12 @@
 		</div>
 		<SendMail
 			v-if="focusedDraft"
+			ref="composeWindow"
 			v-model="showSendModal"
 			:mail-details="draftMails[focusedDraft]"
 			@reload-mails="reload"
 			@discard-mail="discardLocalDraft(focusedDraft)"
+			@discard-started="dropPoppedOutDraft()"
 		/>
 		<AttachmentViewer
 			v-model="showAttachmentViewer"
@@ -391,7 +541,7 @@
 
 	<div v-else class="h-full overflow-hidden p-5">
 		<div
-			class="bg-surface-gray-1 flex h-full items-center justify-center rounded-md"
+			class="bg-surface-gray-1 flex h-full items-center justify-center rounded-4"
 		>
 			<div class="flex flex-col items-center space-y-3">
 				<NoMails class="text-ink-gray-2 h-16 w-16" />
@@ -421,17 +571,20 @@ import { Alert, Avatar, Badge, Button, Tooltip, createResource } from 'frappe-ui
 
 import { getAttachmentsZipUrl } from '@/apps/mail/resources'
 import {
+	decodeHtmlEntities,
 	downloadUrlAsFile,
 	extractQuotedContent,
 	getFormattedDate,
-	getFormattedRecipients,
 	getGroupedRecipients,
 	hasHtmlContent,
 	matchesScreenedValue,
+	plainTextToHtml,
 	raiseToast,
 	shouldIgnoreKeypress,
 } from '@/apps/mail/utils'
+import { containEmailHtml } from '@/apps/mail/utils/containEmailHtml'
 import { getSenderInitial } from '@/apps/mail/utils/participants'
+import { mailCopyIds } from '@/apps/mail/utils/mailCopies'
 import { useFilterBySender, useScreenSize, useSettings, useTheme } from '@/apps/mail/utils/composables'
 import { provideAccountScope } from '@/apps/mail/utils/accountScope'
 import { userStore } from '@/apps/mail/stores/user'
@@ -439,13 +592,20 @@ import AttachmentCapsule from '@/apps/mail/components/AttachmentCapsule.vue'
 import AttachmentViewer from '@/apps/mail/components/AttachmentViewer.vue'
 import CalendarInviteBanner from '@/apps/mail/components/CalendarInviteBanner.vue'
 import ComposeMailEditor from '@/apps/mail/components/ComposeMailEditor.vue'
+import DeliveryStatusBanner from '@/apps/mail/components/DeliveryStatusBanner.vue'
 import EmailContent from '@/apps/mail/components/EmailContent.vue'
 import NoMails from '@/apps/mail/components/Icons/NoMails.vue'
-import LinkifiedText from '@/components/LinkifiedText.vue'
+import PlainTextBody from '@/apps/mail/components/PlainTextBody.vue'
+import { openComposePage } from '@/apps/mail/composables/composeHandoff'
 import MailActions from '@/apps/mail/components/MailActions.vue'
 import MailDate from '@/apps/mail/components/MailDate.vue'
 import MailDetails from '@/apps/mail/components/MailDetails.vue'
 import MailDetailsPopover from '@/apps/mail/components/MailDetailsPopover.vue'
+import {
+	closeComposeWindow,
+	composeWindowDraft,
+	isComposeWindowOpen,
+} from '@/apps/mail/composables/useComposeWindow'
 import SendMail from '@/apps/mail/components/SendMail.vue'
 import ThreadDivider from '@/apps/mail/components/ThreadDivider.vue'
 import ThreadHeader from '@/apps/mail/components/ThreadHeader.vue'
@@ -457,10 +617,23 @@ import type {
 	Mail,
 	Mailbox,
 	MailboxData,
+	Recipient,
 	ScreenedAddress,
 } from '@/apps/mail/types'
 
-const { mailbox, threadID, threads, messages, canGoNext, readonly, slide, account } =
+const {
+	mailbox,
+	threadID,
+	threads,
+	messages,
+	canGoNext,
+	readonly,
+	// Explicit default: Vue casts an absent Boolean prop to `false`, so this cannot be left to a
+	// `?? !readonly` fallback — every caller that didn't pass it would silently stop marking read.
+	marksSeen = true,
+	slide,
+	account,
+} =
 	defineProps<{
 		mailbox: string
 		threadID?: string
@@ -475,6 +648,8 @@ const { mailbox, threadID, threads, messages, canGoNext, readonly, slide, accoun
 		// Read-only thread (e.g. the Screener): renders the messages but hides every action — the thread
 		// toolbar, per-message actions, the block banner and the reply/forward bar — and never marks read.
 		readonly?: boolean
+		/** Marks the conversation seen on open. On by default; a view that only previews can opt out. */
+		marksSeen?: boolean
 		// Transition name for the mobile swipe paging ('page-next' / 'page-prev', styled in
 		// MailLayout); the owner arms it per swipe and clears it on slideDone, so other thread
 		// changes swap instantly.
@@ -501,8 +676,8 @@ const emit = defineEmits([
 ])
 
 const { isMobile } = useScreenSize()
-const { openSettings } = useSettings()
 const { filterBySender } = useFilterBySender()
+const { openSettings } = useSettings()
 const dayjs = inject('$dayjs')
 const user = inject('$user')
 // The pane acts as the thread's owning account (the active one unless the `account`
@@ -561,6 +736,28 @@ const mailsByDay = computed(() => {
 	}
 	return groups
 })
+
+// The expanded header's second line: "to Pushkar", "to Pushkar and Neha", "to Pushkar,
+// Rushabh and Neha", "to Pushkar, Rushabh and 2 others". First names only — the full
+// roster with addresses is behind the chevron beside it.
+const recipientsSummary = (mail: Mail) => {
+	const ordered = [...mail.recipients].sort(
+		(a, b) => Number(b.type === 'To') - Number(a.type === 'To'),
+	)
+	const names = ordered.map((r: Recipient) => (r.display_name || r.email).split(' ')[0])
+	if (!names.length) return ''
+	if (names.length === 1) return __('to {0}', [names[0]])
+	if (names.length === 2) return __('to {0} and {1}', [names[0], names[1]])
+	if (names.length === 3) return __('to {0}, {1} and {2}', names)
+	return __('to {0}, {1} and {2} others', [names[0], names[1], String(names.length - 2)])
+}
+
+// Rows state clock time only while day dividers state the date (multi-day thread, grouping
+// on, desktop). Otherwise the row's timestamp is the only date there is, and stays relative.
+const showsClockTime = computed(
+	() =>
+		!isMobile.value && mailsByDay.value.length > 1 && user.data.group_messages_by === 'Day',
+)
 
 const shouldShowDateDivider = (mails: Mail[]) =>
 	!isMobile.value &&
@@ -672,6 +869,17 @@ const loadThread = () => {
 	thread.value = data
 	setCollapsedGroup(data)
 
+	// Opening a draft from the list puts it in the thread, so a composer window still holding that
+	// same draft would be a second editor on it — two copies saving over each other, which is how
+	// the pair in the screenshot came to disagree. The window gives it up; the thread has it now.
+	// Skipped while the window is this thread's own pop-out, or reloading would shut the window the
+	// reader is typing in. Asked of the rows being loaded rather than of `showSendModal` alone, which
+	// says only that a window was opened from this pane at some point and stays true across a move to
+	// another conversation.
+	const held = composeWindowDraft()
+	if (held && data.some((mail: Mail) => mail.id === held) && !data.some(isPoppedOut))
+		closeComposeWindow()
+
 	data.forEach((mail) => {
 		if (mail.draft) {
 			mail.groupedRecipients = getGroupedRecipients(mail.recipients, false)
@@ -680,8 +888,10 @@ const loadThread = () => {
 	})
 
 	// Opening a thread marks every message in the whole conversation read — including copies in other
-	// mailboxes (e.g. Sent) that aren't shown in this view. Read-only views (the Screener) never do this.
-	if (!readonly && source.some((mail) => !mail.seen)) setThreadSeen(true)
+	// mailboxes (e.g. Sent) that aren't shown in this view. The Screener included: reading there is
+	// still reading, and leaving it unread left the "waiting to be screened" dot burning after you had
+	// looked and simply not decided yet.
+	if (marksSeen && source.some((mail) => !mail.seen)) setThreadSeen(true)
 }
 
 // Mark the whole conversation seen/unseen — every message across all mailboxes, not just the ones
@@ -689,7 +899,7 @@ const loadThread = () => {
 // all). Persisted via the parent (list + server) WITHOUT mutating the displayed messages, so the
 // "unread from here" marker survives reopening. Works for list and get_thread-fallback threads alike.
 const setThreadSeen = (seen: boolean) => {
-	const ids = (sourceMessages() ?? thread.value).map((mail) => mail.id)
+	const ids = (sourceMessages() ?? thread.value).flatMap(mailCopyIds)
 	emit('setSeen', seen, ids)
 }
 
@@ -775,7 +985,17 @@ const filterRelevantMails = (mail: Mail) => {
 let forceReload = false
 
 const reload = () => {
-	if (!threadID) return
+	// The thread can be gone by the time this is called: a draft's editor squares up with the list
+	// as it unmounts, and what unmounted it was usually the reader leaving. There is no pane left to
+	// refresh — the list is the whole of what is being asked for.
+	//
+	// Still flagged for a re-derive, because the reader can be back inside the thread before the rows
+	// arrive: the pane would then have been built from the very copy this reload is replacing, and a
+	// background sync leaves drafts alone by design.
+	if (!threadID) {
+		forceReload = true
+		return emit('reloadMails')
+	}
 	// A directly-fetched thread isn't in the list, so refresh it in place.
 	if (!messages?.length) return threadFallback.reload()
 	forceReload = true
@@ -788,6 +1008,16 @@ watch(
 		resetCollapsedGroup()
 		removedMailIds.clear()
 		thread.value = []
+		// Going back to the list takes the composer window with it: everything in this pane hangs off
+		// `threadID`, the popped-out composer included, so it is unmounted along with the thread it
+		// came from. What is left behind is only the memory of it, and the next thread opened mounted
+		// a composer on that — the draft from the last conversation, over a thread that had nothing to
+		// do with it, in a window that had forgotten it was ever folded away.
+		if (!threadID) {
+			showSendModal.value = false
+			focusedDraft.value = undefined
+			poppedOutDraftId.value = undefined
+		}
 		loadThread()
 	},
 )
@@ -869,6 +1099,16 @@ const filteredAttachments = (mail: Mail) =>
 		(a: Attachment) => a.disposition === 'attachment' || !a.type.startsWith('image/'),
 	)
 
+// A bounce (DSN) message renders as a friendly card built from its message/delivery-status
+// part instead of the raw MAILER-DAEMON text. The body only comes back as fallback if the
+// banner reports there was nothing to render (part unreadable or without recipients).
+const dsnCardRendered = ref<Record<string, boolean>>({})
+
+const showsDsnCard = (mail: Mail) => !readonly && !isCollapsed(mail) && !!mail.dsn_blob_id
+
+const dsnReplacesBody = (mail: Mail) =>
+	showsDsnCard(mail) && dsnCardRendered.value[mail.name] !== false
+
 // The message's calendar invite, if it carries one — as a text/calendar (or application/ics)
 // part or a file merely named *.ics.
 const icsAttachment = (mail: Mail) =>
@@ -910,8 +1150,17 @@ const downloadAttachmentsAsZip = async (mail: Mail) => {
 	}
 }
 
-const isCollapsed = (mail: Mail) =>
-	!!(mail.collapsed && mail !== thread.value[thread.value.length - 1])
+// The message at the end of the conversation stays open — it is the one being read. Drafts do not
+// count towards which that is: a reply written at the bottom of the thread is not a newer message,
+// it is a thing being written about the last one, and the reader wants both on screen. Read as the
+// last row outright, the message being replied to folded itself away the moment the draft under it
+// was saved and the thread reloaded around it — every mail already seen comes back collapsed, and
+// the exemption had moved on to the draft.
+const lastMessage = computed(
+	() => [...thread.value].reverse().find((mail: Mail) => !mail.draft) ?? thread.value.at(-1),
+)
+
+const isCollapsed = (mail: Mail) => !!(mail.collapsed && mail !== lastMessage.value)
 
 const showReplyAll = (mail: Mail) =>
 	!mail.draft &&
@@ -951,7 +1200,12 @@ const replyAll = (mail: Mail) =>
 const forward = (mail: Mail) =>
 	createLocalDraft(mail, {
 		subject: `Fwd: ${mail.subject || ''}`,
-		html_body: getForwardedContent(mail),
+		html_body: getForwardHeader(mail),
+		// quoted_content, NOT html_body: content placed in the editor is re-serialized
+		// through its schema, which strips the original mail's tables/styles/attributes.
+		// Like a reply's quote, the forwarded original stays out of the editor and is
+		// concatenated back verbatim at send time.
+		quoted_content: getForwardedBody(mail),
 		attachments: mail.attachments || [],
 		forwarded_from_id: mail.id,
 		type: 'forward',
@@ -1059,9 +1313,96 @@ defineExpose({ syncFlagged, syncMailboxMembership, removeMailFromView })
 
 const focusedDraft = ref<string>()
 const showSendModal = ref(false)
+const composeWindow = useTemplateRef('composeWindow')
+
+// The id of the draft that went to the window, kept here rather than asked of the window itself.
+//
+// It has to be a ref, and the reason is the whole of this: a draft popped out is written to on the
+// way — the reply learns its own id on the first save — and the thread has to notice. The window
+// knows, but it knows in a plain variable inside `useComposeWindow`, which no render is watching;
+// a card checking it as it drew got the answer from before the window opened and never asked
+// again, so the editor stayed in the thread underneath the very window that had taken it.
+const poppedOutDraftId = ref<string>()
+watch(
+	() => composeWindow.value?.mail?.id,
+	(id) => id && (poppedOutDraftId.value = id),
+)
+
+// The one draft the composer window is holding, whichever row it has become.
+//
+// Either name answers, because the row is one thing and then the other. A reply started in the pane
+// is a local `draft:<source>` entry with no id at all — a save from in here does not reload the
+// thread, so the row keeps that name and never learns one. Popped out, the same save does reload:
+// the local row goes, and the server's draft takes its place under a name and an id of its own.
+// Matching on the id alone missed the first, and on the name alone missed the second — either way
+// the editor sat in the thread underneath the window that had taken it.
+//
+// Asked of a row rather than assumed of every draft, because "a draft is in the window" is not the
+// same question. This pane is reused as the reader moves between threads, so a draft popped out of
+// one conversation is still in the window while another is on screen — and that one's own draft is
+// not the one being written elsewhere.
+const isDraftInWindow = (mail: Mail) => {
+	if (!mail.draft) return false
+	if (mail.name === focusedDraft.value) return true
+	return !!poppedOutDraftId.value && mail.id === poppedOutDraftId.value
+}
+
+// A draft being written in the composer window rather than in the thread. The thread stands the
+// notice in its place, or the same reply sits in two editors that do not share their state.
+//
+// Keyed on the window still being open rather than on clearing `focusedDraft`: the card returns the
+// moment it closes, and discarding — which reads `focusedDraft` as it fires — still knows which
+// draft it meant.
+const isPoppedOut = (mail: Mail) =>
+	showSendModal.value && !!focusedDraft.value && isDraftInWindow(mail)
+
+// Bring the reply back into the conversation, carrying whatever it has become.
+//
+// Closing the window is not by itself enough. The window's composer built a draft of its own out of
+// the details it was handed, so nothing typed into it has ever reached `draftMails` — the card came
+// back reading as it did at the moment of pop-out, and its own autosave then wrote that stale text
+// over the server's copy. So the live draft is taken from the composer while it is still there.
+// Reading it back from the server instead would mean waiting on the two-second autosave, and a
+// reader who clicks this a second after typing is exactly the case that goes wrong.
+//
+// Copied rather than adopted, and layered over the entry already there: the composer models the
+// message and not the thread's bookkeeping, so the reply type — which is what draws the card's
+// icon and decides whether From and Subject are shown — survives from underneath.
+const showDraftInThread = () => {
+	const live = composeWindow.value?.mail
+	const name = focusedDraft.value
+	if (live && name) draftMails[name] = { ...draftMails[name], ...JSON.parse(JSON.stringify(live)) }
+	showSendModal.value = false
+}
+
+// Discard, heard as it starts rather than once the delete lands. The card is withheld only while
+// the window is open, and `discardMail` closes before it deletes — so without this the thread took
+// the draft back and showed it for the length of the request, on its way to being destroyed.
+//
+// Only the row being discarded: a thread can hold a second draft — a server one and a reply just
+// started in the pane — and that one is not going anywhere. The row is going anyway; a delete that
+// fails is put back by the reload behind it.
+const dropPoppedOutDraft = () => {
+	if (!focusedDraft.value) return
+	delete draftMails[focusedDraft.value]
+	thread.value = thread.value.filter((m: Mail) => !isDraftInWindow(m))
+}
 
 const popOutDraft = (mail: ComposeMailData) => {
 	draftMails[mail.name as string] = mail
+
+	// Mobile composes on a page of its own rather than in an overlay — see ComposeView. Nothing has
+	// to be handed back on the way out: leaving the compose route remounts this thread, so the reply
+	// that was just sent is there in the refetch, and a local draft that was discarded is gone with
+	// the component that was holding it.
+	if (isMobile.value) {
+		openComposePage(router, scopeAccountId.value, mail)
+		return
+	}
+
+	// Taken here as well as from the window, so the card goes the moment the window opens rather than
+	// a frame later, once the composer inside it has mounted and can be asked.
+	poppedOutDraftId.value = mail.id
 	focusedDraft.value = mail.name
 	showSendModal.value = true
 }
@@ -1070,6 +1411,7 @@ const getSourceMail = (mail: string) =>
 	thread.value.find((m: Mail) => m.name === mail.split(':')[1])
 
 const getReplyDetails = (mail: Mail) => ({
+	from_email: getReplyIdentityEmail(mail),
 	subject: mail.subject?.startsWith('Re: ') ? mail.subject : `Re: ${mail.subject}`,
 	quoted_content: getQuotedContent(mail),
 	attachments: mail.attachments?.filter((a: Attachment) => a.disposition === 'inline') || [],
@@ -1097,12 +1439,44 @@ const getReplyAllRecipients = (mail: Mail) => {
 		}
 }
 
-const isUserEmail = (email: string) =>
-	identities.value.data?.map((i: Identity) => i.email).includes(email)
+// Addresses arrive in whatever casing the other side used: match case-insensitively, and hand
+// back the identity's own spelling, since the composer looks the address up by that.
+const getIdentityEmail = (email?: string) =>
+	identities.value.data?.find((i: Identity) => i.email.toLowerCase() === email?.toLowerCase())
+		?.email
 
+const isUserEmail = (email: string) => !!getIdentityEmail(email)
+
+// The identity a reply should go out as: the one the message was addressed to (the sender,
+// when the message is our own). Undefined when no identity took part, and the composer falls
+// back to the account's default outgoing address, then its first identity.
+const getReplyIdentityEmail = (mail: Mail) => {
+	const { to = [], cc = [], bcc = [] } = mail.groupedRecipients ?? {}
+	return getIdentityEmail(
+		[mail.from_email, ...[...to, ...cc, ...bcc].map((r) => r.email)].find(isUserEmail),
+	)
+}
+
+// The plain-text reading of a body, normalised. Servers hand some bodies over already
+// entity-escaped, and those carry no real tags — so they take this path, where showing
+// them verbatim (or escaping them again) puts `&lt;` in front of the reader instead of
+// the address it stands for. Both consumers below start from here.
+const getPlainTextBody = (mail: Mail) => decodeHtmlEntities(mail.html_body || mail.text_body || '')
+
+// A body with no markup is plain text, so it has to be escaped before going in here: the
+// reader parses this as HTML. Bounce notices are the case that bites, since their
+// `RCPT TO:<user@host>` reads as an unknown tag, which the sanitizer then drops, silently
+// deleting the very addresses the notice is about.
+// Deliberately not a <pre>: the editor parses one as a code block, so quoting or forwarding
+// a plain-text mail used to hand the recipient the sender's prose in monospace that never
+// wrapped. plainTextToHtml keeps the line breaks without asking for that.
 const getBodyContent = (mail: Mail) => {
-	if (hasHtmlContent(mail.html_body)) return mail.html_body
-	return `<pre style="white-space: pre-wrap; word-break: break-word">${mail.html_body || mail.text_body || '&nbsp;'}</pre>`
+	// Contained, not verbatim: the original's body/html style rules would otherwise
+	// repaint the entire outgoing mail (e.g. a marketing mail's dark backdrop
+	// bleeding over the sender's own text).
+	if (hasHtmlContent(mail.html_body)) return containEmailHtml(mail.html_body)
+	const text = getPlainTextBody(mail)
+	return `<div style="white-space: pre-wrap">${text ? plainTextToHtml(text) : '&nbsp;'}</div>`
 }
 
 const getQuotedContent = (mail: Mail) =>
@@ -1115,21 +1489,25 @@ const getQuotedContent = (mail: Mail) =>
 		</div>
 	`
 
-const getForwardedContent = (mail: Mail) => {
+// The header is our own plain text, which the editor round-trips unharmed — so it
+// lives in html_body, visible and editable in the composer, with the signature
+// inserted above it (see useComposeMail's prefilledBody). Only the original's
+// body needs to stay out of the editor (see getForwardedBody).
+const getForwardHeader = (mail: Mail) => {
 	const recipients = getGroupedRecipients(mail.recipients, true, true)
 	return `
-		<div class="frappe_mail_fwd">
+		<div>
 			<br><br>
 			---------- Forwarded message ---------<br>
-			From: ${mail.from_name} < ${mail.from_email} ><br>
+			From: ${mail.from_name} &lt;${mail.from_email}&gt;<br>
 			Date: ${dayjs(mail.received_at).format('ddd, MMM D, YYYY [at] h:mm A')}<br>
 			Subject: ${mail.subject || ''}<br>
 			To: ${recipients.to}<br>
 			${recipients.cc ? `Cc: ${recipients.cc}<br>` : ''}
-			<br><br>
-			${getBodyContent(mail)}
 		</div>
 	`
 }
-</script>
 
+const getForwardedBody = (mail: Mail) =>
+	`<div class="frappe_mail_fwd"><br><br>${getBodyContent(mail)}</div>`
+</script>

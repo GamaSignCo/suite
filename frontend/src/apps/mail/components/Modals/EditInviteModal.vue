@@ -1,8 +1,8 @@
 <template>
 	<Dialog
 		v-if="accountRequest?.doc"
-		v-model="show"
-		:options="{
+		v-model:open="show"
+	 v-bind="{
 			title: __('Edit Invite'),
 			actions: [
 				...(canSendInvite
@@ -24,7 +24,7 @@
 			],
 		}"
 	>
-		<template #body-content>
+		<template #default>
 			<div class="space-y-4">
 				<FormControl
 					:label="__('Assigned Email')"
@@ -63,7 +63,7 @@
 					v-model="inviteExpiresAt"
 					type="datetime-local"
 					:label="__('Expires At')"
-					:description="__('The invitation link stops working after this time.')"
+					:description="__('The request can no longer create an account after this time.')"
 					:disabled="!isEditableInvite"
 				/>
 				<hr />
@@ -177,8 +177,14 @@ const isExpired = computed(() => {
 })
 
 // The server sends the link with whatever is stored, so pending edits have to be saved first.
+// Self-signup requests (empty invited_by) verify by OTP instead - the server would not send
+// an invitation email for them.
 const canSendInvite = computed(
-	() => isEditableInvite.value && !isExpired.value && !accountRequest.value?.isDirty,
+	() =>
+		isEditableInvite.value &&
+		!isExpired.value &&
+		!accountRequest.value?.isDirty &&
+		Boolean(accountRequest.value?.doc?.invited_by),
 )
 
 // The account request stores the ids it was created with; the labels come from the live directory.

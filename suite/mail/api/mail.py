@@ -2,13 +2,14 @@ import hashlib
 import io
 import os
 import zipfile
+from datetime import datetime
 
 import frappe
 import pydenticon
 import requests
 from frappe import _
 from frappe.model.document import bulk_insert
-from frappe.utils import cint, random_string
+from frappe.utils import add_to_date, cint, now, random_string
 
 from suite.mail.api.contacts import (
     create_contacts_if_not_exists,
@@ -34,7 +35,7 @@ from suite.mail.doctype.mail_message.mail_message import (
     set_spam_status,
 )
 from suite.mail.doctype.mail_queue.mail_queue import MailQueue
-from suite.mail.doctype.mailbox.mailbox import add_mailbox, delete_mailboxes
+from suite.mail.doctype.mailbox.mailbox import add_mailbox, delete_mailboxes, fetch_mailboxes
 from suite.mail.doctype.mailbox_settings.mailbox_settings import (
     automation_rules_to_settings,
     set_mailbox_settings,
@@ -62,19 +63,38 @@ from suite.mail.jmap import (
 )
 from suite.mail.store import get_email_address_index
 from suite.mail.utils import get_config, log_mail_error
-from suite.mail.utils.dt import normalize_utc_z, to_user_timezone
-from suite.mail.utils.user import get_account_emails, is_jmap_configured
+from suite.mail.utils.delivery_status import parse_delivery_status
+from suite.mail.utils.dt import from_utc_z, normalize_utc_z, to_user_timezone, to_utc_z
+from suite.mail.utils.user import get_account_emails, get_undo_send_period, is_jmap_configured
 from suite.mail.utils.validation import normalize_screened_value, validate_screened_value
-from suite.utils import convert_html_to_text
+from suite.utils.rate_limiter import dynamic_rate_limit
 
 AVATAR_CACHE_TTL = 60 * 60 * 24
 SCREENING_FETCH_LIMIT = 500
+
+# Undo send: the composer's default Send holds delivery (FUTURERELEASE) for the sender's
+# undo window (User Settings.undo_send_period, which also times the toast in
+# useComposeMail.ts) plus a grace that covers request latency, so an Undo clicked at the
+# last moment still reaches the server before the hold elapses. Computed on the server
+# clock: a skewed client clock must not be able to shorten (or invalidate) the hold.
+UNDO_SEND_GRACE_SECONDS = 3
 
 # All Inboxes bounds. limit/start are user-supplied, and per_account_limit (= start + limit) is fetched
 # from *every* account and merged in memory, so both are clamped. MAX_FETCH caps the deepest reachable
 # position (page length ~25 → ~20 pages), which is far beyond any real unified-inbox scroll.
 ALL_INBOX_MAX_LIMIT = 100
 ALL_INBOX_MAX_FETCH = 500
+
+
+def get_undo_send_hold() -> tuple[int, datetime]:
+    """Returns the session user's undo-send period and the time a plain Send made now is held until.
+
+    The period goes back to the composer with the send result, so the Undo toast is timed from
+    the hold the server applied rather than from whatever copy of the setting the client holds.
+    """
+
+    period = get_undo_send_period(frappe.session.user)
+    return period, add_to_date(now(), seconds=period + UNDO_SEND_GRACE_SECONDS)
 
 
 @frappe.whitelist()
@@ -85,11 +105,21 @@ def get_mailboxes(account: str) -> list[dict]:
     if not is_jmap_configured(user):
         return []
 
+    # Whose account it is, not merely whether the caller has one of their own. Everything
+    # below reads the local tables through frappe.get_all, which bypasses permissions by
+    # design, and nothing here goes near a JMAP service — so unlike the endpoints that do,
+    # there is no ownership check further down to fall back on. Without this an account id
+    # was enough to read another user's mailbox names, counts and automation rules, and
+    # those rules carry the addresses and subjects they filter on.
+    is_jmap_account_belongs_to_user(account, raise_exception=True)
+
     mailboxes = get_user_mailboxes(account)
     if not mailboxes:
         return []
 
-    fields = ["name", "id", "_name", "role", "total_threads", "unread_threads", "subscribed"]
+    # total_emails rides along for the pollers: it moves on a reply into an existing thread, which
+    # total_threads doesn't.
+    fields = ["name", "id", "_name", "role", "total_emails", "total_threads", "unread_threads", "subscribed"]
 
     mailbox_settings = frappe.db.get_all(
         "Mailbox Settings",
@@ -142,9 +172,17 @@ def get_mailboxes(account: str) -> list[dict]:
 
 
 def get_user_mailboxes(account: str) -> list[dict]:
-    """Returns the user's mailboxes."""
+    """Returns the user's mailboxes.
 
-    return frappe.get_all("Mailbox", filters={"account": account})
+    Straight to fetch_mailboxes rather than through frappe.get_all("Mailbox"): Mailbox is a virtual
+    doctype, so a list query is routed to Mailbox.get_list, and frappe fixes the page length there
+    at `page_length or limit or limit_page_length or 20`. get_all asks for everything by passing
+    limit_page_length=0, which is falsy and so loses to the 20 — accounts with more folders than
+    that silently lost the ones sorting last (the Screener among them, since it sorts after the
+    named folders).
+    """
+
+    return fetch_mailboxes(account, limit=None)
 
 
 def add_user_images_to_emails(account: str, mails: list[dict], is_thread: bool = False) -> list[dict]:
@@ -259,7 +297,11 @@ def get_threads(account: str, mailbox: str, limit: int, start: int = 0, filter_b
         # draft reply must keep its own recipients and its "Draft" badge when the thread it answers
         # receives a newer mail.
         latest = in_mailbox[-1] if mailbox in outgoing_mailboxes else visible[-1]
-        threads.append(serialize_thread(in_mailbox, visible, latest, first=conversation[0]))
+        threads.append(
+            serialize_thread(
+                in_mailbox, visible, latest, first=conversation[0], sent_mailbox=ids_by_role.get("sent")
+            )
+        )
 
     # Avatars for the list-view summary rows, and for each message in the nested threads.
     add_user_images_to_emails(account, threads, is_thread=False)
@@ -290,6 +332,75 @@ def visible_in_mailbox(messages: list[dict], mailbox: str, trash: str | None, ju
         return [m for m in messages if m.get("junk")] or messages
 
     return [m for m in messages if not is_trashed(m) and not m.get("junk")] or messages
+
+
+# Of a message's copies, the one kept carries these fields of the ones it stands in for — what an
+# action needs to reach them, and what an undo needs to put them back exactly as they were. Never a
+# body: the copies are the same message, and a second copy of it is only weight on the wire.
+DUPLICATE_COPY_FIELDS = (
+    "name",
+    "id",
+    "thread_id",
+    "from_name",
+    "from_email",
+    "received_at",
+    "mailboxes",
+    "seen",
+    "junk",
+    "flagged",
+    "draft",
+)
+
+
+def collapse_duplicate_copies(mails: list[dict], sent_mailbox: str | None) -> list[dict]:
+    """Collapse the copies one message left in the account back into the single message they are.
+
+    Mail you send to yourself — directly, by copying yourself, or through a list you are on — leaves
+    the account holding two JMAP Emails: the copy saved in Sent, and the copy the delivery filed.
+    They share a Message-ID because they are one message, and the thread was showing both, as was
+    the list row's message count, which is read off this same list.
+
+    The delivered copy is the one kept, in every view: it is the message as it actually arrived,
+    headers and unread state and all, and choosing it by what the message *is* rather than by which
+    mailbox is being looked at means the same copy survives in Sent as in Inbox — nothing swaps under
+    the reader when they change view, and nothing swaps between one request and the next. Where that
+    doesn't decide it (no copy in Sent, or both there), received time and then id settle it.
+
+    What is collapsed away is not dropped. Those are real messages on the server, and an action on
+    the survivor has to reach them, or trashing a mail to yourself would leave its twin sitting in
+    Sent and unstarring it would leave the thread starred. They ride along under `duplicates`, which
+    is what the client fans its actions out over (see utils/mailCopies); only the display reads the
+    collapsed list.
+
+    Drafts and mail with no Message-ID are left alone: a draft has no delivered twin, and an absent
+    header is not an identity.
+    """
+
+    groups: dict[str, list[dict]] = {}
+    for mail in mails:
+        if mail.get("draft") or not mail.get("message_id"):
+            continue
+        groups.setdefault(mail["message_id"], []).append(mail)
+
+    duplicated = [group for group in groups.values() if len(group) > 1]
+    if not duplicated:
+        return mails
+
+    def in_sent(mail: dict) -> bool:
+        return any(mb["mailbox_id"] == sent_mailbox for mb in mail["mailboxes"])
+
+    merged: dict[str, dict] = {}
+    absorbed: set[str] = set()
+    for group in duplicated:
+        survivor = min(group, key=lambda mail: (in_sent(mail), str(mail["received_at"] or ""), mail["id"]))
+        copies = [mail for mail in group if mail["id"] != survivor["id"]]
+        merged[survivor["id"]] = {
+            **survivor,
+            "duplicates": [{field: mail[field] for field in DUPLICATE_COPY_FIELDS} for mail in copies],
+        }
+        absorbed.update(mail["id"] for mail in copies)
+
+    return [merged.get(mail["id"], mail) for mail in mails if mail["id"] not in absorbed]
 
 
 def get_user_jmap_accounts() -> list[dict]:
@@ -385,7 +496,10 @@ def get_thread(account: str, thread_id: str) -> list[dict]:
     """Returns the full list of messages in a thread, for threads not present in the mailbox list
     (e.g. search results or a thread on another page)."""
 
-    mails = [serialize_mail(m) for m in fetch_thread(account, thread_id)]
+    mails = collapse_duplicate_copies(
+        [serialize_mail(m) for m in fetch_thread(account, thread_id)],
+        get_mailbox_id_by_role(account, "sent"),
+    )
     return add_user_images_to_emails(account, mails, is_thread=True)
 
 
@@ -408,6 +522,7 @@ def serialize_thread(
     thread_messages: list[dict],
     latest: dict | None = None,
     first: dict | None = None,
+    sent_mailbox: str | None = None,
 ) -> dict:
     """Serializes a thread for response.
 
@@ -448,7 +563,9 @@ def serialize_thread(
         **{field: latest[field] for field in activity_fields},
         "subject": first["subject"],
         "attachments": serialize_attachments(latest.get("attachments", [])),
-        "messages": [serialize_mail(message) for message in thread_messages],
+        "messages": collapse_duplicate_copies(
+            [serialize_mail(message) for message in thread_messages], sent_mailbox
+        ),
     }
 
 
@@ -482,7 +599,21 @@ def serialize_mail(mail: dict) -> dict:
         **{field: mail[field] for field in mail_fields},
         "text_body": "" if html else mail.get("text_body", ""),
         "attachments": serialize_attachments(mail.get("attachments", [])),
+        "dsn_blob_id": _get_dsn_blob_id(mail),
     }
+
+
+def _get_dsn_blob_id(mail: dict) -> str | None:
+    """Returns the blob id of a bounce message's `message/delivery-status` part, if it carries one.
+
+    The part has no filename, so it never survives `serialize_attachments` — the blob id is
+    surfaced separately for the UI to fetch the parsed report via `get_delivery_status` and
+    render it as a card instead of the raw MAILER-DAEMON text (see DeliveryStatusBanner)."""
+
+    for attachment in mail.get("attachments", []):
+        if (attachment.get("type") or "").lower() == "message/delivery-status" and attachment.get("blob_id"):
+            return attachment["blob_id"]
+    return None
 
 
 def serialize_attachments(attachments: list[dict]) -> list[dict]:
@@ -495,6 +626,16 @@ def serialize_attachments(attachments: list[dict]) -> list[dict]:
         for attachment in attachments
         if attachment.get("filename")
     ]
+
+
+@frappe.whitelist()
+def get_delivery_status(account: str, blob_id: str) -> dict:
+    """Returns the parsed report from a bounce message's `message/delivery-status` part."""
+
+    if not blob_id:
+        frappe.throw(_("Blob ID is required."))
+
+    return parse_delivery_status(fetch_blob(account, blob_id))
 
 
 @frappe.whitelist()
@@ -572,8 +713,11 @@ def create_mail(
     in_reply_to_id: str | None = None,
     forwarded_from_id: str | None = None,
     save_as_draft: bool = False,
+    send_at: str | None = None,
+    undo_send: bool = False,
 ) -> dict:
-    """Creates new mail queue."""
+    """Creates new mail queue. `send_at` (UTC `...Z`) schedules delivery via FUTURERELEASE;
+    `undo_send` instead holds delivery briefly so the sender can cancel from the undo toast."""
 
     doc_attachments = []
     for d in attachments or []:
@@ -597,6 +741,11 @@ def create_mail(
             for email in emails
         ]
 
+    send_at = from_utc_z(send_at)
+    undo_send_period = None
+    if undo_send and not send_at and not save_as_draft:
+        undo_send_period, send_at = get_undo_send_hold()
+
     doc = MailQueue._create(
         user=get_user_for_jmap_account(account, raise_exception=True),
         account=account,
@@ -610,13 +759,23 @@ def create_mail(
         attachments=doc_attachments,
         recipients=recipients,
         save_as_draft=save_as_draft,
+        send_at=send_at,
     )
 
     if not save_as_draft and doc.status == "Submitted":
         create_contacts_if_not_exists(account, doc.recipients)
         auto_accept_recipients(account, doc.recipients)
 
-    return {"id": doc.id, "status": doc.status, "error": doc.error_message, "thread_id": doc.thread_id}
+    return {
+        "name": doc.name,
+        "id": doc.id,
+        "status": doc.status,
+        "error": doc.error_message,
+        "thread_id": doc.thread_id,
+        "submission_id": doc.submission_id,
+        "send_at": to_utc_z(doc.send_at),
+        "undo_send_period": undo_send_period,
+    }
 
 
 @frappe.whitelist()
@@ -632,8 +791,12 @@ def update_draft_mail(
     from_name: str = "",
     attachments: list[dict] | None = None,
     submit: bool = False,
+    send_at: str | None = None,
+    undo_send: bool = False,
 ) -> dict:
-    """Creates new mail queue from existing draft message."""
+    """Creates new mail queue from existing draft message. `send_at` (UTC `...Z`) schedules delivery
+    via FUTURERELEASE; `undo_send` instead holds delivery briefly so the sender can cancel from the
+    undo toast."""
 
     message = frappe.get_doc("Mail Message", f"{account}|{id}")
     message.check_permission(permtype="write")
@@ -674,7 +837,6 @@ def update_draft_mail(
             )
 
     message.html_body = html_body
-    message.text_body = convert_html_to_text(message.html_body)
 
     message.recipients = []
     for type, emails in [("To", to), ("Cc", cc), ("Bcc", bcc)]:
@@ -684,17 +846,26 @@ def update_draft_mail(
                 {"type": type, "email": email.get("email"), "display_name": email.get("display_name")},
             )
 
-    queue = message.submit() if submit else message.save_draft()
+    send_at = from_utc_z(send_at)
+    undo_send_period = None
+    if undo_send and submit and not send_at:
+        undo_send_period, send_at = get_undo_send_hold()
+
+    queue = message.submit(send_at=send_at) if submit else message.save_draft()
 
     if submit and queue.status == "Submitted":
         create_contacts_if_not_exists(account, message.recipients)
         auto_accept_recipients(account, message.recipients)
 
     return {
+        "name": queue.name,
         "id": queue.id,
         "status": queue.status,
         "error": queue.error_message,
         "thread_id": queue.thread_id,
+        "submission_id": queue.submission_id,
+        "send_at": to_utc_z(queue.send_at),
+        "undo_send_period": undo_send_period,
     }
 
 
@@ -980,6 +1151,8 @@ def get_avatar(email: str, size: int = 128, strict: bool = False) -> None:
     if not avatar:
         # 2. Try Gravatar (opt-in: avoids leaking emails to a third party when disabled)
         if get_config("enable_gravatar"):
+            # Gravatar's placeholder for unknown addresses. "404" makes it fail instead, which
+            # is what routes us to the locally generated identicon below.
             default = get_config("default_gravatar")
             try:
                 res = requests.get(
@@ -1250,12 +1423,17 @@ def _screen_email_addresses(
         build_automation_sieve(account, activate=True)
 
 
-def auto_accept_recipients(account: str, recipients: list) -> None:
+def auto_accept_recipients(account: str, recipients: list | str) -> None:
     """When screening is enabled, allowlist the people you email so their replies reach the inbox.
 
     Non-overriding, so it never un-rejects a sender you deliberately blocked. Failures are logged and
     swallowed — auto-accept must never block sending.
+
+    ``recipients`` arrives in whatever shape the caller holds: Mail Message child rows, plain dicts,
+    or Mail Queue's JSON string field.
     """
+
+    import json
 
     from suite.mail.doctype.sieve_script.sieve_script import is_screening_enabled
 
@@ -1263,7 +1441,15 @@ def auto_accept_recipients(account: str, recipients: list) -> None:
         if not is_screening_enabled(account):
             return
 
-        emails = list({r.email for r in recipients if getattr(r, "email", None)})
+        if isinstance(recipients, str):
+            recipients = json.loads(recipients)
+
+        def get_email(recipient) -> str | None:
+            if isinstance(recipient, dict):
+                return recipient.get("email")
+            return getattr(recipient, "email", None)
+
+        emails = list({email for r in recipients if (email := get_email(r))})
         if emails:
             # Recipients a global Accepted rule already covers — their exact address or their
             # domain — need no account-level rule: the global rule already lets their replies through.
@@ -1389,20 +1575,42 @@ def get_screening_sender_mails(account: str, from_email: str) -> list[dict]:
     return add_user_images_to_emails(account, mails, is_thread=True)
 
 
+# Where a sender's already-screened mail is filed when you allow them in. The decision itself is the
+# same either way — future mail always reaches the inbox — this only says what happens to what's
+# waiting, so mail already read in the Screener needn't be triaged a second time in the Inbox.
+ALLOW_DESTINATION_ROLES = ("inbox", "archive", "trash")
+
+
 @frappe.whitelist()
-def allow_screening_senders(account: str, from_emails: list[str]) -> None:
-    """Allow senders in: accept them (future mail reaches the inbox) and move their screened mail there."""
+def allow_screening_senders(
+    account: str, from_emails: list[str], destination: str = "inbox"
+) -> dict[str, list[str]]:
+    """Allow senders in: accept them (future mail reaches the inbox) and file their screened mail into
+    `destination` — the inbox by default, or straight to Archive/Trash.
+
+    Returns the ids moved, keyed by the sender they moved for. Once the mail has left the Screening
+    folder there is no finding it from the sender again — the lookup below only searches Screening —
+    so the interface holds on to these to offer refiling the same mail elsewhere ("Archive instead")
+    or undoing the verdict outright.
+    """
 
     if not from_emails:
-        return
+        return {}
+
+    if destination not in ALLOW_DESTINATION_ROLES:
+        frappe.throw(_("Invalid destination: {0}").format(destination))
 
     _screen_email_addresses(account, from_emails, action="Accepted")
 
-    inbox_id = get_mailbox_id_by_role(account, "inbox", raise_exception=True)
+    mailbox_id = get_mailbox_id_by_role(account, destination, create_if_not_exists=True, raise_exception=True)
+    moved: dict[str, list[str]] = {}
     for from_email in from_emails:
         ids = _screening_message_ids(account, from_email)
         if ids:
-            move_mails(account, ids, inbox_id, clear_junk=True)
+            move_mails(account, ids, mailbox_id, clear_junk=True)
+            moved[from_email] = ids
+
+    return moved
 
 
 @frappe.whitelist()
@@ -1418,21 +1626,56 @@ def move_screening_mails_to_inbox(account: str) -> None:
 
 
 @frappe.whitelist()
-def screen_out_senders(account: str, from_emails: list[str]) -> None:
-    """Screen senders out: mark them Spam (future mail to Junk) and move their screened mail to Junk."""
+def screen_out_senders(account: str, from_emails: list[str]) -> dict[str, list[str]]:
+    """Screen senders out: mark them Spam (future mail to Junk) and move their screened mail to Junk.
+
+    Returns the ids junked, keyed by sender — see `allow_screening_senders` for why the interface
+    needs them back.
+    """
 
     if not from_emails:
-        return
+        return {}
 
     _screen_email_addresses(account, from_emails, action="Spam")
 
+    junked: dict[str, list[str]] = {}
     for from_email in from_emails:
         ids = _screening_message_ids(account, from_email)
         if ids:
             set_mails_spam_status(account, ids, spam=True)
+            junked[from_email] = ids
+
+    return junked
+
+
+@frappe.whitelist()
+def undo_screening_verdict(account: str, from_emails: list[str], ids: list[str]) -> None:
+    """Reverse a Screener verdict: drop the rules it wrote and put the mail back in the Screener.
+
+    `ids` are the ids the verdict returned. Restoring by id rather than by sender is the only correct
+    way round: the sender's other mail may have been in the Inbox all along and mustn't be dragged
+    back into the Screener with it. Because screened mail only ever lives in the Screening folder,
+    moving those ids back there restores exactly the membership they had.
+    """
+
+    is_jmap_account_belongs_to_user(account, raise_exception=True)
+
+    if from_emails:
+        unscreen_email_addresses(account, [normalize_screened_value(e) for e in from_emails])
+
+    if not ids:
+        return
+
+    screening_id = get_mailbox_id_by_name(account, SCREENER_MAILBOX_NAME)
+    if not screening_id:
+        return
+
+    # clear_junk because a denied sender's mail was marked spam on the way out.
+    move_mails(account, ids, screening_id, clear_junk=True)
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
+@dynamic_rate_limit()
 def upload_file():
     from mimetypes import guess_type
     from pathlib import Path

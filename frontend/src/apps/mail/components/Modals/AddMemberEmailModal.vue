@@ -1,7 +1,7 @@
 <template>
 	<Dialog
-		v-model="show"
-		:options="{
+		v-model:open="show"
+	 v-bind="{
 			title: __('Add Email Address'),
 			actions: [
 				{
@@ -14,7 +14,7 @@
 			],
 		}"
 	>
-		<template #body-content>
+		<template #default>
 			<div class="space-y-4">
 				<div class="flex items-center justify-between">
 					<FormControl v-model="username" :label="__('Username')" placeholder="johndoe" class="w-full" />
@@ -47,7 +47,8 @@
 
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { Dialog, ErrorMessage, FeatherIcon, FormControl, createResource } from 'frappe-ui'
+import { Dialog, ErrorMessage, FormControl, createResource } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
 
 import { raiseToast } from '@/apps/mail/utils'
 

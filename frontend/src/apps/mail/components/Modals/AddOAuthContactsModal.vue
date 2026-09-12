@@ -1,7 +1,7 @@
 <template>
 	<Dialog
-		v-model="show"
-		:options="{
+		v-model:open="show"
+	 v-bind="{
 			title: __('Add Contacts'),
 			actions: [
 				{
@@ -14,7 +14,7 @@
 			],
 		}"
 	>
-		<template #body-content>
+		<template #default>
 			<div class="space-y-4">
 				<div class="space-y-2">
 					<label class="text-ink-gray-5 block text-xs">{{ __('Contacts') }}</label>
@@ -48,7 +48,8 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Button, Dialog, ErrorMessage, FeatherIcon, FormControl, createResource } from 'frappe-ui'
+import { Button, Dialog, ErrorMessage, FormControl, createResource } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
 
 import { raiseToast } from '@/apps/mail/utils'
 

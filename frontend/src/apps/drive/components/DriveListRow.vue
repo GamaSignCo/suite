@@ -4,16 +4,16 @@
       <ListCell />
       <ListCell>
         <div class="flex items-center" :style="indent(item.depth)">
-          <Skeleton class="h-[16px] w-[16px] shrink-0 mr-2 rounded-sm" />
-          <Skeleton class="h-3.5 w-40 rounded" />
+          <Skeleton class="h-[16px] w-[16px] shrink-0 mr-2 rounded-1" />
+          <Skeleton class="h-3.5 w-40 rounded-4" />
         </div>
       </ListCell>
       <ListCell>
         <Skeleton class="size-5 shrink-0 mr-2 rounded-full" />
-        <Skeleton class="h-3 w-16 rounded" />
+        <Skeleton class="h-3 w-16 rounded-4" />
       </ListCell>
-      <ListCell><Skeleton class="h-3 w-20 rounded" /></ListCell>
-      <ListCell><Skeleton class="h-3 w-12 rounded" /></ListCell>
+      <ListCell><Skeleton class="h-3 w-20 rounded-4" /></ListCell>
+      <ListCell><Skeleton class="h-3 w-12 rounded-4" /></ListCell>
       <ListCell />
     </ListRow>
     <ListRow v-else-if="item.placeholder" class="pointer-events-none">
@@ -45,7 +45,7 @@
         :data-testid="`drive-entity-${row.name}`"
         :data-selected="selections.has(row.name) || undefined"
         @contextmenu="(e) => !selections.size && contextMenu(e, row)"
-        @click="!isModKey($event) && !selections.size && open(row)"
+        @click="onRowClick($event, row)"
         @dragstart="onDragStart($event, row)"
         @dragend="draggedItem = null"
         @dragover="
@@ -70,6 +70,7 @@
             class="shrink-0"
             :class="selections.size > 0 || selections.has(row.name) ? '' : 'invisible group-hover:visible'"
             :model-value="selections.has(row.name)"
+            :aria-label="__('Select {0}', [row.file_name])"
             @click.stop="props.toggleSelection(row, $event)"
           />
         </ListCell>
@@ -83,25 +84,19 @@
           >
             <div
               class="absolute inset-0"
-              :class="
-                canExpand(row)
-                  ? isExpanded(row)
-                    ? 'opacity-0'
-                    : 'group-hover:opacity-0'
-                  : ''
-              "
+              :class="canExpand(row) ? (isExpanded(row) ? 'opacity-0' : 'group-hover:opacity-0') : ''"
             >
               <img
                 v-if="!loadedThumbnails.has(row.name)"
                 loading="lazy"
-                class="absolute inset-0 h-[16px] w-[16px] rounded-sm"
+                class="absolute inset-0 h-[16px] w-[16px] rounded-1"
                 :src="thumbnail(row).fallback"
                 :draggable="false"
               />
               <img
                 loading="lazy"
                 decoding="async"
-                class="absolute inset-0 h-[16px] w-[16px] object-cover rounded-sm"
+                class="absolute inset-0 h-[16px] w-[16px] object-cover rounded-1"
                 :class="loadedThumbnails.has(row.name) ? 'opacity-100' : 'opacity-0'"
                 :src="thumbnail(row).src"
                 :draggable="false"
@@ -116,23 +111,24 @@
             />
           </div>
           <InlineRenameInput :entity="row">
-            <Tooltip :text="nameTooltip(row)" :disabled="!nameTooltip(row)">
+            <Tooltip :text="nameTooltip(row)" :disabled="!nameTooltip(row)" class="min-w-0 flex-1">
               <div class="truncate text-base">{{ displayName(row) }}</div>
             </Tooltip>
           </InlineRenameInput>
-          <div class="flex flex-row grow justify-end gap-2 w-[20px] pr-3">
+          <div v-if="(row.is_favourite && $route.name !== 'drive-Favourites') || shareIcon(row)"
+            class="ml-auto flex min-w-8 shrink-0 flex-row justify-end gap-2 pr-3">
             <LucideStar
-              v-if="row.is_favourite && $route.name !== 'Favourites'"
+              v-if="row.is_favourite && $route.name !== 'drive-Favourites'"
               width="16"
               height="16"
-              class="my-auto text-ink-amber-6 stroke-current fill-current"
+              class="my-auto shrink-0 text-ink-amber-6 stroke-current fill-current"
             />
-            <Tooltip v-if="shareIcon(row)" :text="shareIcon(row).tooltip">
-              <component :is="shareIcon(row).icon" class="size-4" />
+            <Tooltip v-if="shareIcon(row)" :text="shareIcon(row).tooltip" class="shrink-0">
+              <component :is="shareIcon(row).icon" class="size-4 shrink-0" />
             </Tooltip>
           </div>
         </ListCell>
-        <ListCell>
+        <ListCell class="hidden sm:flex">
           <Avatar
             v-if="row.owner"
             shape="circle"
@@ -148,13 +144,14 @@
             <span class="truncate text-base">{{ row.relativeModified }}</span>
           </Tooltip>
         </ListCell>
-        <ListCell>
+        <ListCell class="hidden sm:flex">
           <span class="truncate text-base">{{ sizeLabel(row) }}</span>
         </ListCell>
         <ListCell class="justify-end">
           <Button
             v-if="!selections.size"
-            class="!bg-inherit"
+            :label="__('Actions for {0}', [row.file_name])"
+            class="!bg-inherit sm:invisible sm:group-hover:visible"
             @click="(e) => contextMenu(e, row)"
           >
             <LucideMoreHorizontal class="size-4" />
@@ -165,14 +162,14 @@
   </template>
 </template>
 <script setup>
-import { ListRow, ListCell } from 'frappe-ui/list'
+import { ListCell, ListRow } from 'frappe-ui/list'
 import { Avatar, Button, Checkbox, Skeleton, Tooltip } from 'frappe-ui'
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSessionStore } from '@/boot/session'
 import { activeEntity, renamingEntity } from '@/apps/drive/data/selection'
 import InlineRenameInput from './InlineRenameInput.vue'
-import { openEntity, isModKey, isVirtual, folderRoute, getThumbnailUrl, WRITER_CONTENT_DOCTYPE, PRESENTATION_CONTENT_DOCTYPE } from '@/apps/drive/utils/files'
+import { openEntity, isModKey, isVirtual, folderRoute, getThumbnailUrl, displayFileName } from '@/apps/drive/utils/files'
 import { formatDate } from '@/apps/drive/utils/format'
 import { expandedFolders } from '@/apps/drive/data/folderTree'
 import LucideStar from '~icons/lucide/star'
@@ -220,7 +217,7 @@ const onDragStart = (e, row) => {
   const ghost = document.createElement('div')
   ghost.textContent = `${count} items`
   ghost.className =
-    'fixed -top-full left-0 rounded-md bg-surface-gray-7 px-2.5 py-1.5 text-sm font-medium text-ink-white shadow-lg'
+    'fixed -top-full left-0 rounded-4 bg-surface-gray-7 px-2.5 py-1.5 text-sm font-medium text-ink-base shadow-lg'
   document.body.appendChild(ghost)
   e.dataTransfer.setDragImage(ghost, -8, -8)
   requestAnimationFrame(() => ghost.remove())
@@ -229,8 +226,8 @@ const onDragStart = (e, row) => {
 // Used as right-click doesn't trigger active in frappe-ui
 const selectedName = computed(() => activeEntity.value?.name)
 // Folders get a real `:to` route below — RouterLink handles the navigation
-// (and gives cmd/ctrl-click-to-open-in-new-tab, right-click-copy-link for
-// free) — so this only drives non-folder clicks. Suppressed during an active
+// (and gives right-click-copy-link and middle-click-new-tab for free) — so
+// this only drives non-folder clicks. Suppressed during an active
 // selection so clicking elsewhere in the row doesn't navigate away (matches
 // the existing !selections.size click guard).
 // `!renamingEntity`: the rename input sits inside the row's <button>, so a
@@ -238,10 +235,20 @@ const selectedName = computed(() => activeEntity.value?.name)
 const open = (row) =>
   !renamingEntity.value &&
   !row.is_folder &&
-  route.name !== 'Trash' &&
+  route.name !== 'drive-Trash' &&
   openEntity(row)
 const routeFor = (row) =>
   row.is_folder && !props.selections.size ? folderRoute(row) : undefined
+// ⌘/Ctrl+click selects (file-manager convention, same as grid tiles).
+// preventDefault keeps folder rows — real links — from also opening a tab.
+const onRowClick = (e, row) => {
+  if (isModKey(e)) {
+    e.preventDefault()
+    props.toggleSelection(row, e)
+    return
+  }
+  if (!props.selections.size) open(row)
+}
 
 // Virtual nodes have no Drive children to fetch — expanding one would ask for
 // the contents of a File that doesn't exist.
@@ -262,21 +269,11 @@ function thumbnail(row) {
 }
 
 function displayName(row) {
-  if (!row.file_name) return row.title || ''
-  return row.file_name.lastIndexOf('.') === -1 ||
-    row.is_folder ||
-    row.content_doctype === WRITER_CONTENT_DOCTYPE ||
-    row.content_doctype === PRESENTATION_CONTENT_DOCTYPE
-    ? row.file_name
-    : row.file_name.slice(0, row.file_name.lastIndexOf('.'))
+  return displayFileName(row)
 }
 function nameTooltip(row) {
-  return !row.file_name ||
-    row.is_folder ||
-    row.content_doctype === WRITER_CONTENT_DOCTYPE ||
-    row.content_doctype === PRESENTATION_CONTENT_DOCTYPE
-    ? ''
-    : row.file_name
+  const display = displayFileName(row)
+  return display === row.file_name ? '' : row.file_name
 }
 
 function shareIcon(row) {

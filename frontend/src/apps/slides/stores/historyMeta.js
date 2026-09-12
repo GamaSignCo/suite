@@ -2,10 +2,12 @@ import { ref, nextTick } from 'vue'
 import {
 	activeElementIds,
 	cropSelectionToFitContent,
+	findSlideElement,
 	focusElementId,
+	selectableIds,
 	setActiveElements,
 } from '@/apps/slides/stores/element'
-import { changeEditorSlide, currentSlide, slideIndex, slides } from '@/apps/slides/stores/slide'
+import { changeEditorSlide, slideIndex, slides } from '@/apps/slides/stores/slide'
 
 let commandHistory = null
 
@@ -29,7 +31,7 @@ const actionOrder = {
 	undo: {
 		addSlide: ['jumpToSlide', 'undo'],
 		removeSlide: ['undo', 'jumpToSlide'],
-		addElement: ['jumpToSlide', 'undo'],
+		addElement: ['jumpToSlide', 'undo', 'jumpToElements'],
 		removeElement: ['jumpToSlide', 'undo', 'jumpToElements'],
 		editElement: ['jumpToSlide', 'jumpToElements', 'undo'],
 		batch: ['jumpToSlide', 'undo', 'jumpToElements'],
@@ -38,11 +40,11 @@ const actionOrder = {
 	},
 }
 
-const jumpToSlideByIndex = async (index, focus) => {
+const jumpToSlideByIndex = (index, focus) => {
 	const onActiveSlide = index === slideIndex.value
 
 	if (!onActiveSlide && index != null) {
-		await changeEditorSlide(index, focus)
+		changeEditorSlide(index, focus)
 
 		recentlyRestored.value = true
 		setTimeout(() => {
@@ -51,28 +53,47 @@ const jumpToSlideByIndex = async (index, focus) => {
 	}
 }
 
+let latestJump = 0
+
 const jumpToElementsByIds = (jumpToIds, focusOnId) => {
-	if (!jumpToIds || jumpToIds.length === 0) return
+	if (!jumpToIds?.length) return
 
-	const elementExists = jumpToIds.every((id) =>
-		currentSlide.value?.elements?.some((el) => el.id === id),
-	)
+	const jump = ++latestJump
+	const targetIds = selectableIds(jumpToIds)
 
-	if (!elementExists) {
+	// the elements are gone, so the selection naming them has to go too
+	if (!targetIds.every((id) => findSlideElement(id))) {
 		activeElementIds.value = []
+		if (!findSlideElement(focusElementId.value)) focusElementId.value = null
 		return
 	}
 
-	if (JSON.stringify(activeElementIds.value) !== JSON.stringify(jumpToIds)) {
-		nextTick(() => {
-			setActiveElements(jumpToIds)
-			if (focusOnId) {
-				focusElementId.value = focusOnId
-			}
+	if (JSON.stringify(activeElementIds.value) === JSON.stringify(targetIds)) {
+		// the box is measured off the DOM, so it can only be fitted once the change renders
+		requestAnimationFrame(() => {
+			if (jump !== latestJump) return
+			cropSelectionToFitContent(targetIds)
 		})
-	} else {
-		cropSelectionToFitContent(jumpToIds)
+		return
 	}
+
+	nextTick(() => {
+		// a whole run of undos lands in one tick, so by now a later one may have
+		// decided the selection, or removed the elements this call named
+		if (jump !== latestJump) return
+		if (!targetIds.every((id) => findSlideElement(id))) return
+
+		// setActiveElements early-returns when the one surviving id is already
+		// selected, which would leave the locked ones in the selection
+		if (targetIds.length < jumpToIds.length) {
+			activeElementIds.value = targetIds
+			focusElementId.value = null
+		} else {
+			setActiveElements(targetIds)
+		}
+
+		if (focusOnId && !findSlideElement(focusOnId)?.locked) focusElementId.value = focusOnId
+	})
 }
 
 const getSlideIndexForJump = (action, command, operation) => {

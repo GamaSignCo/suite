@@ -9,7 +9,7 @@
 				:side="'top'"
 				:align="'center'"
 				:side-offset="12"
-				class="rounded-2xl bg-surface-base p-3 shadow-xl max-w-sm w-full z-[70]"
+				class="rounded-8 bg-surface-base p-3 shadow-xl max-w-sm w-full z-[70]"
 				data-testid="reaction-picker"
 			>
 				<div class="grid grid-cols-7 gap-2">
@@ -18,7 +18,7 @@
 						:key="emoji"
 						type="button"
 						@click="handleReactionSelect(emoji)"
-						class="mx-auto flex items-center justify-center size-9 rounded-lg bg-surface-gray-2 hover:bg-surface-gray-3 transition-colors text-xl"
+						class="mx-auto flex items-center justify-center size-9 rounded-6 bg-surface-gray-2 hover:bg-surface-gray-3 transition-colors text-lg"
 						:aria-label="`Send ${emoji} reaction`"
 						:data-testid="`reaction-${emoji}`"
 					>

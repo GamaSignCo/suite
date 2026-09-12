@@ -13,6 +13,10 @@ def execute() -> None:
     columns still exist in the table, so the query builder references them by column name.
     """
 
+    if not frappe.db.table_exists("User Settings"):
+        # Site never had the mail schema — nothing to capture.
+        return
+
     if not frappe.db.has_column("User Settings", "default_outgoing_email"):
         return
 

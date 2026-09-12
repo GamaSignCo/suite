@@ -1,64 +1,38 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
 
 export interface ChatMessage {
 	id: number;
+	messageId?: string;
 	user_id: string;
 	user_name: string;
 	message: string;
 	timestamp: string;
 }
 
-export interface ChatStore {
-	isChatOpen: boolean;
-	chatMessages: ChatMessage[];
-	hasUnreadMessages: boolean;
-	toggleChat: () => void;
-	hostOnlyChat: boolean;
-	markAsRead: () => void;
-	addMessage: (message: ChatMessage) => void;
-	$reset: () => void;
-}
-
-export const useChatStore = defineStore("meet-chat", () => {
-	const isChatOpen = ref(false);
-	const chatMessages = ref<ChatMessage[]>([]);
-	const hasUnreadMessages = ref(false);
-	const hostOnlyChat = ref(false);
-
-	function toggleChat() {
-		isChatOpen.value = !isChatOpen.value;
-		if (isChatOpen.value) {
-			hasUnreadMessages.value = false;
-		}
-	}
-
-	function markAsRead() {
-		hasUnreadMessages.value = false;
-	}
-
-	function addMessage(message: ChatMessage) {
-		if (!chatMessages.value) {
-			chatMessages.value = [];
-		}
-		chatMessages.value.push(message);
-	}
-
-	function $reset() {
-		isChatOpen.value = false;
-		chatMessages.value = [];
-		hasUnreadMessages.value = false;
-		hostOnlyChat.value = false;
-	}
-
-	return {
-		isChatOpen,
-		chatMessages,
-		hasUnreadMessages,
-		toggleChat,
-		hostOnlyChat,
-		markAsRead,
-		addMessage,
-		$reset,
-	};
+export const useChatStore = defineStore("meet-chat", {
+	state: () => ({
+		isChatOpen: false,
+		chatMessages: [] as ChatMessage[],
+		hasUnreadMessages: false,
+		hostOnlyChat: false,
+		pinnedMessage: null as ChatMessage | null,
+	}),
+	actions: {
+		toggleChat() {
+			this.isChatOpen = !this.isChatOpen;
+			if (this.isChatOpen) this.hasUnreadMessages = false;
+		},
+		markAsRead() {
+			this.hasUnreadMessages = false;
+		},
+		addMessage(message: ChatMessage) {
+			if (!this.chatMessages) this.chatMessages = [];
+			this.chatMessages.push(message);
+		},
+		setPinnedMessage(message: ChatMessage | null) {
+			this.pinnedMessage = message;
+		},
+	},
 });
+
+export type ChatStore = ReturnType<typeof useChatStore>;

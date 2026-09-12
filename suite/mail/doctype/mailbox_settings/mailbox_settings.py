@@ -29,6 +29,7 @@ class MailboxSettings(Document):
         color: DF.Literal["Gray", "Blue", "Green", "Amber", "Red", "Purple"]
         disable_push_notification: DF.Check
         emails_from: DF.SmallText | None
+        icon: DF.Icon | None
         mailbox_id: DF.Data
         mark_as_read: DF.Check
         match_if: DF.Literal["any", "all"]

@@ -10,10 +10,12 @@ withDefaults(
 		variant?: "default" | "active" | "muted";
 		active?: boolean;
 		title?: string;
+		showTooltip?: boolean;
 	}>(),
 	{
 		variant: "default",
 		active: false,
+		showTooltip: true,
 	},
 );
 
@@ -29,14 +31,19 @@ defineEmits<{
 		variant="ghost"
 		theme="gray"
 		:label="title"
-		:tooltip="title"
-		:class="['relative', { '!bg-surface-gray-3': active }]"
+		:tooltip="showTooltip ? title : undefined"
+		:class="[
+			'relative',
+			{
+				'!bg-surface-gray-3': active,
+			},
+		]"
 		@click="$emit('click')"
 	>
 		<template #icon>
 			<span
 				:class="{
-					'text-ink-red-8': variant === 'active' || variant === 'muted',
+					'text-ink-red-7': variant === 'active' || variant === 'muted',
 				}"
 			>
 				<slot />

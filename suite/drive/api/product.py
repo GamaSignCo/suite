@@ -176,6 +176,8 @@ def set_settings(updates: dict[str, int | str]):
         settings.single_click = int(updates["single_click"])
     if "auto_detect_links" in updates:
         settings.auto_detect_links = int(updates["auto_detect_links"])
+    if "webdav_enabled" in updates:
+        settings.webdav_enabled = int(updates["webdav_enabled"])
     settings.save()
 
 
@@ -315,6 +317,46 @@ def disk_settings(**kwargs):
             # If backend is s3, enable it. Otherwise, disable.
             settings.enabled = 1 if value == "s3" else 0
     settings.save()
+
+
+@frappe.whitelist()
+def webdav_config() -> dict:
+    """Connection details for the WebDAV settings panel. Empty when the feature
+    is globally off and the caller is no admin — the frontend hides the whole
+    panel then, mirroring get_calendar_client_config."""
+    from frappe.twofactor import should_run_2fa
+
+    from suite.drive.webdav.settings import global_webdav_enabled, user_webdav_enabled
+
+    admin = is_drive_site_admin()
+    enabled = global_webdav_enabled()
+    if not enabled and not admin:
+        return {}
+
+    config = {"globally_enabled": enabled, "is_admin": admin}
+    if enabled:
+        config.update(
+            {
+                "server_url": frappe.utils.get_url("/dav/"),
+                "username": frappe.session.user,
+                "enabled_for_user": user_webdav_enabled(frappe.session.user),
+                "two_factor_blocked": bool(should_run_2fa(frappe.session.user)),
+                # api_key doubles as the WebDAV username for key-based sign-in;
+                # the secret is only ever shown once, at generation time
+                "api_key": frappe.db.get_value("User", frappe.session.user, "api_key"),
+            }
+        )
+    return config
+
+
+@frappe.whitelist()
+def set_webdav_enabled(enabled: bool) -> None:
+    """Admin-only global toggle. Not piggybacked on disk_settings — its PUT
+    force-enables the S3 backend as a side effect."""
+    if not is_drive_site_admin():
+        frappe.throw(_("You don't have the permissions for this action."), frappe.PermissionError)
+    frappe.db.set_single_value("Drive Disk Settings", "webdav_enabled", int(enabled))
+    frappe.clear_document_cache("Drive Disk Settings", "Drive Disk Settings")
 
 
 WHITELISTED_DOMAINS = [

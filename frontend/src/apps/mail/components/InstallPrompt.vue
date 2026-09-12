@@ -1,9 +1,9 @@
 <template>
-	<Dialog v-model="showDialog">
-		<template #body-title>
-			<h2 class="text-xl-bold">{{ __('Install Frappe Mail') }}</h2>
+	<Dialog v-model:open="showDialog">
+		<template #title>
+			<h2 class="text-lg-bold">{{ __('Install Frappe Mail') }}</h2>
 		</template>
-		<template #body-content>
+		<template #default>
 			<p>{{ __('Get the app on your device for easy access & a better experience!') }}</p>
 		</template>
 		<template #actions>
@@ -22,7 +22,7 @@
 	<Teleport to="body">
 		<div
 			v-if="iosInstallMessage"
-			class="bg-surface-blue-2 fixed inset-x-2 bottom-4 z-[60] flex flex-col gap-3 rounded py-5 drop-shadow-xl"
+			class="bg-surface-blue-2 fixed inset-x-2 bottom-4 z-[60] flex flex-col gap-3 rounded-4 py-5 drop-shadow-xl"
 		>
 			<div class="mb-1 flex flex-row items-center justify-between px-3 text-center">
 				<span class="text-base-bold">
@@ -58,7 +58,8 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
-import { Button, Dialog, FeatherIcon } from 'frappe-ui'
+import { Button, Dialog } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
 
 // Initialize deferredPrompt for use later to show browser install prompt.
 const deferredPrompt = ref(null)

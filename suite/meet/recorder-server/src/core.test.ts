@@ -1,0 +1,2113 @@
+import { mkdtemp, readFile, stat, unlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Express } from 'express';
+import jwt from 'jsonwebtoken';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { AuthError, AuthManager, validUtcTimestamp } from './AuthManager.js';
+import { createApp } from './app.js';
+import type { Config } from './config.js';
+import { loadConfig } from './config.js';
+import { DiskGuard, type StorageGuard } from './DiskGuard.js';
+import { JobManager } from './JobManager.js';
+import { JobStore } from './JobStore.js';
+import type { LogEntry, Logger } from './logger.js';
+import { FakeRendererBridge, TEST_PUBLIC_JWK } from './RendererBridge.js';
+import {
+	COMMAND_AUDIENCE,
+	COMMAND_TYPE,
+	type CommandClaims,
+	HEALTH_AUDIENCE,
+	HEALTH_TYPE,
+	type HealthClaims,
+	PROTOCOL_VERSION,
+} from './types.js';
+
+const secret = 'a-long-enough-test-secret-for-hs256';
+const now = Math.floor(Date.now() / 1000);
+const baseClaims = {
+	protocol_version: PROTOCOL_VERSION,
+	iss: 'frappe-site:site.test',
+	aud: COMMAND_AUDIENCE,
+	site: 'site.test',
+	origin: 'https://site.test',
+	room: 'room',
+	recording: 'recording',
+	job: 'job',
+	operation: 'reserve',
+	policy: { recording_allowed: true },
+	jti: 'nonce',
+	iat: now,
+	exp: now + 30,
+	limits: {
+		budget_bytes: 1_000_000,
+		max_ends_at: '2026-07-31T12:00:00.000Z',
+		output: { width: 1920, height: 1080, fps: 30, video: 'h264', audio: 'aac' },
+	},
+} satisfies CommandClaims;
+
+const baseHealthClaims = {
+	protocol_version: PROTOCOL_VERSION,
+	iss: 'frappe-site:site.test',
+	aud: HEALTH_AUDIENCE,
+	site: 'site.test',
+	origin: 'https://site.test',
+	operation: 'deployment_health',
+	jti: 'health-nonce',
+	iat: now,
+	exp: now + 30,
+} satisfies HealthClaims;
+
+function token(
+	overrides: Partial<Omit<CommandClaims, 'aud' | 'limits'>> & {
+		aud?: string;
+		limits?: CommandClaims['limits'];
+		extra?: boolean;
+	} = {},
+	header: { typ?: string; kid?: string } = {},
+): string {
+	return jwt.sign(
+		{ ...baseClaims, jti: crypto.randomUUID(), ...overrides },
+		secret,
+		{
+			algorithm: 'HS256',
+			header: { alg: 'HS256', typ: COMMAND_TYPE, ...header },
+		},
+	);
+}
+
+function healthToken(overrides: Partial<HealthClaims> = {}): string {
+	return jwt.sign(
+		{ ...baseHealthClaims, jti: crypto.randomUUID(), ...overrides },
+		secret,
+		{
+			algorithm: 'HS256',
+			header: { alg: 'HS256', typ: HEALTH_TYPE },
+		},
+	);
+}
+
+async function call(
+	app: Express,
+	path: string,
+	init: RequestInit = {},
+): Promise<Response> {
+	const server = app.listen(0);
+	try {
+		await new Promise<void>((resolve) => server.once('listening', resolve));
+		const address = server.address();
+		if (!address || typeof address === 'string')
+			throw new Error('test server has no TCP address');
+		return await fetch(`http://127.0.0.1:${address.port}${path}`, init);
+	} finally {
+		server.close();
+	}
+}
+
+function authenticated(
+	method = 'GET',
+	body?: object,
+	signed = token(),
+): RequestInit {
+	return {
+		method,
+		headers: {
+			Authorization: `Bearer ${signed}`,
+			...(body ? { 'Content-Type': 'application/json' } : {}),
+		},
+		...(body
+			? {
+					body: JSON.stringify({ protocol_version: PROTOCOL_VERSION, ...body }),
+				}
+			: {}),
+	};
+}
+
+describe('configuration', () => {
+	it('loads a strict production configuration', () => {
+		const config = loadConfig({
+			RECORDER_SECRET: secret,
+			RECORDER_METRICS_TOKEN: 'm'.repeat(32),
+			RECORDER_SITE: 'site.test',
+			RECORDER_SITE_ORIGIN: 'https://site.test',
+			RECORDER_LEDGER_PATH: '/data/jobs.json',
+			CHROMIUM_EXECUTABLE: '/usr/bin/chromium',
+			RECORDER_RENDERER_ASSET_DIR: '/app/renderer',
+			SFU_ORIGIN: 'https://sfu.test',
+			SFU_SOCKET_PATH: '/socket.io',
+		});
+		expect(config.port).toBe(3010);
+		expect(config.maxConcurrent).toBe(1);
+		expect(config.minimumFreeBytes).toBe(1024 * 1024 * 1024);
+	});
+
+	it.each([
+		['RECORDER_SECRET', 'short'],
+		['RECORDER_SECRET', 'change-me-to-an-independent-strong-random-string'],
+		['RECORDER_METRICS_TOKEN', 'short'],
+		['RECORDER_METRICS_TOKEN', 'change-me-to-an-independent-metrics-token'],
+		['RECORDER_SITE_ORIGIN', 'http://site.test'],
+		['RECORDER_SITE_ORIGIN', 'https://site.test/'],
+		['RECORDER_MAX_CONCURRENT', '0'],
+		['RECORDER_MIN_FREE_BYTES', '-1'],
+		['PORT', 'x'],
+	])('rejects invalid %s', (name, value) => {
+		const env: NodeJS.ProcessEnv = {
+			RECORDER_SECRET: secret,
+			RECORDER_METRICS_TOKEN: 'm'.repeat(32),
+			RECORDER_SITE: 'site.test',
+			RECORDER_SITE_ORIGIN: 'https://site.test',
+			RECORDER_LEDGER_PATH: '/data/jobs.json',
+			CHROMIUM_EXECUTABLE: '/usr/bin/chromium',
+			RECORDER_RENDERER_ASSET_DIR: '/app/renderer',
+			SFU_ORIGIN: 'https://sfu.test',
+			SFU_SOCKET_PATH: '/socket.io',
+			[name]: value,
+		};
+		expect(() => loadConfig(env)).toThrow();
+	});
+
+	it('rejects credential reuse', () => {
+		const reused = 'r'.repeat(32);
+		expect(() =>
+			loadConfig({
+				RECORDER_SECRET: reused,
+				RECORDER_METRICS_TOKEN: reused,
+				RECORDER_SITE: 'site.test',
+				RECORDER_SITE_ORIGIN: 'https://site.test',
+				RECORDER_LEDGER_PATH: '/data/jobs.json',
+				CHROMIUM_EXECUTABLE: '/usr/bin/chromium',
+				RECORDER_RENDERER_ASSET_DIR: '/app/renderer',
+				SFU_ORIGIN: 'https://sfu.test',
+				SFU_SOCKET_PATH: '/socket.io',
+			}),
+		).toThrow('must be independent');
+	});
+
+	it('allows exact HTTP origins only when explicitly enabled', () => {
+		const config = loadConfig({
+			RECORDER_SECRET: secret,
+			RECORDER_METRICS_TOKEN: 'm'.repeat(32),
+			RECORDER_SITE: 'site.test',
+			RECORDER_SITE_ORIGIN: 'http://site.test',
+			RECORDER_ALLOW_HTTP: 'true',
+			RECORDER_LEDGER_PATH: '/data/jobs.json',
+			CHROMIUM_EXECUTABLE: '/usr/bin/chromium',
+			RECORDER_RENDERER_ASSET_DIR: '/app/renderer',
+			SFU_ORIGIN: 'http://sfu.test',
+			SFU_SOCKET_PATH: '/socket.io',
+		});
+		expect(config.origin).toBe('http://site.test');
+		expect(config.sfuOrigin).toBe('http://sfu.test');
+	});
+});
+
+describe('AuthManager', () => {
+	const auth = new AuthManager(
+		secret,
+		'site.test',
+		'https://site.test',
+		new JobStore(join(tmpdir(), `auth-${crypto.randomUUID()}.json`)),
+	);
+
+	it('accepts the exact Python RecorderClient command', () => {
+		expect(auth.authenticate(`Bearer ${token()}`, 'reserve').job).toBe('job');
+	});
+
+	it('rejects missing and unsupported command protocol versions', () => {
+		const { protocol_version: _version, ...missingVersion } = baseClaims;
+		for (const claims of [
+			missingVersion,
+			{ ...baseClaims, protocol_version: 2 },
+		]) {
+			const signed = jwt.sign(claims, secret, {
+				algorithm: 'HS256',
+				header: { alg: 'HS256', typ: COMMAND_TYPE },
+			});
+			expect(() => auth.authenticate(`Bearer ${signed}`, 'reserve')).toThrow(
+				AuthError,
+			);
+		}
+	});
+
+	it('atomically rejects replay', () => {
+		expect(auth.authenticate(`Bearer ${token()}`, 'reserve').job).toBe('job');
+	});
+
+	it.each([
+		[{ extra: true }, {}],
+		[{ aud: 'other' }, {}],
+		[{ site: 'other' }, {}],
+		[{ origin: 'https://other.test' }, {}],
+		[{ exp: now + 31 }, {}],
+		[{ limits: { ...baseClaims.limits, budget_bytes: 0 } }, {}],
+		[{}, { typ: 'JWT' }],
+		[{}, { kid: 'unexpected' }],
+	])('rejects altered headers and claims', (claims, header) => {
+		expect(() =>
+			auth.authenticate(`Bearer ${token(claims, header)}`, 'reserve'),
+		).toThrow(AuthError);
+	});
+
+	it('uses constant-time metrics token comparison semantics', () => {
+		expect(auth.authenticateMetrics('Bearer metrics', 'metrics')).toBe(true);
+		expect(auth.authenticateMetrics('Bearer wrong', 'metrics')).toBe(false);
+	});
+});
+
+describe('JobStore and JobManager', () => {
+	let directory: string;
+	let path: string;
+
+	beforeEach(async () => {
+		directory = await mkdtemp(join(tmpdir(), 'recorder-store-'));
+		path = join(directory, 'ledger.json');
+	});
+
+	it('creates a 0600 ledger and reloads durable jobs', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		expect((await stat(path)).mode & 0o777).toBe(0o600);
+		const manager = new JobManager(store, new FakeRendererBridge(), 1);
+		const result = await manager.reserve(baseClaims);
+		expect(result.status).toBe('accepted');
+		const reloaded = new JobStore(path);
+		await reloaded.initialize();
+		expect(reloaded.get('job')?.accepted_at).toBe(
+			result.status === 'accepted' ? result.job.accepted_at : '',
+		);
+		expect(
+			JSON.parse(await readFile(path, 'utf8')).jobs.job.public_jwk,
+		).toEqual(TEST_PUBLIC_JWK);
+	});
+
+	it('migrates version 1 ledgers written before endpoint generations', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const manager = new JobManager(store, new FakeRendererBridge(), 1);
+		await manager.reserve(baseClaims);
+		const ledger = JSON.parse(await readFile(path, 'utf8'));
+		delete ledger.jobs.job.endpoint_generation;
+		await writeFile(path, JSON.stringify(ledger), { mode: 0o600 });
+
+		const migrated = new JobStore(path);
+		await migrated.initialize();
+
+		expect(migrated.get('job')?.endpoint_generation).toBe(0);
+		expect(
+			JSON.parse(await readFile(path, 'utf8')).jobs.job.endpoint_generation,
+		).toBe(0);
+	});
+
+	it('persists consumed command nonces across restart through expiry skew', async () => {
+		const first = new JobStore(path);
+		await first.initialize();
+		expect(await first.consumeJti('durable-nonce', now + 30, now)).toBe(true);
+		const restarted = new JobStore(path);
+		await restarted.initialize();
+		expect(
+			await restarted.consumeJti('durable-nonce', now + 30, now + 34),
+		).toBe(false);
+		expect(
+			await restarted.consumeJti('durable-nonce', now + 30, now + 36),
+		).toBe(true);
+	});
+
+	it('continues ledger updates after the nonce limit rejects a command', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		await store.update((_jobs, nonces) => {
+			for (let index = 0; index < 10_000; index += 1)
+				nonces[`nonce-${index}`] = now + 60;
+		});
+
+		await expect(store.consumeJti('overflow', now + 30, now)).rejects.toThrow(
+			'nonce ledger is full',
+		);
+		await store.update((_jobs, nonces) => {
+			delete nonces['nonce-0'];
+		});
+		expect(await store.consumeJti('after-rejection', now + 30, now)).toBe(true);
+	});
+
+	it('fails closed on corrupt ledger data', async () => {
+		await writeFile(path, '{broken', { mode: 0o600 });
+		const store = new JobStore(path);
+		await expect(store.initialize()).rejects.toThrow(
+			'job ledger is unavailable',
+		);
+		expect(store.ready).toBe(false);
+	});
+
+	it('fails closed when an initialized ledger disappears', async () => {
+		const first = new JobStore(path);
+		await first.initialize();
+		await unlink(path);
+		const restarted = new JobStore(path);
+		await expect(restarted.initialize()).rejects.toThrow(
+			'job ledger is unavailable',
+		);
+		expect(restarted.ready).toBe(false);
+	});
+
+	it('enforces capacity under concurrent reservations and preserves idempotency', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const bridge = new FakeRendererBridge();
+		const manager = new JobManager(store, bridge, 1);
+		const [first, second] = await Promise.all([
+			manager.reserve(baseClaims),
+			manager.reserve({ ...baseClaims, job: 'job-2' }),
+		]);
+		expect([first.status, second.status].sort()).toEqual([
+			'accepted',
+			'rejected',
+		]);
+		const again = await manager.reserve(baseClaims);
+		expect(again.status).toBe('accepted');
+	});
+
+	it('claims capacity before renderer startup without queueing another reservation', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		let release!: () => void;
+		const blocked = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const reserve = vi.fn(async () => {
+			await blocked;
+			return TEST_PUBLIC_JWK;
+		});
+		const bridge = Object.assign(new FakeRendererBridge(), {
+			productionReady: true,
+			reserve,
+		});
+		const manager = new JobManager(store, bridge, 1);
+
+		expect(manager.deploymentHealth().available_count).toBe(1);
+		const first = manager.reserve(baseClaims);
+		await vi.waitFor(() => expect(reserve).toHaveBeenCalledOnce());
+		expect(manager.deploymentHealth().available_count).toBe(0);
+		const second = manager.reserve({ ...baseClaims, job: 'job-2' });
+		await expect(second).resolves.toEqual({
+			status: 'rejected',
+			reason: 'capacity',
+		});
+		expect(reserve).toHaveBeenCalledOnce();
+
+		release();
+		await expect(first).resolves.toMatchObject({ status: 'accepted' });
+		expect(bridge.hasWorker('job-2')).toBe(false);
+	});
+
+	it('reports every deployment readiness reason with deterministic precedence', async () => {
+		const unavailableStore = new JobStore(path);
+		const unavailable = new JobManager(
+			unavailableStore,
+			new FakeRendererBridge(),
+			1,
+		);
+		expect(unavailable.deploymentHealth()).toMatchObject({
+			ready: false,
+			reason_code: 'ledger_unavailable',
+			active_count: 1,
+			available_count: 0,
+		});
+
+		const store = new JobStore(path);
+		await store.initialize();
+		const rendererUnavailable = new FakeRendererBridge();
+		Object.defineProperty(rendererUnavailable, 'productionReady', {
+			value: false,
+		});
+		expect(
+			new JobManager(store, rendererUnavailable, 1).deploymentHealth(),
+		).toMatchObject({ ready: false, reason_code: 'renderer_unavailable' });
+
+		const storageUnavailable = new JobManager(
+			store,
+			new FakeRendererBridge(),
+			1,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			{ ready: () => false, canReserve: () => false },
+		);
+		expect(storageUnavailable.deploymentHealth()).toMatchObject({
+			ready: false,
+			reason_code: 'storage_unavailable',
+		});
+	});
+
+	it('separates deployment readiness and advisory capacity', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const bridge = Object.assign(new FakeRendererBridge(), {
+			productionReady: true,
+		});
+		const manager = new JobManager(store, bridge, 1);
+
+		expect(manager.deploymentHealth()).toMatchObject({
+			protocol_version: 1,
+			ready: true,
+			reason_code: 'ready',
+			configured_capacity: 1,
+			active_count: 0,
+			available_count: 1,
+		});
+		await manager.reserve(baseClaims);
+		expect(manager.deploymentHealth()).toMatchObject({
+			ready: true,
+			reason_code: 'ready',
+			active_count: 1,
+			available_count: 0,
+		});
+	});
+
+	it('rejects policy and recorder readiness with distinct outcomes', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const bridge = new FakeRendererBridge();
+		Object.defineProperty(bridge, 'productionReady', { value: false });
+		const manager = new JobManager(store, bridge, 1);
+
+		await expect(
+			manager.reserve({
+				...baseClaims,
+				policy: { recording_allowed: false },
+			}),
+		).resolves.toEqual({ status: 'rejected', reason: 'policy' });
+		await expect(manager.reserve(baseClaims)).resolves.toEqual({
+			status: 'rejected',
+			reason: 'readiness',
+		});
+	});
+
+	it('persists monotonic progress and returns exact retries without another callback', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		let reportProgress:
+			| ((job: string, capturedBytes: number) => Promise<number>)
+			| undefined;
+		const bridge = Object.assign(new FakeRendererBridge(), {
+			onProgress: (
+				handler: (job: string, capturedBytes: number) => Promise<number>,
+			) => {
+				reportProgress = handler;
+			},
+		});
+		const progress = vi.fn(async () => 2_000_000);
+		const manager = new JobManager(
+			store,
+			bridge,
+			1,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			progress,
+		);
+		await manager.reserve(baseClaims);
+
+		await expect(
+			Promise.all([
+				reportProgress?.('job', 750_000),
+				reportProgress?.('job', 750_000),
+			]),
+		).resolves.toEqual([2_000_000, 2_000_000]);
+
+		expect(progress).toHaveBeenCalledOnce();
+		expect(store.get('job')).toMatchObject({
+			captured_bytes: 750_000,
+			limits: { budget_bytes: 2_000_000 },
+		});
+		expect(JSON.parse(await readFile(path, 'utf8')).jobs.job).toMatchObject({
+			captured_bytes: 750_000,
+			limits: { budget_bytes: 2_000_000 },
+		});
+		expect(manager.query(baseClaims)).toBeDefined();
+		expect(
+			manager.query({
+				...baseClaims,
+				limits: { ...baseClaims.limits, budget_bytes: 2_000_000 },
+			}),
+		).toBeDefined();
+	});
+
+	it('persists final progress without growing a stopping budget', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		let reportProgress:
+			| ((job: string, capturedBytes: number) => Promise<number>)
+			| undefined;
+		const bridge = Object.assign(new FakeRendererBridge(), {
+			onProgress: (
+				handler: (job: string, capturedBytes: number) => Promise<number>,
+			) => {
+				reportProgress = handler;
+			},
+		});
+		const progress = vi.fn(async () => 1_000_000);
+		const manager = new JobManager(
+			store,
+			bridge,
+			1,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			progress,
+		);
+		await manager.reserve(baseClaims);
+		await store.update((jobs) => {
+			if (jobs.job) jobs.job.state = 'stopping';
+		});
+
+		await expect(reportProgress?.('job', 42)).resolves.toBe(1_000_000);
+		expect(store.get('job')?.captured_bytes).toBe(42);
+		expect(progress).toHaveBeenCalledOnce();
+	});
+
+	it.each([
+		['decreased capture', 500_000, 2_000_000],
+		['regressed budget', 800_000, 999_999],
+		['under-captured budget', 1_500_000, 1_499_999],
+	] as const)('rejects %s progress', async (_case, capturedBytes, budget) => {
+		const store = new JobStore(path);
+		await store.initialize();
+		let reportProgress:
+			| ((job: string, capturedBytes: number) => Promise<number>)
+			| undefined;
+		const bridge = Object.assign(new FakeRendererBridge(), {
+			onProgress: (
+				handler: (job: string, capturedBytes: number) => Promise<number>,
+			) => {
+				reportProgress = handler;
+			},
+		});
+		const manager = new JobManager(
+			store,
+			bridge,
+			1,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			async () => budget,
+		);
+		await manager.reserve(baseClaims);
+		if (_case === 'decreased capture') {
+			await store.update((jobs) => {
+				if (jobs.job) jobs.job.captured_bytes = 600_000;
+			});
+		}
+
+		await expect(reportProgress?.('job', capturedBytes)).rejects.toThrow();
+		expect(store.get('job')?.limits.budget_bytes).toBe(1_000_000);
+	});
+
+	it('rejects budget growth when proposed remaining storage admission closes', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		let reportProgress:
+			| ((job: string, capturedBytes: number) => Promise<number>)
+			| undefined;
+		const bridge = Object.assign(new FakeRendererBridge(), {
+			onProgress: (
+				handler: (job: string, capturedBytes: number) => Promise<number>,
+			) => {
+				reportProgress = handler;
+			},
+		});
+		const storage: StorageGuard = {
+			ready: () => true,
+			canReserve: vi
+				.fn()
+				.mockReturnValueOnce(true)
+				.mockReturnValueOnce(true)
+				.mockReturnValueOnce(false),
+		};
+		const progress = vi.fn(async () => 2_000_000);
+		const manager = new JobManager(
+			store,
+			bridge,
+			2,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			storage,
+			undefined,
+			undefined,
+			progress,
+		);
+		await manager.reserve(baseClaims);
+		await manager.reserve({
+			...baseClaims,
+			job: 'job-2',
+			recording: 'recording-2',
+		});
+
+		await expect(reportProgress?.('job', 750_000)).rejects.toThrow(
+			'recording storage unavailable',
+		);
+
+		expect(progress).toHaveBeenCalledOnce();
+		expect(storage.canReserve).toHaveBeenLastCalledWith(5_250_000);
+		expect(store.get('job')).toMatchObject({
+			captured_bytes: 0,
+			limits: { budget_bytes: 1_000_000 },
+		});
+	});
+
+	it('checks the complete remaining obligation when budget is unchanged', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		let reportProgress:
+			| ((job: string, capturedBytes: number) => Promise<number>)
+			| undefined;
+		const bridge = Object.assign(new FakeRendererBridge(), {
+			onProgress: (
+				handler: (job: string, capturedBytes: number) => Promise<number>,
+			) => {
+				reportProgress = handler;
+			},
+		});
+		const storage: StorageGuard = {
+			ready: () => true,
+			canReserve: vi.fn((bytes: number) =>
+				[2_000_000, 1_250_000].includes(bytes),
+			),
+		};
+		const manager = new JobManager(
+			store,
+			bridge,
+			1,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			storage,
+			undefined,
+			undefined,
+			async () => 1_000_000,
+		);
+		await manager.reserve(baseClaims);
+		expect(storage.canReserve).toHaveBeenCalledOnce();
+
+		await expect(reportProgress?.('job', 750_000)).resolves.toBe(1_000_000);
+
+		expect(storage.canReserve).toHaveBeenCalledTimes(2);
+		expect(storage.canReserve).toHaveBeenLastCalledWith(1_250_000);
+		expect(store.get('job')?.captured_bytes).toBe(750_000);
+	});
+
+	it('does not globally block lifecycle work and keeps interruption behind earlier progress', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		let reportProgress:
+			| ((job: string, capturedBytes: number) => Promise<number>)
+			| undefined;
+		let releaseProgress!: () => void;
+		const pendingProgress = new Promise<void>((resolve) => {
+			releaseProgress = resolve;
+		});
+		const order: string[] = [];
+		const bridge = Object.assign(new FakeRendererBridge(), {
+			onProgress: (
+				handler: (job: string, capturedBytes: number) => Promise<number>,
+			) => {
+				reportProgress = handler;
+			},
+		});
+		const interrupted = vi.fn(async () => {
+			order.push('interrupted');
+		});
+		const progress = vi.fn(async () => {
+			order.push('progress-start');
+			await pendingProgress;
+			order.push('progress-end');
+			return 2_000_000;
+		});
+		const manager = new JobManager(
+			store,
+			bridge,
+			2,
+			undefined,
+			interrupted,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			progress,
+		);
+		await manager.reserve(baseClaims);
+		for (const type of [
+			'configured',
+			'proof_complete',
+			'joined',
+			'capture_ready',
+		] as const)
+			await bridge.emit({ job: 'job', type });
+
+		const reporting = reportProgress?.('job', 750_000);
+		await vi.waitFor(() => expect(progress).toHaveBeenCalledOnce());
+		const interrupting = bridge.emit({ job: 'job', type: 'interrupted' });
+		await vi.waitFor(() => expect(store.get('job')?.state).toBe('interrupted'));
+		expect(interrupted).not.toHaveBeenCalled();
+		await expect(
+			manager.reserve({
+				...baseClaims,
+				job: 'job-2',
+				recording: 'recording-2',
+			}),
+		).resolves.toMatchObject({ status: 'accepted' });
+
+		releaseProgress();
+		await reporting;
+		await interrupting;
+		expect(order).toEqual(['progress-start', 'progress-end', 'interrupted']);
+	});
+
+	it('keeps progress behind an already-scheduled interruption callback', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		let reportProgress:
+			| ((job: string, capturedBytes: number) => Promise<number>)
+			| undefined;
+		let releaseInterruption!: () => void;
+		const pendingInterruption = new Promise<void>((resolve) => {
+			releaseInterruption = resolve;
+		});
+		const order: string[] = [];
+		const bridge = Object.assign(new FakeRendererBridge(), {
+			onProgress: (
+				handler: (job: string, capturedBytes: number) => Promise<number>,
+			) => {
+				reportProgress = handler;
+			},
+		});
+		const interrupted = vi.fn(async () => {
+			order.push('interrupted-start');
+			await pendingInterruption;
+			order.push('interrupted-end');
+		});
+		const progress = vi.fn(async () => {
+			order.push('progress');
+			return 2_000_000;
+		});
+		const manager = new JobManager(
+			store,
+			bridge,
+			1,
+			undefined,
+			interrupted,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			progress,
+		);
+		await manager.reserve(baseClaims);
+		for (const type of [
+			'configured',
+			'proof_complete',
+			'joined',
+			'capture_ready',
+		] as const)
+			await bridge.emit({ job: 'job', type });
+
+		const interrupting = bridge.emit({ job: 'job', type: 'interrupted' });
+		await vi.waitFor(() => expect(interrupted).toHaveBeenCalledOnce());
+		const reporting = reportProgress?.('job', 750_000);
+		await Promise.resolve();
+		expect(progress).not.toHaveBeenCalled();
+
+		releaseInterruption();
+		await interrupting;
+		await reporting;
+		expect(order).toEqual(['interrupted-start', 'interrupted-end', 'progress']);
+	});
+
+	it('expires progress waiting behind a pending callback without running it later', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		let reportProgress:
+			| ((job: string, capturedBytes: number) => Promise<number>)
+			| undefined;
+		let releaseInterruption!: () => void;
+		const pendingInterruption = new Promise<void>((resolve) => {
+			releaseInterruption = resolve;
+		});
+		const bridge = Object.assign(new FakeRendererBridge(), {
+			onProgress: (
+				handler: (job: string, capturedBytes: number) => Promise<number>,
+			) => {
+				reportProgress = handler;
+			},
+		});
+		const interrupted = vi.fn(async () => pendingInterruption);
+		const progress = vi.fn(async () => 2_000_000);
+		const manager = new JobManager(
+			store,
+			bridge,
+			1,
+			undefined,
+			interrupted,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			progress,
+		);
+		await manager.reserve(baseClaims);
+		for (const type of [
+			'configured',
+			'proof_complete',
+			'joined',
+			'capture_ready',
+		] as const)
+			await bridge.emit({ job: 'job', type });
+		const interrupting = bridge.emit({ job: 'job', type: 'interrupted' });
+		await vi.waitFor(() => expect(interrupted).toHaveBeenCalledOnce());
+
+		vi.useFakeTimers();
+		try {
+			const reporting = reportProgress?.('job', 750_000);
+			const rejected = expect(reporting).rejects.toThrow(
+				'callback delivery queue timed out',
+			);
+			await vi.advanceTimersByTimeAsync(4_999);
+			expect(progress).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(1);
+			await rejected;
+
+			releaseInterruption();
+			await interrupting;
+			await Promise.resolve();
+			expect(progress).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('reserves finalization space for every active job', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const storage: StorageGuard = {
+			ready: () => true,
+			canReserve: vi.fn().mockReturnValueOnce(true).mockReturnValueOnce(false),
+		};
+		const manager = new JobManager(
+			store,
+			new FakeRendererBridge(),
+			2,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			storage,
+		);
+
+		expect((await manager.reserve(baseClaims)).status).toBe('accepted');
+		await store.update((jobs) => {
+			if (jobs.job) jobs.job.captured_bytes = 500_000;
+		});
+		expect(
+			await manager.reserve({
+				...baseClaims,
+				job: 'job-2',
+				recording: 'recording-2',
+			}),
+		).toEqual({ status: 'rejected', reason: 'storage' });
+		expect(storage.canReserve).toHaveBeenNthCalledWith(1, 2_000_000);
+		expect(storage.canReserve).toHaveBeenNthCalledWith(2, 3_500_000);
+	});
+
+	it('fails disk readiness and admission closed', () => {
+		const enough = new DiskGuard('/data', 1_000, () => 1_500);
+		expect(enough.ready()).toBe(true);
+		expect(enough.canReserve(500)).toBe(true);
+		expect(enough.canReserve(501)).toBe(false);
+
+		const unavailable = new DiskGuard('/missing', 1, () => {
+			throw new Error('disk unavailable');
+		});
+		expect(unavailable.ready()).toBe(false);
+		expect(unavailable.canReserve(1)).toBe(false);
+	});
+
+	it('ends a persisted active job instead of resuming it after restart', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const first = new JobManager(store, new FakeRendererBridge(), 1);
+		await first.reserve(baseClaims);
+		const reloaded = new JobStore(path);
+		await reloaded.initialize();
+		const terminal = vi.fn(async () => undefined);
+		const restartedBridge = Object.assign(new FakeRendererBridge(), {
+			recoverStopping: vi.fn(async () => ({
+				type: 'complete' as const,
+				capturedBytes: 42,
+				artifact: {
+					file: 'recording.mp4',
+					bytes: 42,
+					sha256: 'a'.repeat(64),
+					duration_ms: 1000,
+				},
+				gaps: [],
+			})),
+		});
+		const restarted = new JobManager(reloaded, restartedBridge, 1, terminal);
+		await restarted.initialize();
+		expect(restartedBridge.recoverStopping).toHaveBeenCalledWith('job');
+		expect(restarted.activeCount).toBe(0);
+		expect(reloaded.get('job')).toMatchObject({
+			state: 'failed',
+			captured_bytes: 42,
+			health_reason: 'capture_not_committed',
+		});
+		expect(restarted.query(baseClaims)?.state).toBe('failed');
+		expect(terminal).toHaveBeenCalledWith(
+			expect.objectContaining({ state: 'failed' }),
+		);
+		expect(terminal.mock.calls[0]?.[0]).not.toHaveProperty('artifact');
+	});
+
+	it('adopts a durable capture start before restart terminalization without duplication', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const firstBridge = new FakeRendererBridge();
+		const first = new JobManager(store, firstBridge, 1);
+		await first.reserve(baseClaims);
+		await firstBridge.emit({
+			job: 'job',
+			type: 'configured',
+			occurredAt: '2026-08-30T11:59:57.000Z',
+		});
+		await firstBridge.emit({
+			job: 'job',
+			type: 'proof_complete',
+			occurredAt: '2026-08-30T11:59:58.000Z',
+		});
+		await firstBridge.emit({
+			job: 'job',
+			type: 'joined',
+			occurredAt: '2026-08-30T11:59:59.000Z',
+		});
+		const reloaded = new JobStore(path);
+		await reloaded.initialize();
+		const captureStartedAt = '2026-08-30T12:00:00.123Z';
+		const restartedBridge = Object.assign(new FakeRendererBridge(), {
+			recoverStopping: vi.fn(async () => ({
+				type: 'failed' as const,
+				gaps: [],
+				capturedBytes: 0,
+				captureStartedAt,
+			})),
+		});
+		const startup = vi.fn(async () => undefined);
+		const terminal = vi.fn(async () => undefined);
+		await new JobManager(
+			reloaded,
+			restartedBridge,
+			1,
+			terminal,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			startup,
+		).initialize();
+
+		expect(startup).toHaveBeenCalledOnce();
+		expect(startup).toHaveBeenCalledWith(
+			expect.objectContaining({
+				state: 'capture_ready',
+				capture_started_at: captureStartedAt,
+			}),
+		);
+		expect(startup).toHaveBeenCalledBefore(terminal);
+		expect(reloaded.get('job')).toMatchObject({
+			state: 'failed',
+			capture_started_at: captureStartedAt,
+		});
+
+		const again = new JobStore(path);
+		await again.initialize();
+		const duplicateStartup = vi.fn(async () => undefined);
+		await new JobManager(
+			again,
+			new FakeRendererBridge(),
+			1,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			duplicateStartup,
+		).initialize();
+		expect(duplicateStartup).not.toHaveBeenCalled();
+	});
+
+	it('replays a persisted capture startup before restart terminal publication', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const firstBridge = new FakeRendererBridge();
+		const first = new JobManager(store, firstBridge, 1);
+		await first.reserve(baseClaims);
+		for (const type of ['configured', 'proof_complete', 'joined'] as const)
+			await firstBridge.emit({ job: 'job', type });
+		const captureStartedAt = '2026-08-30T12:00:00.123Z';
+		await firstBridge.emit({
+			job: 'job',
+			type: 'capture_ready',
+			occurredAt: captureStartedAt,
+		});
+
+		const reloaded = new JobStore(path);
+		await reloaded.initialize();
+		const restartedBridge = Object.assign(new FakeRendererBridge(), {
+			recoverStopping: vi.fn(async () => ({
+				type: 'failed' as const,
+				capturedBytes: 0,
+				captureStartedAt,
+			})),
+		});
+		const startup = vi.fn(async () => undefined);
+		const terminal = vi.fn(async () => undefined);
+		await new JobManager(
+			reloaded,
+			restartedBridge,
+			1,
+			terminal,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			startup,
+		).initialize();
+
+		expect(startup).toHaveBeenCalledWith(
+			expect.objectContaining({
+				state: 'capture_ready',
+				capture_started_at: captureStartedAt,
+			}),
+		);
+		expect(startup).toHaveBeenCalledBefore(terminal);
+	});
+
+	it('cannot publish a terminal artifact before capture commits', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const bridge = new FakeRendererBridge();
+		const terminal = vi.fn(async () => undefined);
+		const manager = new JobManager(store, bridge, 1, terminal);
+		await manager.reserve(baseClaims);
+
+		await bridge.emit({
+			job: 'job',
+			type: 'complete',
+			artifact: {
+				file: 'recording.mp4',
+				bytes: 42,
+				sha256: 'a'.repeat(64),
+				duration_ms: 1_000,
+			},
+		});
+
+		expect(store.get('job')).toMatchObject({
+			state: 'failed',
+			health_reason: 'capture_not_committed',
+		});
+		expect(store.get('job')).not.toHaveProperty('artifact');
+		expect(terminal).toHaveBeenCalledWith(
+			expect.objectContaining({ state: 'failed' }),
+		);
+	});
+
+	it('requires operator recovery when restart finalization fails', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const first = new JobManager(store, new FakeRendererBridge(), 1);
+		await first.reserve(baseClaims);
+		const reloaded = new JobStore(path);
+		await reloaded.initialize();
+		const restartedBridge = Object.assign(new FakeRendererBridge(), {
+			recoverStopping: vi.fn(async () => {
+				throw new Error('finalization failed');
+			}),
+		});
+		const restarted = new JobManager(reloaded, restartedBridge, 1);
+		await restarted.initialize();
+		expect(restarted.ready).toBe(false);
+		expect(restarted.deploymentHealth().reason_code).toBe('recovery_required');
+		expect(reloaded.get('job')?.state).toBe('recovery_required');
+		expect(restarted.query(baseClaims)).toBeUndefined();
+		expect(await restarted.reserve({ ...baseClaims, job: 'job-2' })).toEqual({
+			status: 'rejected',
+			reason: 'recovery_required',
+		});
+	});
+
+	it('durably tracks capture readiness and interruption', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const bridge = new FakeRendererBridge();
+		const manager = new JobManager(store, bridge, 1);
+		await manager.reserve(baseClaims);
+		await bridge.emit({ job: 'job', type: 'configured' });
+		await bridge.emit({ job: 'job', type: 'proof_complete' });
+		await bridge.emit({ job: 'job', type: 'joined' });
+		await bridge.emit({ job: 'job', type: 'capture_ready' });
+		expect(store.get('job')?.state).toBe('capture_ready');
+		await bridge.emit({
+			job: 'job',
+			type: 'interrupted',
+			reason: 'connection_lost',
+		});
+		expect(store.get('job')).toMatchObject({
+			state: 'interrupted',
+			health_reason: 'connection_lost',
+		});
+		expect(bridge.hasWorker('job')).toBe(true);
+	});
+
+	it('notifies the control plane when capture becomes interrupted', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const bridge = new FakeRendererBridge();
+		const interrupted = vi.fn(async () => undefined);
+		const manager = new JobManager(store, bridge, 1, undefined, interrupted);
+		await manager.reserve(baseClaims);
+		await bridge.emit({ job: 'job', type: 'configured' });
+		await bridge.emit({ job: 'job', type: 'proof_complete' });
+		await bridge.emit({ job: 'job', type: 'joined' });
+		await bridge.emit({ job: 'job', type: 'capture_ready' });
+
+		await bridge.emit({
+			job: 'job',
+			type: 'interrupted',
+			reason: 'connection_lost',
+		});
+
+		expect(interrupted).toHaveBeenCalledWith(
+			expect.objectContaining({
+				job: 'job',
+				state: 'interrupted',
+				health_reason: 'connection_lost',
+			}),
+		);
+	});
+
+	it('does not block unrelated jobs while a health callback is pending', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const bridge = new FakeRendererBridge();
+		let release!: () => void;
+		const pending = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const interrupted = vi.fn(async () => pending);
+		const manager = new JobManager(store, bridge, 2, undefined, interrupted);
+		await manager.reserve(baseClaims);
+		await bridge.emit({ job: 'job', type: 'configured' });
+		await bridge.emit({ job: 'job', type: 'proof_complete' });
+		await bridge.emit({ job: 'job', type: 'joined' });
+		await bridge.emit({ job: 'job', type: 'capture_ready' });
+
+		const delivery = bridge.emit({ job: 'job', type: 'interrupted' });
+		await vi.waitFor(() => expect(interrupted).toHaveBeenCalledOnce());
+		await expect(
+			manager.reserve({
+				...baseClaims,
+				job: 'job-2',
+				recording: 'recording-2',
+			}),
+		).resolves.toMatchObject({ status: 'accepted' });
+
+		release();
+		await delivery;
+	});
+
+	it('notifies the control plane when interrupted capture recovers', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const bridge = new FakeRendererBridge();
+		const recovered = vi.fn(async () => undefined);
+		const manager = new JobManager(
+			store,
+			bridge,
+			1,
+			undefined,
+			undefined,
+			async () => undefined,
+			recovered,
+		);
+		await manager.reserve(baseClaims);
+		await bridge.emit({ job: 'job', type: 'configured' });
+		await bridge.emit({ job: 'job', type: 'proof_complete' });
+		await bridge.emit({ job: 'job', type: 'joined' });
+		await bridge.emit({
+			job: 'job',
+			type: 'capture_ready',
+			occurredAt: '2026-08-30T12:00:00.000Z',
+		});
+		await bridge.emit({ job: 'job', type: 'interrupted' });
+
+		await bridge.emit({ job: 'job', type: 'capture_ready' });
+
+		expect(recovered).toHaveBeenCalledWith(
+			expect.objectContaining({ job: 'job', state: 'capture_ready' }),
+		);
+		await bridge.emit({ job: 'job', type: 'interrupted' });
+		await bridge.emit({ job: 'job', type: 'capture_ready' });
+		expect(store.get('job')?.event_sequence).toBe(9);
+		expect(store.get('job')?.capture_started_at).toBe(
+			'2026-08-30T12:00:00.000Z',
+		);
+		expect(recovered).toHaveBeenCalledTimes(2);
+	});
+
+	it('persists a fresh replacement generation before callback and rejects stale grants and events', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const bridge = new FakeRendererBridge();
+		const replacementReady = vi.fn(async () => undefined);
+		const manager = new JobManager(
+			store,
+			bridge,
+			1,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			replacementReady,
+		);
+		await manager.reserve(baseClaims);
+		for (const type of [
+			'configured',
+			'proof_complete',
+			'joined',
+			'capture_ready',
+		] as const)
+			await bridge.emit({ job: 'job', generation: 0, type });
+		const interruption = {
+			id: '11111111-1111-4111-8111-111111111111',
+			detected_at: '2026-08-30T12:00:00.000Z',
+			deadline: '2026-08-30T12:01:00.000Z',
+			omission_started_at: '2026-08-30T11:59:30.000Z',
+			reason: 'renderer:disconnected',
+		};
+		await bridge.emit({
+			job: 'job',
+			generation: 0,
+			type: 'interrupted',
+			interruption,
+		});
+		const publicJwk = {
+			...TEST_PUBLIC_JWK,
+			x: `b${TEST_PUBLIC_JWK.x.slice(1)}`,
+		};
+		await bridge.emit({
+			job: 'job',
+			generation: 1,
+			type: 'replacement_ready',
+			publicJwk,
+			readyAt: '2026-08-30T12:00:05.000Z',
+			interruptionId: interruption.id,
+		});
+
+		expect(replacementReady).toHaveBeenCalledWith(
+			expect.objectContaining({
+				state: 'interrupted',
+				endpoint_generation: 1,
+				public_jwk: publicJwk,
+				replacement_ready_at: '2026-08-30T12:00:05.000Z',
+			}),
+		);
+		expect(await manager.grant(baseClaims, 'stale', 0)).toBe(false);
+		expect(await manager.grant(baseClaims, 'fresh', 1)).toBe(true);
+		await bridge.emit({ job: 'job', generation: 0, type: 'capture_ready' });
+		expect(manager.query(baseClaims)).toMatchObject({
+			state: 'interrupted',
+			endpoint_generation: 1,
+			public_jwk: publicJwk,
+		});
+	});
+
+	it.each(['complete', 'partial', 'failed'] as const)(
+		'keeps %s terminal despite delayed lifecycle callbacks',
+		async (outcome) => {
+			const store = new JobStore(path);
+			await store.initialize();
+			const bridge = new FakeRendererBridge();
+			const manager = new JobManager(store, bridge, 1);
+			await manager.reserve(baseClaims);
+			if (outcome !== 'failed') {
+				for (const type of [
+					'configured',
+					'proof_complete',
+					'joined',
+					'capture_ready',
+				] as const)
+					await bridge.emit({ job: 'job', type });
+			}
+			await bridge.emit({ job: 'job', type: outcome, reason: 'final' });
+			await bridge.emit({ job: 'job', type: 'configured', reason: 'delayed' });
+			await bridge.emit({ job: 'job', type: 'failed', reason: 'delayed' });
+			expect(store.get('job')?.state).toBe(outcome);
+			expect(store.get('job')?.health_reason).toBe('final');
+			expect(store.get('job')?.artifact).toEqual(
+				outcome === 'failed'
+					? undefined
+					: { state: outcome, path: 'recording.mp4' },
+			);
+		},
+	);
+
+	it('keeps terminal artifacts queryable across restart', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const bridge = new FakeRendererBridge();
+		const manager = new JobManager(store, bridge, 1);
+		await manager.reserve(baseClaims);
+		for (const type of [
+			'configured',
+			'proof_complete',
+			'joined',
+			'capture_ready',
+		] as const)
+			await bridge.emit({ job: 'job', type });
+		await bridge.emit({ job: 'job', type: 'complete' });
+
+		const reloaded = new JobStore(path);
+		await reloaded.initialize();
+		const restarted = new JobManager(reloaded, new FakeRendererBridge(), 1);
+		await restarted.initialize();
+
+		expect(restarted.query(baseClaims)).toMatchObject({
+			state: 'complete',
+			artifact: { state: 'complete', path: 'recording.mp4' },
+		});
+		expect(reloaded.get('job')?.state).toBe('complete');
+	});
+
+	it('retries terminal callbacks and persists their acknowledgement', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const bridge = new FakeRendererBridge();
+		const terminal = vi
+			.fn<(job: import('./types.js').JobRecord) => Promise<void>>()
+			.mockRejectedValueOnce(new Error('site unavailable'))
+			.mockResolvedValue(undefined);
+		const manager = new JobManager(
+			store,
+			bridge,
+			1,
+			terminal,
+			undefined,
+			async () => undefined,
+		);
+		await manager.reserve(baseClaims);
+		for (const type of [
+			'configured',
+			'proof_complete',
+			'joined',
+			'capture_ready',
+		] as const)
+			await bridge.emit({ job: 'job', type });
+
+		await bridge.emit({ job: 'job', type: 'complete' });
+
+		await vi.waitFor(() => expect(terminal).toHaveBeenCalledTimes(2));
+		await vi.waitFor(() =>
+			expect(store.get('job')?.callback_completed_at).toEqual(
+				expect.any(String),
+			),
+		);
+
+		const reloaded = new JobStore(path);
+		await reloaded.initialize();
+		const afterRestart = vi.fn(async () => undefined);
+		await new JobManager(
+			reloaded,
+			new FakeRendererBridge(),
+			1,
+			afterRestart,
+		).initialize();
+		expect(afterRestart).not.toHaveBeenCalled();
+	});
+
+	it('reloads and reschedules cleanup authorization after restart', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const manager = new JobManager(store, new FakeRendererBridge(), 1);
+		await manager.reserve(baseClaims);
+		await store.update((jobs) => {
+			const job = jobs.job;
+			if (!job) throw new Error('job disappeared');
+			job.state = 'complete';
+			job.terminal_at = '2026-01-01T00:01:00.000Z';
+			job.artifact = { state: 'complete', path: 'recording.mp4' };
+			job.finalization_started_at = '2026-01-01T00:01:01.000Z';
+			job.cleanup_authorized_at = '2026-01-01T00:01:02.000Z';
+			job.cleanup_result = 'Ready';
+		});
+
+		const reloaded = new JobStore(path);
+		await reloaded.initialize();
+		const cleanup = vi.fn(async (job: import('./types.js').JobRecord) => {
+			expect(job).toMatchObject({
+				finalization_started_at: '2026-01-01T00:01:01.000Z',
+				cleanup_authorized_at: '2026-01-01T00:01:02.000Z',
+				cleanup_result: 'Ready',
+			});
+		});
+		await new JobManager(
+			reloaded,
+			new FakeRendererBridge(),
+			1,
+			cleanup,
+		).initialize();
+
+		await vi.waitFor(() => expect(cleanup).toHaveBeenCalledTimes(1));
+		await vi.waitFor(() =>
+			expect(reloaded.get('job')?.callback_completed_at).toEqual(
+				expect.any(String),
+			),
+		);
+	});
+
+	it('finalizes a stopping job through the local restart hook', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const bridge = new FakeRendererBridge();
+		const manager = new JobManager(store, bridge, 1);
+		await manager.reserve(baseClaims);
+		for (const type of [
+			'configured',
+			'proof_complete',
+			'joined',
+			'capture_ready',
+		] as const)
+			await bridge.emit({ job: 'job', type });
+		await manager.stop(baseClaims, 'stop-1');
+
+		const reloaded = new JobStore(path);
+		await reloaded.initialize();
+		const restartedBridge = Object.assign(new FakeRendererBridge(), {
+			recoverStopping: vi.fn(async () => ({
+				type: 'partial' as const,
+				artifact: {
+					file: 'recording.mp4',
+					bytes: 42,
+					sha256: 'a'.repeat(64),
+					duration_ms: 1000,
+				},
+				gaps: [
+					{
+						started_at: '2026-01-01T00:00:00.000Z',
+						ended_at: '2026-01-01T00:00:01.000Z',
+						reason: 'restart',
+					},
+				],
+			})),
+		});
+		const restarted = new JobManager(reloaded, restartedBridge, 1);
+		await restarted.initialize();
+
+		expect(restartedBridge.recoverStopping).toHaveBeenCalledWith('job');
+		expect(reloaded.get('job')).toMatchObject({
+			state: 'partial',
+			artifact: {
+				state: 'partial',
+				path: 'recording.mp4',
+				bytes: 42,
+				sha256: 'a'.repeat(64),
+				duration_ms: 1000,
+				gaps: [{ reason: 'restart' }],
+			},
+		});
+	});
+
+	it('ignores duplicate artifact completion', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const bridge = new FakeRendererBridge();
+		const manager = new JobManager(store, bridge, 1);
+		await manager.reserve(baseClaims);
+		for (const type of [
+			'configured',
+			'proof_complete',
+			'joined',
+			'capture_ready',
+		] as const)
+			await bridge.emit({ job: 'job', type });
+		await bridge.emit({ job: 'job', type: 'partial', reason: 'capture_gap' });
+		await bridge.emit({ job: 'job', type: 'complete' });
+		expect(store.get('job')).toMatchObject({
+			state: 'partial',
+			health_reason: 'capture_gap',
+			artifact: { state: 'partial', path: 'recording.mp4' },
+		});
+	});
+
+	it('keeps failure terminal and cleans up the worker exactly once', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const bridge = new FakeRendererBridge();
+		const stop = vi.spyOn(bridge, 'stop');
+		const manager = new JobManager(store, bridge, 1);
+		await manager.reserve(baseClaims);
+
+		await bridge.emit({ job: 'job', type: 'failed', reason: 'page_crashed' });
+		expect(await manager.stop(baseClaims, 'late-stop')).toBe(true);
+		await bridge.emit({
+			job: 'job',
+			type: 'interrupted',
+			reason: 'connection_lost',
+		});
+		await bridge.emit({ job: 'job', type: 'configured' });
+		await bridge.emit({ job: 'job', type: 'failed', reason: 'duplicate' });
+
+		expect(store.get('job')).toMatchObject({
+			state: 'failed',
+			health_reason: 'page_crashed',
+			stop_operation_ids: [],
+		});
+		expect(stop).toHaveBeenCalledOnce();
+		expect(bridge.hasWorker('job')).toBe(false);
+	});
+
+	it('releases failed capacity for a new reservation', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const bridge = new FakeRendererBridge();
+		const manager = new JobManager(store, bridge, 1);
+		await manager.reserve(baseClaims);
+		expect(manager.deploymentHealth().available_count).toBe(0);
+		await bridge.emit({ job: 'job', type: 'failed' });
+		expect(manager.deploymentHealth().available_count).toBe(1);
+
+		const next = await manager.reserve({ ...baseClaims, job: 'job-2' });
+
+		expect(next.status).toBe('accepted');
+		expect(manager.activeCount).toBe(1);
+		expect(bridge.hasWorker('job-2')).toBe(true);
+	});
+
+	it('keeps stopping jobs in capacity until they become terminal', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const bridge = new FakeRendererBridge();
+		const manager = new JobManager(store, bridge, 1);
+		await manager.reserve(baseClaims);
+		await manager.stop(baseClaims, 'stop-1');
+
+		expect(manager.activeCount).toBe(1);
+		expect(
+			await manager.reserve({
+				...baseClaims,
+				job: 'job-2',
+				recording: 'recording-2',
+			}),
+		).toEqual({ status: 'rejected', reason: 'capacity' });
+
+		await bridge.emit({ job: 'job', type: 'failed' });
+		expect(
+			(
+				await manager.reserve({
+					...baseClaims,
+					job: 'job-2',
+					recording: 'recording-2',
+				})
+			).status,
+		).toBe('accepted');
+	});
+
+	it('holds capacity until renderer cleanup after durable persistence fails', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const bridge = new FakeRendererBridge();
+		const manager = new JobManager(store, bridge, 1);
+		vi.spyOn(store, 'update').mockRejectedValueOnce(new Error('disk failed'));
+		let cleanupStarted!: () => void;
+		const started = new Promise<void>((resolve) => {
+			cleanupStarted = resolve;
+		});
+		let finishCleanup!: () => void;
+		const cleanup = new Promise<void>((resolve) => {
+			finishCleanup = resolve;
+		});
+		vi.spyOn(bridge, 'stop').mockImplementation(async (job) => {
+			cleanupStarted();
+			await cleanup;
+			bridge.stopped.add(job);
+		});
+		const reservation = manager.reserve(baseClaims);
+		await started;
+		expect(manager.deploymentHealth().available_count).toBe(0);
+		finishCleanup();
+		await expect(reservation).rejects.toThrow('disk failed');
+		expect(bridge.stopped.has('job')).toBe(true);
+		expect(manager.deploymentHealth().available_count).toBe(1);
+	});
+
+	it('persists stop operation IDs before invoking the bridge and never persists grants', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const bridge = new FakeRendererBridge();
+		const manager = new JobManager(store, bridge, 1);
+		await manager.reserve(baseClaims);
+		await manager.grant(baseClaims, 'secret-grant');
+		await manager.stop(baseClaims, 'stop-1');
+		await manager.stop(baseClaims, 'stop-1');
+		expect(bridge.stopped.size).toBe(1);
+		const raw = await readFile(path, 'utf8');
+		expect(raw).not.toContain('secret-grant');
+		expect(JSON.parse(raw).jobs.job.stop_operation_ids).toEqual(['stop-1']);
+	});
+});
+
+describe('HTTP contract', () => {
+	let app: ReturnType<typeof createApp>;
+	let bridge: FakeRendererBridge;
+	let store: JobStore;
+	let logs: LogEntry[];
+	let config: Config;
+	let storageAllowed: boolean;
+
+	beforeEach(async () => {
+		const directory = await mkdtemp(join(tmpdir(), 'recorder-http-'));
+		store = new JobStore(join(directory, 'ledger.json'));
+		await store.initialize();
+		bridge = new FakeRendererBridge();
+		storageAllowed = true;
+		const jobs = new JobManager(
+			store,
+			bridge,
+			1,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			{
+				ready: () => true,
+				canReserve: () => storageAllowed,
+			},
+		);
+		config = {
+			port: 3010,
+			secret,
+			site: 'site.test',
+			origin: 'https://site.test',
+			ledgerPath: join(directory, 'ledger.json'),
+			maxConcurrent: 1,
+			metricsToken: 'metrics-token-is-at-least-32-bytes',
+			chromiumExecutable: '/usr/bin/chromium',
+			rendererAssetDirectory: '/app/renderer',
+			rendererPort: 0,
+			rendererNoSandbox: false,
+			rendererReserveTimeoutMs: 10_000,
+			rendererConfigureTimeoutMs: 10_000,
+			sfuOrigin: 'https://sfu.test',
+			sfuSocketPath: '/socket.io',
+			dataRoot: directory,
+			minimumFreeBytes: 1024,
+			segmentSeconds: 30,
+			ffmpegExecutable: '/usr/bin/ffmpeg',
+			xvfbExecutable: '/usr/bin/Xvfb',
+			pulseaudioExecutable: '/usr/bin/pulseaudio',
+			pactlExecutable: '/usr/bin/pactl',
+		};
+		logs = [];
+		const logger: Logger = {
+			info: (entry) => {
+				logs.push(entry);
+			},
+			error: (entry) => {
+				logs.push(entry);
+			},
+		};
+		app = createApp(
+			config,
+			new AuthManager(secret, config.site, config.origin, store),
+			jobs,
+			logger,
+		);
+	});
+
+	afterEach(() => vi.restoreAllMocks());
+
+	it('serves liveness but remains unready without a production bridge', async () => {
+		Object.defineProperty(bridge, 'productionReady', { value: false });
+		const health = await call(app, '/health');
+		expect([health.status, await health.json()]).toEqual([
+			200,
+			{ status: 'ok' },
+		]);
+		const ready = await call(app, '/ready');
+		expect([ready.status, await ready.json()]).toEqual([
+			503,
+			{ status: 'not_ready' },
+		]);
+	});
+
+	it('serves exact authenticated deployment health separately from liveness', async () => {
+		Object.defineProperty(bridge, 'productionReady', { value: false });
+		expect((await call(app, '/v1/deployment-health')).status).toBe(401);
+		expect(
+			(
+				await call(app, '/v1/deployment-health', {
+					headers: { Authorization: `Bearer ${token()}` },
+				})
+			).status,
+		).toBe(401);
+		const signed = healthToken();
+		const response = await call(app, '/v1/deployment-health', {
+			headers: { Authorization: `Bearer ${signed}` },
+		});
+		expect(response.status).toBe(200);
+		const body = await response.json();
+		expect(body).toEqual({
+			protocol_version: 1,
+			observed_at: expect.any(String),
+			ready: false,
+			reason_code: 'renderer_unavailable',
+			configured_capacity: 1,
+			active_count: 0,
+			available_count: 1,
+		});
+		expect(validUtcTimestamp(body.observed_at)).toBe(true);
+		expect(
+			(
+				await call(app, '/v1/deployment-health', {
+					headers: { Authorization: `Bearer ${signed}` },
+				})
+			).status,
+		).toBe(200);
+	});
+
+	it('returns typed readiness before nonce persistence when the ledger is unavailable', async () => {
+		vi.spyOn(store, 'ready', 'get').mockReturnValue(false);
+		const consume = vi.spyOn(store, 'consumeJti');
+		const response = await call(
+			app,
+			'/v1/recordings',
+			authenticated('POST', { job: 'job' }),
+		);
+		expect(response.status).toBe(503);
+		expect(await response.json()).toEqual({
+			protocol_version: 1,
+			status: 'rejected',
+			job: 'job',
+			reason_code: 'readiness',
+		});
+		expect(consume).not.toHaveBeenCalled();
+	});
+
+	it('reserves, queries, grants, and stops with exact RecorderClient bodies', async () => {
+		const reserve = await call(
+			app,
+			'/v1/recordings',
+			authenticated('POST', { job: 'job' }),
+		);
+		expect(reserve.status).toBe(202);
+		const reserveBody: {
+			protocol_version: 1;
+			status: 'accepted';
+			job: string;
+			accepted_at: string;
+			public_jwk: typeof TEST_PUBLIC_JWK;
+			state: string;
+			event_sequence: number;
+			endpoint_generation: number;
+		} = await reserve.json();
+		expect(Object.keys(reserveBody).sort()).toEqual([
+			'accepted_at',
+			'endpoint_generation',
+			'event_sequence',
+			'job',
+			'protocol_version',
+			'public_jwk',
+			'state',
+			'status',
+		]);
+		expect(reserveBody.public_jwk).toEqual(TEST_PUBLIC_JWK);
+		expect(
+			(
+				await call(
+					app,
+					'/v1/recordings/job',
+					authenticated('GET', undefined, token({ operation: 'query' })),
+				)
+			).status,
+		).toBe(200);
+		const grant = await call(
+			app,
+			'/v1/recordings/job/grant',
+			authenticated(
+				'POST',
+				{ grant: 'grant-token', endpoint_generation: 0 },
+				token({ operation: 'grant' }),
+			),
+		);
+		expect([grant.status, await grant.json()]).toEqual([
+			200,
+			{ protocol_version: 1, status: 'accepted' },
+		]);
+		const stop = await call(
+			app,
+			'/v1/recordings/job/stop',
+			authenticated(
+				'POST',
+				{ job: 'job', operation_id: 'stop-1' },
+				token({ operation: 'stop' }),
+			),
+		);
+		expect([stop.status, await stop.json()]).toEqual([
+			202,
+			{
+				protocol_version: 1,
+				status: 'accepted',
+				job: 'job',
+				operation_id: 'stop-1',
+			},
+		]);
+		expect(bridge.grants).toEqual([
+			{
+				job: 'job',
+				grant: 'grant-token',
+				acceptedAt: expect.any(String),
+				generation: 0,
+			},
+		]);
+	});
+
+	it('rejects a new reservation when disk admission closes', async () => {
+		storageAllowed = false;
+		const response = await call(
+			app,
+			'/v1/recordings',
+			authenticated('POST', { job: 'job' }),
+		);
+		expect(response.status).toBe(507);
+		expect(await response.json()).toEqual({
+			protocol_version: 1,
+			status: 'rejected',
+			job: 'job',
+			reason_code: 'storage',
+		});
+	});
+
+	it('preserves recorder readiness as an authoritative rejection', async () => {
+		Object.defineProperty(bridge, 'productionReady', { value: false });
+		const response = await call(
+			app,
+			'/v1/recordings',
+			authenticated('POST', { job: 'job' }),
+		);
+		expect([response.status, await response.json()]).toEqual([
+			503,
+			{
+				protocol_version: 1,
+				status: 'rejected',
+				job: 'job',
+				reason_code: 'readiness',
+			},
+		]);
+	});
+
+	it('preserves policy and invalid request as distinct reserve rejections', async () => {
+		const policy = await call(
+			app,
+			'/v1/recordings',
+			authenticated(
+				'POST',
+				{ job: 'job' },
+				token({ policy: { recording_allowed: false } }),
+			),
+		);
+		expect([policy.status, await policy.json()]).toEqual([
+			422,
+			{
+				protocol_version: 1,
+				status: 'rejected',
+				job: 'job',
+				reason_code: 'policy',
+			},
+		]);
+
+		const invalid = await call(
+			app,
+			'/v1/recordings',
+			authenticated('POST', { job: 'job', extra: true }),
+		);
+		expect([invalid.status, await invalid.json()]).toEqual([
+			422,
+			{
+				protocol_version: 1,
+				status: 'rejected',
+				job: 'job',
+				reason_code: 'invalid_request',
+			},
+		]);
+	});
+
+	it('authenticates control requests before parsing bounded JSON', async () => {
+		const unauthorized = await call(app, '/v1/recordings', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: '{invalid',
+		});
+		expect(unauthorized.status).toBe(401);
+
+		const oversized = await call(
+			app,
+			'/v1/recordings',
+			authenticated('POST', { job: 'job', padding: 'x'.repeat(17 * 1024) }),
+		);
+		expect(oversized.status).toBe(413);
+		expect(await oversized.json()).toEqual({
+			protocol_version: 1,
+			status: 'indeterminate',
+		});
+	});
+
+	it('binds route and body to signed job and rejects extra fields', async () => {
+		expect(
+			(
+				await call(
+					app,
+					'/v1/recordings',
+					authenticated('POST', { job: 'other' }),
+				)
+			).status,
+		).toBe(422);
+		expect(
+			(
+				await call(
+					app,
+					'/v1/recordings/other',
+					authenticated('GET', undefined, token({ operation: 'query' })),
+				)
+			).status,
+		).toBe(401);
+		expect(
+			(
+				await call(
+					app,
+					'/v1/recordings',
+					authenticated('POST', { job: 'job', extra: true }),
+				)
+			).status,
+		).toBe(422);
+	});
+
+	it('checks operation and semantics before consuming a command nonce', async () => {
+		const signed = token({ jti: 'body-retry', operation: 'reserve' });
+		expect(
+			(
+				await call(
+					app,
+					'/v1/recordings',
+					authenticated('POST', { job: 'other' }, signed),
+				)
+			).status,
+		).toBe(422);
+		expect(
+			(
+				await call(
+					app,
+					'/v1/recordings',
+					authenticated('POST', { job: 'job' }, signed),
+				)
+			).status,
+		).toBe(202);
+		expect(
+			(
+				await call(
+					app,
+					'/v1/recordings',
+					authenticated('POST', { job: 'job' }, signed),
+				)
+			).status,
+		).toBe(401);
+		expect(
+			(
+				await call(
+					app,
+					'/v1/recordings/job',
+					authenticated('GET', undefined, token({ operation: 'reserve' })),
+				)
+			).status,
+		).toBe(401);
+	});
+
+	it('rejects body protocol errors before consuming a command nonce', async () => {
+		const signed = token({ jti: 'protocol-retry', operation: 'reserve' });
+		for (const body of [
+			{ job: 'job' },
+			{ protocol_version: 2, job: 'job' },
+			{ protocol_version: 1, job: 'job', unknown: true },
+		]) {
+			const response = await call(app, '/v1/recordings', {
+				method: 'POST',
+				headers: {
+					Authorization: `Bearer ${signed}`,
+					'Content-Type': 'application/json',
+				},
+				body: JSON.stringify(body),
+			});
+			expect(response.status).toBe(422);
+		}
+		expect(
+			(
+				await call(
+					app,
+					'/v1/recordings',
+					authenticated('POST', { job: 'job' }, signed),
+				)
+			).status,
+		).toBe(202);
+	});
+
+	it('protects metrics independently', async () => {
+		expect((await call(app, '/metrics')).status).toBe(401);
+		const response = await call(app, '/metrics', {
+			headers: { Authorization: `Bearer ${config.metricsToken}` },
+		});
+		expect(response.status).toBe(200);
+		expect(await response.text()).toContain('recorder_capacity 1');
+	});
+
+	it('does not log signed identifiers, grants, or tokens', async () => {
+		const signed = token();
+		await call(
+			app,
+			'/v1/recordings',
+			authenticated('POST', { job: 'job' }, signed),
+		);
+		const output = JSON.stringify(logs);
+		expect(output).not.toContain('room');
+		expect(output).not.toContain('recording');
+		expect(output).not.toContain('"job":"job"');
+		expect(output).not.toContain(signed);
+	});
+});

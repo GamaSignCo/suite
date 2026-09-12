@@ -5,7 +5,7 @@
 				<template #icon><Mail class="h-5 w-5" /></template>
 				<template #actions>
 					<Button :label="__('Retry Now')" @click="retry.submit()" />
-					<Dropdown :options="dropdownOptions" :button="{ icon: 'more-horizontal' }" />
+					<Dropdown :options="dropdownOptions" :button="{ icon: 'lucide-more-horizontal' }" />
 				</template>
 			</DashboardDetailHeader>
 			<div class="grid grid-cols-1 gap-5 lg:grid-cols-2">
@@ -27,7 +27,7 @@
 					</div>
 				</DashboardCard>
 
-				<DashboardCard :title="__('Recipients')" :button-label="__('Add')" @action="showAddRecipient = true">
+				<DashboardCard :title="__('Recipients')">
 					<div class="flex flex-col">
 						<template v-if="data.recipients.length">
 							<div
@@ -65,7 +65,6 @@
 		:message="data"
 		@reload="message.reload()"
 	/>
-	<AddQueuedRecipientModal v-model="showAddRecipient" :message-id="messageId" @reload="message.reload()" />
 	<EditQueuedRecipientModal
 		v-model="showEditRecipient"
 		:message-id="messageId"
@@ -73,12 +72,12 @@
 		:options="options"
 		@reload="message.reload()"
 	/>
-	<Dialog v-model="showCancel" :options="cancelDialogOptions" />
-	<Dialog v-model="showSource" :options="{ title: __('Message Source'), size: '4xl' }">
-		<template #body-content>
+	<Dialog v-model:open="showCancel" v-bind="cancelDialogOptions" />
+	<Dialog v-model:open="showSource" v-bind="{ title: __('Message Source'), size: '4xl' }">
+		<template #default>
 			<pre
 				v-if="source.data"
-				class="bg-surface-gray-2 max-h-[70vh] overflow-auto rounded p-4 text-xs whitespace-pre-wrap"
+				class="bg-surface-gray-2 max-h-[70vh] overflow-auto rounded-4 p-4 text-xs whitespace-pre-wrap"
 				>{{ source.data.source }}</pre
 			>
 			<div v-else class="flex justify-center py-6">
@@ -89,17 +88,11 @@
 </template>
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { appPageMeta } from '@/utils/documentTitle'
 import { useRouter } from 'vue-router'
 import {
-	Badge,
-	Button,
-	Dialog,
-	Dropdown,
-	FeatherIcon,
-	LoadingIndicator,
-	createResource,
-	usePageMeta,
-} from 'frappe-ui'
+	Badge, Button, Dialog, Dropdown, LoadingIndicator, createResource, usePageMeta } from 'frappe-ui'
+import { Icon as FeatherIcon } from 'frappe-ui/experimental'
 
 import Mail from '~icons/lucide/mail'
 
@@ -109,7 +102,6 @@ import DashboardLayout from '@/apps/mail/components/DashboardLayout.vue'
 import DashboardCard from '@/apps/mail/components/DashboardCard.vue'
 import DashboardDetailHeader from '@/apps/mail/components/DashboardDetailHeader.vue'
 import InformationField from '@/apps/mail/components/InformationField.vue'
-import AddQueuedRecipientModal from '@/apps/mail/components/Modals/AddQueuedRecipientModal.vue'
 import EditQueuedRecipientModal from '@/apps/mail/components/Modals/EditQueuedRecipientModal.vue'
 import EditQueuedMessageModal from '@/apps/mail/components/Modals/EditQueuedMessageModal.vue'
 
@@ -139,10 +131,9 @@ type MessageData = {
 const { messageId } = defineProps<{ messageId: string }>()
 const router = useRouter()
 
-usePageMeta(() => ({ title: __('Queued Message') }))
+usePageMeta(() => appPageMeta(__('Queued Message'), 'Mail'))
 
 const showEditMessage = ref(false)
-const showAddRecipient = ref(false)
 const showEditRecipient = ref(false)
 const showCancel = ref(false)
 const showSource = ref(false)
@@ -228,7 +219,7 @@ const removeRecipient = (email: string) =>
 		makeParams: () => ({ message_id: messageId, email }),
 		onSuccess: () => {
 			message.reload()
-			raiseToast(__('Recipient removed.'))
+			raiseToast(__('Delivery to the recipient canceled.'))
 		},
 		onError: (error: { messages?: string[] }) =>
 			raiseToast(error.messages?.[0] || __('Request failed.'), 'error'),
@@ -247,7 +238,7 @@ const cancel = createResource({
 const cancelDialogOptions = computed(() => ({
 	title: __('Cancel Message'),
 	message: __('Cancel (delete) this queued message? This cannot be undone.'),
-	icon: { name: 'alert-triangle', appearance: 'warning' },
+	icon: { name: 'lucide-alert-triangle', theme: 'amber' },
 	actions: [{ label: __('Confirm'), variant: 'solid', theme: 'red', onClick: cancel.submit }],
 }))
 
@@ -256,11 +247,11 @@ const dropdownOptions = computed(() => {
 	if (data.value?.has_content) {
 		items.push({
 			label: __('View Source'),
-			icon: 'file-text',
+			icon: 'lucide-file-text',
 			onClick: () => ((showSource.value = true), source.fetch()),
 		})
 	}
-	items.push({ label: __('Cancel'), icon: 'trash-2', onClick: () => (showCancel.value = true) })
-	return [{ group: '', items }]
+	items.push({ label: __('Cancel'), icon: 'lucide-trash-2', onClick: () => (showCancel.value = true) })
+	return [{ group: '', options: items }]
 })
 </script>

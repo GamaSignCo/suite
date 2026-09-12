@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+	declaresFixedPalette,
 	isArtDirected,
 	mapColorToken,
 	normalizeToLightScheme,
@@ -99,6 +100,20 @@ describe('mapColorToken', () => {
 		expect(r).toBeGreaterThan(g)
 		expect(r).toBeGreaterThan(b)
 		expect(luma(banner)).toBeLessThan(0.35)
+	})
+
+	it('keeps visible borders visible — light hairlines land in the hairline band', () => {
+		// A #e5e7eb table divider reads clearly on white; pure bg inversion would
+		// land it a whisker above the canvas, invisible in the compressed dark.
+		const divider = mapColorToken('#e5e7eb', 'border')!
+		expect(luma(divider)).toBeGreaterThan(luma(mapColorToken('#e5e7eb', 'bg')!) + 0.05)
+		expect(luma(divider)).toBeLessThan(0.35)
+	})
+
+	it('keeps invisible spacer borders invisible — near-white tracks pure inversion', () => {
+		// border: 1px solid #fff on a white surface is a spacing hack, not a
+		// divider; flooring it would draw a grid the author never had.
+		expect(mapColorToken('#ffffff', 'border')).toBe('#171717')
 	})
 
 	it('preserves alpha and skips fully transparent colors', () => {
@@ -234,6 +249,148 @@ describe('remapEmailForDarkMode', () => {
 		expect(luma(card.match(/(?:^|;)\s*color:\s*([^;]+)/)![1])).toBeGreaterThan(0.6)
 	})
 
+	it('counts sheet-defined surfaces in the walk — a classed white card inside a textured wrapper remaps', () => {
+		// The Twilio receipt: dark textured wrapper, a white card whose background
+		// is a <style> class, and a textured footer. The card is the text's real
+		// surface — walking past it (inline-only walk) pinned authored-dark text
+		// onto the card that the sheet remap had just turned dark.
+		const doc = parseDoc(`
+			<style>
+				.card { background-color: #ffffff; }
+				.foot { background: #eeeeee url(https://cdn.example.com/texture.png); }
+			</style>
+			<div style="background: #242424 url(https://cdn.example.com/dark-texture.png);">
+				<div class="card"><p style="color: #414141;">We charged your card.</p></div>
+				<div class="foot"><p style="color: #414141;">This system email was sent to you.</p></div>
+			</div>
+		`)
+		remapEmailForDarkMode(doc)
+		const [card, foot] = Array.from(doc.querySelectorAll('p'))
+		// Card text follows the remap — its sheet-defined surface remaps with it…
+		expect(luma(card!.getAttribute('style')!.match(/color:\s*([^;]+)/)![1])).toBeGreaterThan(0.6)
+		// …while footer text stays authored: its surface is an unremappable texture.
+		expect(foot!.getAttribute('style')).toContain('color: #414141;')
+	})
+
+	it('a later rule or inline style repainting the surface strips the image classification', () => {
+		// Cascade order matters: `background: #fff` after an image hero, or a
+		// `background-image: none` reset, means no image actually paints — text
+		// there must follow the remap, not stay pinned authored-dark.
+		const doc = parseDoc(`
+			<style>
+				.hero { background: url(https://cdn.example.com/hero.jpg); }
+				.hero { background: #ffffff; }
+				.banner { background-image: url(https://cdn.example.com/banner.jpg); }
+				.banner { background-image: none; }
+			</style>
+			<div class="hero"><p style="color: #444444;">repainted</p></div>
+			<div class="banner" style="background-color: #ffffff;"><p style="color: #444444;">reset</p></div>
+			<div class="hero" style="background: #ffffff;"><p style="color: #444444;">inline repaint</p></div>
+		`)
+		remapEmailForDarkMode(doc)
+		doc.querySelectorAll('p').forEach((p) => {
+			expect(luma(p.getAttribute('style')!.match(/color:\s*([^;]+)/)![1])).toBeGreaterThan(0.6)
+		})
+	})
+
+	it('classifies surfaces through the cascade — specificity and !important, not just source order', () => {
+		const doc = parseDoc(`
+			<style>
+				div.hero { background-image: url(https://cdn.example.com/hero.jpg); }
+				.hero { background-image: none; }
+				.banner { background-image: url(https://cdn.example.com/banner.jpg) !important; }
+				.banner { background: #ffffff; }
+			</style>
+			<div class="hero"><p style="color: #444444;">image wins on specificity</p></div>
+			<div class="banner" style="background: #ffffff;"><p style="color: #444444;">image wins on importance</p></div>
+		`)
+		remapEmailForDarkMode(doc)
+		// Both surfaces keep their image despite later/inline repaints, so both
+		// texts stay authored.
+		doc.querySelectorAll('p').forEach((p) => {
+			expect(p.getAttribute('style')).toContain('color: #444444;')
+		})
+	})
+
+	it('weighs functional pseudo-classes per spec — :not() carries its argument, :where() nothing', () => {
+		// div:not(#promo) is id-weight (1,0,1): the later class-pile reset must
+		// lose to it. :where(#promo) .side is class-weight only (0,0,0)+(0,1,0):
+		// the plain-class reset that follows wins there.
+		const doc = parseDoc(`
+			<style>
+				div:not(#promo) { background-image: url(https://cdn.example.com/hero.jpg); }
+				.card.wide.padded { background-image: none; }
+				:where(#promo) .side { background-image: url(https://cdn.example.com/side.jpg); }
+				.side { background-image: none; }
+			</style>
+			<div class="card wide padded"><p style="color: #444444;">not() carries the id</p></div>
+			<section id="promo"><span class="side"><p style="color: #444444;">where() weighs nothing</p></span></section>
+		`)
+		remapEmailForDarkMode(doc)
+		const [heroText, sideText] = Array.from(doc.querySelectorAll('p'))
+		expect(heroText!.getAttribute('style')).toContain('color: #444444;')
+		expect(luma(sideText!.getAttribute('style')!.match(/color:\s*([^;]+)/)![1])).toBeGreaterThan(0.6)
+	})
+
+	it('a later inline shorthand reset beats an earlier inline url', () => {
+		// The style attribute is itself a cascade: the shorthand that follows the
+		// url declaration resets the image layer, so no image paints and the text
+		// must follow the remap.
+		const doc = parseDoc(`
+			<div style="background-image: url(https://cdn.example.com/tex.png); background: #ffffff;">
+				<p style="color: #444444;">reset within the attribute</p>
+			</div>
+		`)
+		remapEmailForDarkMode(doc)
+		const text = doc.querySelector('p')!.getAttribute('style')!
+		expect(luma(text.match(/color:\s*([^;]+)/)![1])).toBeGreaterThan(0.6)
+	})
+
+	it('a sheet !important image reset beats a non-important inline url', () => {
+		// The browser paints no image here: the sheet's !important none wins over
+		// the inline url, so the surface is its (remapped) color and the text
+		// must follow the remap.
+		const doc = parseDoc(`
+			<style>.stripped { background-image: none !important; }</style>
+			<div class="stripped" style="background: #ffffff url(https://cdn.example.com/tex.png);">
+				<p style="color: #444444;">no image painted</p>
+			</div>
+		`)
+		remapEmailForDarkMode(doc)
+		const text = doc.querySelector('p')!.getAttribute('style')!
+		expect(luma(text.match(/color:\s*([^;]+)/)![1])).toBeGreaterThan(0.6)
+	})
+
+	it('an inline !important repaint beats a sheet !important image', () => {
+		// The style attribute wins at equal importance: the browser paints white,
+		// the remap turns it dark, so the text must follow the remap.
+		const doc = parseDoc(`
+			<style>.banner { background-image: url(https://cdn.example.com/banner.jpg) !important; }</style>
+			<div class="banner" style="background: #ffffff !important;">
+				<p style="color: #444444;">painted over</p>
+			</div>
+		`)
+		remapEmailForDarkMode(doc)
+		const text = doc.querySelector('p')!.getAttribute('style')!
+		expect(luma(text.match(/color:\s*([^;]+)/)![1])).toBeGreaterThan(0.6)
+	})
+
+	it('splits selector lists on top-level commas only — functional arguments keep theirs', () => {
+		// Naive comma splitting turns `.hero:not(.a, .b), .strip` into invalid
+		// fragments and silently drops both surfaces.
+		const doc = parseDoc(`
+			<style>
+				.hero:not(.plain, .quiet), .strip { background-image: url(https://cdn.example.com/hero.jpg); }
+			</style>
+			<div class="hero"><p style="color: #444444;">on the hero image</p></div>
+			<div class="strip"><p style="color: #444444;">on the strip image</p></div>
+		`)
+		remapEmailForDarkMode(doc)
+		doc.querySelectorAll('p').forEach((p) => {
+			expect(p.getAttribute('style')).toContain('color: #444444;')
+		})
+	})
+
 	it('pins inherited text color onto an image surface explicitly', () => {
 		// The wrapper's literal gets remapped light for the rest of the email; the
 		// image surface must keep an authored copy for the text inheriting into it.
@@ -329,6 +486,34 @@ describe('normalizeToLightScheme', () => {
 		)
 		normalizeToLightScheme(doc)
 		expect(doc.querySelector('style')).toBeNull()
+	})
+})
+
+describe('declaresFixedPalette', () => {
+	it('detects the opt-out suite\'s own templates carry', () => {
+		expect(declaresFixedPalette(parseDoc('<body data-fixed-palette><p>hi</p></body>'))).toBe(true)
+	})
+
+	it('is not implied by a light-only color-scheme declaration', () => {
+		// Near every email declares this; honoring it would disable the remap inbox-wide.
+		const doc = parseDoc('<meta name="color-scheme" content="light"><p>hi</p>')
+		expect(declaresFixedPalette(doc)).toBe(false)
+	})
+
+	it('leaves the achromatic card of an event invite alone', () => {
+		// The shape of suite/templates/emails/_event_base.html: every background is
+		// achromatic, so the art-direction heuristic reads it as plain mail and would
+		// remap it. The attribute is what keeps it in its authored palette.
+		const invite = `
+			<body data-fixed-palette style="background-color: #f3f3f3">
+				<table width="100%" style="background-color: #f3f3f3"><tr><td>
+					<table style="max-width: 600px"><tr>
+						<td style="background-color: #ffffff">Onsite sprint</td>
+					</tr></table>
+				</td></tr></table>
+			</body>`
+		expect(isArtDirected(parseDoc(invite))).toBe(false)
+		expect(declaresFixedPalette(parseDoc(invite))).toBe(true)
 	})
 })
 

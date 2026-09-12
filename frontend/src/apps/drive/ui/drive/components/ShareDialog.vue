@@ -1,12 +1,14 @@
 <template>
   <Dialog v-model:open="open" size="lg">
     <template #title>
-      <div class="text-2xl-semibold text-ink-gray-8 flex text-nowrap overflow-hidden">
-        Sharing "
-        <div class="truncate max-w-[80%]">
-          {{ file?.file_name }}
+      <div class="grid grid-cols-[minmax(0,1fr)] pr-3">
+        <div class="text-xl-semibold text-ink-gray-8 flex text-nowrap overflow-hidden">
+          Sharing "
+          <div class="truncate min-w-0">
+            {{ file?.file_name }}
+          </div>
+          "
         </div>
-        "
       </div>
     </template>
     <template #default>
@@ -16,11 +18,11 @@
           <div class="mb-2 text-ink-gray-5 text-sm">General access</div>
           <div class="flex items-start justify-between gap-2">
             <div class="flex flex-col items-start gap-2">
-              <Select v-model="generalAccessLevel" variant="outline" :options="levelOptions" @update:model-value="
+              <Select v-model="generalAccessLevel" variant="outline" :options="levelOptions" :disabled="!generalAccessLoaded" @update:model-value="
                 (val) => updateGeneralAccess(val, generalPerms)
               " />
             </div>
-            <AccessSelect v-if="generalAccessLevel !== 'restricted'" v-model="generalPerms" variant="outline" :options="accessOptions"
+            <AccessSelect v-if="generalAccessLevel !== 'restricted'" v-model="generalPerms" variant="outline" :options="accessOptions" :disabled="!generalAccessLoaded"
               @update:model-value="
                 (val) => updateGeneralAccess(generalAccessLevel, val)
               " />
@@ -28,7 +30,7 @@
         </div>
         <!-- Members section -->
         <div class="text-ink-gray-5 text-sm mb-2">Members</div>
-        <div class="flex items-start gap-2 rounded bg-surface-white p-1.5 ring-1 ring-outline-gray-2 mb-4">
+        <div class="flex items-start gap-2 rounded-4 bg-surface-base p-1.5 ring-1 ring-outline-gray-2 mb-4">
           <TagInput autofocus v-model="usersToAdd" v-model:options="filteredUsers" class="flex-1 min-w-0" :render-icon="(k) =>
             k.is_group
               ? h(LucideUsers, { class: 'size-3.5 text-ink-gray-6' })
@@ -79,10 +81,10 @@
           <div v-for="i in 3" :key="i" class="flex items-center gap-3 pr-1">
             <Skeleton class="size-10 rounded-full shrink-0" />
             <div class="flex flex-col gap-1.5 flex-1">
-              <Skeleton class="h-3.5 rounded w-28" />
-              <Skeleton class="h-3 rounded w-36" />
+              <Skeleton class="h-3.5 rounded-4 w-28" />
+              <Skeleton class="h-3 rounded-4 w-36" />
             </div>
-            <Skeleton class="ml-auto h-7 w-20 rounded" />
+            <Skeleton class="ml-auto h-7 w-20 rounded-4" />
           </div>
         </div>
         <!-- match the card's pb-6 so the footer is vertically centered -->
@@ -104,7 +106,8 @@ import {
   Dialog,
   Select,
   Skeleton,
-  useCall,
+  createResource,
+  toast,
   Button,
 } from 'frappe-ui'
 import AccessSelect from './AccessSelect.vue'
@@ -142,7 +145,7 @@ const levelOptions = [
     icon: 'lucide-lock',
   },
   {
-    label: 'Accessible to all site users',
+    label: 'Accessible to organization',
     value: 'site',
     icon: 'lucide-building-2',
   },
@@ -181,29 +184,27 @@ const accessOptions = computed(() =>
 // cover all logged-in site users; restricted writes explicit deny rows.
 const generalAccessLevel = ref(levelOptions[0].value)
 const generalPerms = ref('reader')
+const generalAccessLoaded = ref(false)
 
-let generalParams = {}
-const getGeneralAccess = useCall({
-  url: '/api/v2/method/suite.drive.api.permissions.get_user_access',
-  immediate: false,
-  onSuccess: (data) => {
-    if (!data || !data.read) {
-      if (generalParams.user === 'Guest') fetchGeneralAccess({ user: '$GENERAL' })
-      return
+createResource({
+  url: 'suite.drive.api.permissions.get_general_access',
+  params: { entity: props.file.name },
+  auto: true,
+  onSuccess(data) {
+    generalAccessLevel.value = data.type
+    if (data.read) {
+      generalPerms.value = data.write
+        ? 'editor'
+        : data.upload
+          ? 'upload'
+          : 'reader'
     }
-    generalAccessLevel.value = generalParams.user === 'Guest' ? 'public' : 'site'
-    generalPerms.value = data.write
-      ? 'editor'
-      : data.upload
-        ? 'upload'
-        : 'reader'
+    generalAccessLoaded.value = true
+  },
+  onError(error) {
+    toast.error(error.messages?.at(-1) || 'Could not load general access.')
   },
 })
-const fetchGeneralAccess = (params) => {
-  generalParams = params
-  getGeneralAccess.submit({ entity: props.file.name, ...params })
-}
-fetchGeneralAccess({ user: 'Guest' })
 const updateGeneralAccess = (level, perms) => {
   if (level !== 'restricted') {
     props.updateAccess.submit({

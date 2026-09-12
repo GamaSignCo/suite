@@ -5,6 +5,9 @@
 # style(slides): convert service-worker.js to tab indentation
 6ed2aa9d8881c18ce4d581e20ca18eae8ad512ed
 
+# refactor: re-indent shell components to 2-space
+394f9d2d391a1ff86435e89c6a9cabed73e43d40
+
 # style: format the tree with ruff
 9ce1d354ccb0f4cdeeba16b21a1be46a934740e3
 
