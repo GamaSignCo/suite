@@ -9,6 +9,8 @@ from frappe.tests import IntegrationTestCase
 
 from suite.meet.doctype.meet_recording.meet_recording import get_permission_query_conditions, has_permission
 
+IGNORE_TEST_RECORD_DEPENDENCIES = ["User"]
+
 
 class TestMeetRecording(IntegrationTestCase):
     def test_recording_policy_defaults_off(self):

@@ -10,7 +10,7 @@ from suite.mail.utils.user import DEFAULT_UNDO_SEND_PERIOD, get_undo_send_period
 # link-field test record dependencies are recursively loaded
 # Use these module variables to add/remove to/from that list
 EXTRA_TEST_RECORD_DEPENDENCIES = []  # eg. ["User"]
-IGNORE_TEST_RECORD_DEPENDENCIES = []  # eg. ["User"]
+IGNORE_TEST_RECORD_DEPENDENCIES = ["User"]
 
 
 class IntegrationTestUserSettings(IntegrationTestCase):

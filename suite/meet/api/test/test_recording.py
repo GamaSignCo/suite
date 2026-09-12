@@ -6,7 +6,7 @@ import json
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import frappe
 import jwt
@@ -473,14 +473,19 @@ class IntegrationTestRecordingApi(IntegrationTestCase):
                 result = process_upload(recording.name)
                 self.assertEqual(process_upload(recording.name), result)
 
-            enqueue.assert_called_once_with(
-                process_upload,
-                recording_name=recording.name,
-                queue="long",
-                timeout=6 * 60 * 60 + 5 * 60,
-                enqueue_after_commit=True,
-                job_id=f"meet-recording-upload::{recording.name}",
-                deduplicate=True,
+            self.assertEqual(
+                enqueue.call_args_list.count(
+                    call(
+                        process_upload,
+                        recording_name=recording.name,
+                        queue="long",
+                        timeout=6 * 60 * 60 + 5 * 60,
+                        enqueue_after_commit=True,
+                        job_id=f"meet-recording-upload::{recording.name}",
+                        deduplicate=True,
+                    )
+                ),
+                1,
             )
             self.assertEqual(publish_state.call_count, 1)
             self.assertEqual(publish_state.call_args.args[1].status, "Ready")
