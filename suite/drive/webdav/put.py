@@ -205,11 +205,24 @@ def _create(ctx: DavContext, resolved, scratch: Path, size: int, sha256: str) ->
     # of the transfer window, so an S3-sized upload never stalls a concurrent
     # PUT's rollup.
     if manager.s3_enabled:
-        generation = _stage_s3_generation(manager, blob, scratch, get_s3_key(blob.file_url), replaces=None)
+        generation = _stage_s3_generation(
+            manager,
+            blob,
+            scratch,
+            get_s3_key(blob.file_url),
+            replaces=None,
+            after_promote=lambda: _run_after_upload_hooks(drive_file.name, sha256),
+        )
         drive_file.file_url = get_s3_url(generation)
         drive_file.save()
     else:
-        _stage_disk_swap(scratch, _Compensation(drive_file, undo, repair), manager, blob)
+        _stage_disk_swap(
+            scratch,
+            _Compensation(drive_file, undo, repair),
+            manager,
+            blob,
+            after_promote=lambda: _run_after_upload_hooks(drive_file.name, sha256),
+        )
     stamped = {"content_hash": sha256}
     if (client_mtime := _client_mtime_datetime(ctx)) is not None:
         # not via create_drive_file: its fromtimestamp() reads the epoch in the
@@ -288,7 +301,13 @@ def _overwrite(ctx: DavContext, row: frappe._dict, scratch: Path, size: int, sha
     # bytes without touching the target. Staging before the row writes also
     # keeps their row locks out of the transfer window, so an S3-sized upload
     # never stalls a concurrent PUT's rollup.
-    new_file_url = _stage_blob_swap(manager, doc, scratch, _Compensation(doc, undo, repair, revoke))
+    new_file_url = _stage_blob_swap(
+        manager,
+        doc,
+        scratch,
+        _Compensation(doc, undo, repair, revoke),
+        after_promote=lambda: _run_after_upload_hooks(doc.name, sha256),
+    )
 
     stamped = {
         "file_size": size,
@@ -308,7 +327,14 @@ def _overwrite(ctx: DavContext, row: frappe._dict, scratch: Path, size: int, sha
     return _response(ctx, 204, row.name, sha256)
 
 
-def _stage_blob_swap(manager, doc, scratch: Path, compensation: _Compensation) -> str | None:
+def _stage_blob_swap(
+    manager,
+    doc,
+    scratch: Path,
+    compensation: _Compensation,
+    after_promote=None,
+    expects_existing=True,
+) -> str | None:
     """Stage the new bytes for the commit-time swap. Returns the new file_url
     when they land under a new storage key (an S3 generation), or None when
     the target path itself is swapped in place at commit (disk). The
@@ -318,15 +344,37 @@ def _stage_blob_swap(manager, doc, scratch: Path, compensation: _Compensation) -
         # storage_key, not get_s3_key: an existing row's file_url is the
         # rewritten fetch url, which only storage_key resolves to the object key
         key = storage_key(doc.file_url)
-        return get_s3_url(_stage_s3_generation(manager, doc, scratch, key, replaces=key))
+        return get_s3_url(
+            _stage_s3_generation(
+                manager,
+                doc,
+                scratch,
+                key,
+                replaces=key,
+                after_promote=after_promote,
+            )
+        )
     if manager.s3_enabled:
         # a framework-adopted blob lives on the site disk even under S3; swap
         # it in place — upload_file would write the new body to a stray S3 key
         # that GET (which serves on-disk blobs directly) never reads back. No
         # thumbnail either, matching the native path for adopted blobs.
-        _stage_disk_swap(scratch, compensation, manager, expects_existing=True)
+        _stage_disk_swap(
+            scratch,
+            compensation,
+            manager,
+            expects_existing=expects_existing,
+            after_promote=after_promote,
+        )
     else:
-        _stage_disk_swap(scratch, compensation, manager, doc, expects_existing=True)
+        _stage_disk_swap(
+            scratch,
+            compensation,
+            manager,
+            doc,
+            expects_existing=expects_existing,
+            after_promote=after_promote,
+        )
     return None
 
 
@@ -345,7 +393,12 @@ def _pending_swap_dir(manager) -> Path:
 
 
 def _stage_disk_swap(
-    scratch: Path, compensation: _Compensation, manager, doc=None, expects_existing=False
+    scratch: Path,
+    compensation: _Compensation,
+    manager,
+    doc=None,
+    expects_existing=False,
+    after_promote=None,
 ) -> None:
     """Rename the spooled body into the pending store now (one filesystem —
     the site files tree — end to end, the assumption upload_file's rename
@@ -419,6 +472,8 @@ def _stage_disk_swap(
             _queue_swap_settlement(compensation.stamped, placed)
         if doc is not None and manager.can_create_thumbnail(doc):
             _enqueue_thumbnail(manager, doc, str(placed))
+        if after_promote is not None:
+            after_promote()
 
     frappe.db.after_commit.add(swap)
     frappe.db.after_rollback.add(lambda: staged.unlink(missing_ok=True))
@@ -585,7 +640,9 @@ def _swap_state(name: str) -> frappe._dict | None:
 _GENERATION_SUFFIX = re.compile(r"\.[0-9a-f]{12}\.putgen$")
 
 
-def _stage_s3_generation(manager, doc, scratch: Path, key: str, replaces: str | None) -> str:
+def _stage_s3_generation(
+    manager, doc, scratch: Path, key: str, replaces: str | None, after_promote=None
+) -> str:
     """Upload the body to a fresh generation key now — the fallible network
     transfer happens entirely inside the transaction — and let the commit that
     publishes the new metadata publish file_url pointing at it in the same
@@ -607,6 +664,8 @@ def _stage_s3_generation(manager, doc, scratch: Path, key: str, replaces: str | 
             _discard_object(manager, replaces)
         if thumb_source is not None:
             _enqueue_thumbnail(manager, doc, str(thumb_source), discard_source=thumb_source)
+        if after_promote is not None:
+            after_promote()
 
     def discard():
         if thumb_source is not None:
@@ -926,6 +985,14 @@ def _run_upload_validators(scratch: Path, file_name: str, parent: str) -> None:
             result = frappe.call(check, file=wrapper, parent=parent, embed=0)
             if result is not None and result is not True:
                 raise Forbidden(str(result) or "This upload was cancelled by a validation check.")
+
+
+def _run_after_upload_hooks(file_name: str, content_hash: str) -> None:
+    for hook in frappe.get_hooks("after_drive_webdav_upload"):
+        try:
+            frappe.call(hook, file_name=file_name, content_hash=content_hash)
+        except Exception:
+            _file_log(f"File {file_name}: WebDAV post-upload hook {hook} failed\n{frappe.get_traceback()}")
 
 
 def _detect_mime(ctx: DavContext, scratch: Path) -> str:

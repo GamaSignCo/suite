@@ -59,12 +59,6 @@ def save_sheet(
     Drive folder the new sheet's backing File should land in, passed through
     to ``Sheet.after_insert``.
     """
-    if name and request_id:
-        frappe.has_permission("Sheet", doc=name, ptype="write", throw=True)
-        completed_seq = frappe.db.get_value("Sheet Op Log", {"sheet": name, "request_id": request_id}, "seq")
-        if completed_seq is not None:
-            return {"name": name, "head_seq": int(completed_seq)}
-
     plain = _validate_payload(sheets_data)
     clean_title = _clean_title(title)
     encoded = encode_sheets_data(plain)
@@ -116,7 +110,18 @@ def _update_existing(
     ops_list: list[dict],
     request_id: str | None = None,
 ) -> tuple[str, int]:
+    seq_mod.lock(name)
     frappe.has_permission("Sheet", doc=name, ptype="write", throw=True)
+    if request_id:
+        completed_seq = frappe.db.get_value(
+            "Sheet Op Log",
+            {"sheet": name, "request_id": request_id},
+            "seq",
+            for_update=True,
+        )
+        if completed_seq is not None:
+            return name, int(completed_seq)
+
     # Cheap PK read so the rare rename path (below) only runs on an actual title
     # change, not on every autosave.
     old_title = frappe.db.get_value("Sheet", name, "title")

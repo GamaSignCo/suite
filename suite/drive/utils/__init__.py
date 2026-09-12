@@ -564,13 +564,15 @@ def apply_file_size_delta(folder, delta):
     update_file_size's per-ancestor read-modify-write save silently loses
     concurrent deltas (the TimestampMismatchError its api/files.py call site
     swallows with a TODO); an in-place SQL delta serializes on the row locks
-    instead, so simultaneous uploads all land. Bumps modified the way the
-    save-based walk did — a folder's WebDAV getlastmodified reads it."""
+    instead, so simultaneous uploads all land. Locking reads refresh a stale
+    transaction snapshot and serialize chains that converge on a shared root.
+    Bumps modified the way the save-based walk did — a folder's WebDAV
+    getlastmodified reads it."""
     names = []
     cursor = folder
     while cursor and cursor not in names:  # `not in` guards a corrupt cycle
         names.append(cursor)
-        cursor = frappe.db.get_value("File", cursor, "folder")
+        cursor = frappe.db.get_value("File", cursor, "folder", for_update=True)
     if not names:
         return
     file_table = frappe.qb.DocType("File")
