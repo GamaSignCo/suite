@@ -2095,8 +2095,16 @@ class TestWebDAVPutS3(IntegrationTestCase):
         # failure between the upload and the commit (here the thumbnail
         # source rename) otherwise strands an unreferenced object forever
         from unittest.mock import patch
+        import os
 
-        with patch("os.rename", side_effect=OSError), self.assertRaises(OSError):
+        rename = os.rename
+
+        def fail_thumbnail_rename(source, destination):
+            if str(destination).endswith(".thumbsrc"):
+                raise OSError("Thumbnail source promotion failed")
+            return rename(source, destination)
+
+        with patch("os.rename", side_effect=fail_thumbnail_rename), self.assertRaises(OSError):
             self._put(f"/dav/Home/{self.base_name}/pixel.png", PIXEL_PNG)
 
         frappe.db.rollback()  # what dispatch does on any handler exception

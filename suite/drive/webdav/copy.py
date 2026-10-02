@@ -16,7 +16,12 @@ from werkzeug.wrappers import Response
 
 from suite.drive.api.files import toggle_entity_status
 from suite.drive.api.permissions import user_has_permission
-from suite.drive.api.storage import acquire_owner_storage_lock, validate_quota
+from suite.drive.api.storage import (
+    acquire_owner_storage_lock,
+    personal_storage_owner,
+    subtree_bytes,
+    validate_quota,
+)
 from suite.drive.utils import apply_file_size_delta, create_drive_file, generate_upward_path
 from suite.drive.utils.files import FileManager, get_s3_key, get_s3_url, storage_key
 from suite.drive.webdav import pathmap, perms
@@ -65,15 +70,16 @@ def handle(ctx: DavContext) -> Response:
         locks.drop_locks_under(destination.entity.name)
         overwrote = True
 
-    acquire_owner_storage_lock(ctx.user)
+    if quota_owner := personal_storage_owner(dest_parent.name):
+        acquire_owner_storage_lock(quota_owner)
     with quota_guard():
         # a fresh subtree sum, not the best-effort (and driftable) folder
         # rollup; a Depth:0 collection copy carries no members
         if source.entity.is_folder:
-            incoming = _subtree_bytes(source.entity.name) if depth != "0" else 0
+            incoming = subtree_bytes(source.entity.name) if depth != "0" else 0
         else:
             incoming = source.entity.file_size or 0
-        validate_quota(incoming_size=incoming)
+        validate_quota(incoming_size=incoming, folder=dest_parent.name)
 
     recurse = depth != "0"
     copier = _Copier(
@@ -131,6 +137,8 @@ class _Copier:
         if node.get("content_hash"):
             target.db_set("content_hash", node.content_hash, update_modified=False)
         self._copy_dead_props(node.name, target.name)
+        for hook in frappe.get_hooks("after_drive_webdav_copy"):
+            frappe.call(hook, file_name=target.name, content_hash=target.content_hash)
         return node.file_size or 0
 
     def _copy_folder(self, node: frappe._dict, new_parent: frappe._dict, new_name: str) -> int:
@@ -170,23 +178,6 @@ class _Copier:
                 self.manager.delete_file(blob)
             except Exception:
                 pass
-
-
-def _subtree_bytes(root_name: str) -> int:
-    """Total bytes of every active file under (and including) a node — an
-    authoritative figure for the quota pre-check, unlike the folder rollup."""
-    rows = frappe.db.sql(
-        """WITH RECURSIVE subtree AS (
-            SELECT `name`, is_folder, file_size FROM `tabFile` WHERE `name` = %(root)s
-        UNION ALL
-            SELECT f.`name`, f.is_folder, f.file_size
-            FROM `tabFile` f JOIN subtree s ON f.folder = s.`name`
-            WHERE f.status = 'Active'
-        )
-        SELECT COALESCE(SUM(file_size), 0) FROM subtree WHERE is_folder = 0""",
-        values={"root": root_name},
-    )
-    return int(rows[0][0] or 0)
 
 
 def _max_copy_items() -> int:

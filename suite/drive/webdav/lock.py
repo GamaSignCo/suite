@@ -14,7 +14,7 @@ from werkzeug.wrappers import Response
 
 from suite.drive.api.files import get_upload_path
 from suite.drive.api.permissions import user_has_permission
-from suite.drive.api.storage import acquire_owner_storage_lock, validate_quota
+from suite.drive.api.storage import acquire_owner_storage_lock, personal_storage_owner, validate_quota
 from suite.drive.utils import create_drive_file, get_ancestors_of
 from suite.drive.webdav import locks, pathmap, perms
 from suite.drive.webdav.context import DavContext
@@ -199,9 +199,10 @@ def _create_empty_resource(ctx: DavContext, resolved: pathmap.ResolvedPath) -> f
 
     # mirror put._create's storage gate: an over-quota user must not mint new
     # File rows through the lock-null create path either
-    acquire_owner_storage_lock(ctx.user)
+    if quota_owner := personal_storage_owner(parent.name):
+        acquire_owner_storage_lock(quota_owner)
     with quota_guard():
-        validate_quota(incoming_size=0)
+        validate_quota(incoming_size=0, folder=parent.name)
 
     manager = ctx.manager
     scratch = get_upload_path(f"webdav_{frappe.generate_hash(length=12)}_lock")

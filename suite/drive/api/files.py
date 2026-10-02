@@ -17,7 +17,11 @@ from werkzeug.utils import secure_filename, send_file
 from werkzeug.wrappers import Response
 from werkzeug.wsgi import wrap_file
 
-from suite.drive.api.storage import acquire_owner_storage_lock, validate_quota
+from suite.drive.api.storage import (
+    acquire_owner_storage_lock,
+    personal_storage_owner,
+    validate_quota,
+)
 from suite.drive.utils import (
     ATTACHMENT_CONTENT_DOCTYPE,
     STATUS_ACTIVE,
@@ -101,9 +105,10 @@ def upload_file(
 
     # Validate that file size is matching
     file_size = temp_path.stat().st_size
-    acquire_owner_storage_lock(frappe.session.user)
+    if quota_owner := personal_storage_owner(parent):
+        acquire_owner_storage_lock(quota_owner)
     try:
-        validate_quota(incoming_size=file_size)
+        validate_quota(incoming_size=file_size, folder=parent)
     except Exception:
         temp_path.unlink(missing_ok=True)
         raise
@@ -696,14 +701,15 @@ def toggle_entity_status(doc, manager: FileManager, locked_owners: set):
     frappe.db.get_value("File", doc.name, "name", for_update=True)
     if not user_has_permission(doc, "write"):
         raise frappe.PermissionError("You do not have permission to remove this file")
-    if doc.owner not in locked_owners:
-        acquire_owner_storage_lock(doc.owner)
-        locked_owners.add(doc.owner)
+    quota_owner = personal_storage_owner(doc.folder)
+    if quota_owner and quota_owner not in locked_owners:
+        acquire_owner_storage_lock(quota_owner)
+        locked_owners.add(quota_owner)
     if doc.status == STATUS_ACTIVE:
         flag = STATUS_TRASHED
         manager.move_to_trash(doc)
     else:
-        validate_quota(doc.owner, doc.file_size)
+        validate_quota(incoming_size=doc.file_size, folder=doc.folder)
         # A trashed name is free — get_new_file_name only counts Active siblings —
         # so something may have taken it. Restoring onto it would overwrite the
         # newcomer's blob, or, for a folder, land inside it.

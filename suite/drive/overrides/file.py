@@ -291,13 +291,26 @@ class File(FrappeFile):
         """
         Move file to a new folder.
         """
+        from suite.drive.api.storage import (
+            acquire_owner_storage_lock,
+            personal_storage_owner,
+            subtree_bytes,
+            validate_quota,
+        )
+
+        new_parent = new_parent or get_user_folder().name
+        if not user_has_permission(new_parent, "upload") or not user_has_permission(self, "write"):
+            frappe.throw("You don't have permission to move this file.", frappe.PermissionError)
+        old_quota_owner = personal_storage_owner(self.folder)
+        new_quota_owner = personal_storage_owner(new_parent)
+        if new_quota_owner and new_quota_owner != old_quota_owner:
+            acquire_owner_storage_lock(new_quota_owner)
         # Row lock BEFORE any disk transfer: WebDAV promotion and settlement
         # serialize on this lock, and a relocation whose disk op ran outside
         # it was observable mid-flight — old bytes already carried while the
         # row still pointed at the source (see webdav/put.py). Lock order
         # stays globally consistent: row first, folder rollups after.
         frappe.db.get_value("File", self.name, "name", for_update=True)
-        new_parent = new_parent or get_user_folder().name
 
         if new_parent == self.name:
             frappe.throw(
@@ -316,6 +329,11 @@ class File(FrappeFile):
             frappe.throw(
                 "Cannot move into itself",
                 ValueError,
+            )
+        if new_quota_owner and new_quota_owner != old_quota_owner:
+            validate_quota(
+                incoming_size=subtree_bytes(self.name) if self.is_folder else self.file_size or 0,
+                folder=new_parent,
             )
 
         # Sanctioned rename: move() owns the disk move below, so let validate
