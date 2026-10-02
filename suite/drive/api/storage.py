@@ -2,11 +2,20 @@ import frappe
 from frappe import _
 from pypika import functions as fn
 
-from suite.drive.utils import STATUS_ACTIVE
+from suite.drive.utils import USERS_FOLDER
 
 MEGA_BYTE = 1024**2
-DriveFile = frappe.qb.DocType("File")
 DriveStorageReservation = frappe.qb.DocType("Drive Storage Reservation")
+
+PERSONAL_TREE = """WITH RECURSIVE personal_tree AS (
+    SELECT name, folder, is_folder, file_name, file_type, file_size, owner
+    FROM `tabFile` WHERE name = %(home)s AND status = 'Active'
+    UNION ALL
+    SELECT child.name, child.folder, child.is_folder, child.file_name,
+        child.file_type, child.file_size, child.owner
+    FROM `tabFile` child JOIN personal_tree parent ON child.folder = parent.name
+    WHERE child.status = 'Active'
+)"""
 
 
 def acquire_owner_storage_lock(owner: str):
@@ -39,39 +48,93 @@ def get_quota(user: str | None = None):
     return (quota or 0) * MEGA_BYTE
 
 
+def personal_storage_owner(folder: str | None) -> str | None:
+    """The account whose private Home contains this folder; shared Drive has none."""
+    if not folder:
+        return None
+    path = frappe.db.sql(
+        """WITH RECURSIVE ancestors AS (
+            SELECT name, folder FROM `tabFile` WHERE name = %(folder)s
+            UNION ALL
+            SELECT parent.name, parent.folder
+            FROM `tabFile` parent JOIN ancestors child ON parent.name = child.folder
+        ) SELECT name FROM ancestors""",
+        {"folder": folder},
+        as_list=True,
+    )
+    if len(path) < 2 or path[-1][0] != USERS_FOLDER:
+        return None
+    home = path[-2][0]
+    return frappe.db.get_value("Drive Settings", {"user_folder": home}, "name") or frappe.db.get_value(
+        "File", home, "owner"
+    )
+
+
+def _personal_used_bytes(user: str) -> int:
+    home = frappe.db.get_value("Drive Settings", user, "user_folder")
+    if not home:
+        return 0
+    return int(
+        frappe.db.sql(
+            PERSONAL_TREE
+            + " SELECT COALESCE(SUM(file_size), 0) FROM personal_tree WHERE is_folder = 0",
+            {"home": home},
+        )[0][0]
+        or 0
+    )
+
+
+def subtree_bytes(root_name: str) -> int:
+    """Count active descendants from the rows, not a potentially stale folder rollup."""
+    return int(
+        frappe.db.sql(
+            """WITH RECURSIVE subtree AS (
+                SELECT name, is_folder, file_size FROM `tabFile` WHERE name = %(root)s
+                UNION ALL
+                SELECT child.name, child.is_folder, child.file_size
+                FROM `tabFile` child JOIN subtree parent ON child.folder = parent.name
+                WHERE child.status = 'Active'
+            ) SELECT COALESCE(SUM(file_size), 0) FROM subtree WHERE is_folder = 0""",
+            {"root": root_name},
+        )[0][0]
+        or 0
+    )
+
+
 @frappe.whitelist()
 def storage_breakdown():
-    limit = get_quota()
-    filters = {
-        "is_folder": False,
-        "status": STATUS_ACTIVE,
-        "owner": frappe.session.user,
-    }
-    if limit:
-        filters["file_size"] = [">=", limit / 200]
+    user = frappe.session.user
+    limit = get_quota(user)
+    home = frappe.db.get_value("Drive Settings", user, "user_folder")
+    if not home:
+        return {"limit": limit, "total": [], "entities": []}
 
-    entities = frappe.db.get_list(
-        "File",
-        filters=filters,
-        order_by="file_size desc",
-        fields=["name", "file_name", "owner", "file_size", "file_type"],
+    values = {"home": home, "minimum": limit / 200 if limit else 0}
+    totals = frappe.db.sql(
+        PERSONAL_TREE
+        + " SELECT file_type, SUM(file_size) AS file_size FROM personal_tree"
+        " WHERE is_folder = 0 GROUP BY file_type",
+        values,
+        as_dict=True,
     )
-
-    query = (
-        frappe.qb.from_(DriveFile)
-        .select(DriveFile.file_type, fn.Sum(DriveFile.file_size).as_("file_size"))
-        .where(
-            (DriveFile.is_folder == 0)
-            & (DriveFile.status == STATUS_ACTIVE)
-            & (DriveFile.owner == frappe.session.user)
+    names = frappe.db.sql(
+        PERSONAL_TREE
+        + " SELECT name FROM personal_tree WHERE is_folder = 0 AND file_size >= %(minimum)s"
+        " ORDER BY file_size DESC LIMIT 20",
+        values,
+        pluck=True,
+    )
+    entities = (
+        frappe.db.get_list(
+            "File",
+            filters={"name": ["in", names]},
+            order_by="file_size desc",
+            fields=["name", "file_name", "owner", "file_size", "file_type"],
         )
+        if names
+        else []
     )
-
-    return {
-        "limit": limit,
-        "total": query.groupby(DriveFile.file_type).run(as_dict=True),
-        "entities": entities,
-    }
+    return {"limit": limit, "total": totals, "entities": entities}
 
 
 @frappe.whitelist()
@@ -81,12 +144,7 @@ def storage_bar_data():
 
 def get_storage_usage(user: str | None = None):
     user = user or frappe.session.user
-    query = (
-        frappe.qb.from_(DriveFile)
-        .where((DriveFile.is_folder == 0) & (DriveFile.owner == user) & (DriveFile.status == STATUS_ACTIVE))
-        .select(fn.Coalesce(fn.Sum(DriveFile.file_size), 0).as_("total_size"))
-    )
-    result = query.run(as_dict=True)[0]
+    result = {"total_size": _personal_used_bytes(user)}
     reserved = (
         frappe.qb.from_(DriveStorageReservation)
         .select(fn.Coalesce(fn.Sum(DriveStorageReservation.reserved_bytes), 0))
@@ -98,8 +156,12 @@ def get_storage_usage(user: str | None = None):
     return result
 
 
-def validate_quota(user: str | None = None, incoming_size: int = 0):
-    """Throw if adding `incoming_size` bytes would push the user past their quota."""
+def validate_quota(user: str | None = None, incoming_size: int = 0, *, folder: str | None = None):
+    """Only private Home writes consume quota; unscoped reservations still use their owner."""
+    if folder is not None:
+        user = personal_storage_owner(folder)
+        if user is None:
+            return
     usage = get_storage_usage(user)
     if usage["limit"] and (usage["limit"] - usage["total_size"]) < incoming_size:
         frappe.throw(_("You're out of storage!"), ValueError)

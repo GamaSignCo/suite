@@ -28,7 +28,12 @@ from werkzeug.wrappers import Response
 from suite.drive.api.activity import create_new_activity_log
 from suite.drive.api.files import get_upload_path
 from suite.drive.api.permissions import user_has_permission
-from suite.drive.api.storage import acquire_owner_storage_lock, get_storage_usage, validate_quota
+from suite.drive.api.storage import (
+    acquire_owner_storage_lock,
+    get_storage_usage,
+    personal_storage_owner,
+    validate_quota,
+)
 from suite.drive.utils import (
     STATUS_ACTIVE,
     STATUS_TRASHED,
@@ -82,7 +87,7 @@ def handle(ctx: DavContext) -> Response:
             raise Forbidden("Ask the folder owner for upload access.")
         if ctx.had_trailing_slash:
             raise Conflict("Cannot PUT to a collection URL.")
-        owner, existing = ctx.user, 0
+        quota_owner, existing = personal_storage_owner(resolved.parent.name), 0
     else:
         if not perms.resolve_entity_access(row, ctx.user)["read"]:
             raise NotFoundError("Resource not found.")
@@ -90,7 +95,7 @@ def handle(ctx: DavContext) -> Response:
             raise MethodNotAllowed("Cannot PUT to a collection.")
         if not user_has_permission(row.name, "write"):
             raise Forbidden("You cannot overwrite this file.")
-        owner, existing = row.owner, row.file_size or 0
+        quota_owner, existing = personal_storage_owner(row.folder), row.file_size or 0
 
     evaluate_preconditions(ctx.request, row)
 
@@ -101,7 +106,7 @@ def handle(ctx: DavContext) -> Response:
     else:
         locks.enforce(ctx, membership_parent=resolved.parent.name)
 
-    ceiling = _size_ceiling(owner, existing)
+    ceiling = _size_ceiling(quota_owner, existing)
     length = ctx.request.content_length
     if ceiling is not None and length and length > ceiling:
         raise InsufficientStorage("Upload exceeds available storage.")
@@ -129,15 +134,16 @@ def handle(ctx: DavContext) -> Response:
         scratch.unlink(missing_ok=True)
 
 
-def _size_ceiling(owner: str, existing_size: int) -> int | None:
+def _size_ceiling(owner: str | None, existing_size: int) -> int | None:
     """Largest body this PUT may spool to disk, or None when unbounded. Bounds
     the scratch write by the owner's remaining quota (an overwrite reclaims the
     existing blob) and an optional absolute site cap, so a client can never
     spool far past what could ever be stored."""
     ceilings = []
-    usage = get_storage_usage(owner)
-    if usage["limit"]:
-        ceilings.append(max(0, usage["limit"] - usage["total_size"]) + (existing_size or 0))
+    if owner:
+        usage = get_storage_usage(owner)
+        if usage["limit"]:
+            ceilings.append(max(0, usage["limit"] - usage["total_size"]) + (existing_size or 0))
     hard = frappe.conf.get("drive_webdav_max_upload_size")
     if hard:
         ceilings.append(int(hard))
@@ -152,9 +158,10 @@ def _create(ctx: DavContext, resolved, scratch: Path, size: int, sha256: str) ->
     pathmap.validate_dav_name(name, parent)
     _run_upload_validators(scratch, name, parent.name)
 
-    acquire_owner_storage_lock(ctx.user)
+    if quota_owner := personal_storage_owner(parent.name):
+        acquire_owner_storage_lock(quota_owner)
     with quota_guard():
-        validate_quota(incoming_size=size)
+        validate_quota(incoming_size=size, folder=parent.name)
 
     mime_type = _detect_mime(ctx, scratch)
     manager = ctx.manager
@@ -237,9 +244,9 @@ def _overwrite(ctx: DavContext, row: frappe._dict, scratch: Path, size: int, sha
     # write permission was already verified in handle(), before the body spool
     _run_upload_validators(scratch, row.file_name, row.folder)
 
-    # quota stays with the existing owner — an Office save must not shift
-    # ownership or billing to whoever pressed Ctrl+S
-    acquire_owner_storage_lock(row.owner)
+    # A shared document keeps its owner, but only private Home uses a quota.
+    if quota_owner := personal_storage_owner(row.folder):
+        acquire_owner_storage_lock(quota_owner)
     # a locking read, past MVCC: a concurrent PUT that just committed a new
     # generation key (or size) is visible here, so the swap replaces — and
     # later reaps — the key the row actually points at, not a resolve-time
@@ -247,7 +254,7 @@ def _overwrite(ctx: DavContext, row: frappe._dict, scratch: Path, size: int, sha
     doc = frappe.get_doc("File", row.name, for_update=True)
     delta = size - (doc.file_size or 0)
     with quota_guard():
-        validate_quota(row.owner, max(0, delta))
+        validate_quota(incoming_size=max(0, delta), folder=doc.folder)
 
     mime_type = _detect_mime(ctx, scratch)
     manager = ctx.manager
