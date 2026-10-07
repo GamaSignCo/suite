@@ -5,11 +5,16 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import frappe
+from frappe.sessions import clear_sessions
 from frappe.tests import IntegrationTestCase
 
 from suite.suite_core.patches.remove_desk_access_from_suite_roles import execute
 
 SUITE_ROLES = ("Suite User", "Suite Admin")
+
+
+class Interrupted(Exception):
+    """The migrate died."""
 
 
 def make_user(*roles: str) -> str:
@@ -39,6 +44,19 @@ def has_session(user: str) -> bool:
 
 def user_type(user: str) -> str:
     return frappe.db.get_value("User", user, "user_type")
+
+
+def interrupted_after(users: int):
+    """Stand-in for the patch's `clear_sessions`: it logs `users` users out, then the migrate dies."""
+
+    def clear_sessions_until_interrupted(**kwargs) -> None:
+        nonlocal users
+        if not users:
+            raise Interrupted
+        users -= 1
+        clear_sessions(**kwargs)
+
+    return clear_sessions_until_interrupted
 
 
 class RemoveDeskAccessFromSuiteRoles(IntegrationTestCase):
@@ -88,6 +106,21 @@ class RemoveDeskAccessFromSuiteRoles(IntegrationTestCase):
         execute()
 
         self.assertFalse(has_session(member))
+
+    def test_retry_finishes_a_run_that_stopped_midway(self) -> None:
+        # Logging a user out commits, so whatever the run did before it died is kept.
+        members = [make_user(), make_user()]
+        for member in members:
+            start_session(member)
+
+        patch_path = "suite.suite_core.patches.remove_desk_access_from_suite_roles.clear_sessions"
+        with patch(patch_path, side_effect=interrupted_after(users=1)):
+            self.assertRaises(Interrupted, execute)
+        execute()
+
+        for member in members:
+            self.assertEqual(user_type(member), "Website User")
+            self.assertFalse(has_session(member))
 
     def test_administrator_stays_a_system_user(self) -> None:
         execute()

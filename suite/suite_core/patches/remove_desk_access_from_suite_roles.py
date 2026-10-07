@@ -12,8 +12,8 @@ def execute() -> None:
     ones therefore becomes a Website User.
 
     The role fixture carries the same change, but fixtures sync after patches, and Frappe
-    then re-evaluates every holder with a full ``User.save``. Doing it here first, in bulk,
-    leaves that sync nothing to re-evaluate.
+    then re-evaluates every holder with a full ``User.save``. Doing it here first, without
+    loading the documents, leaves that sync nothing to re-evaluate.
 
     Sessions remember the ``user_type`` they were started with and Desk trusts it, so the
     demoted users are logged out, exactly as Frappe does when a save changes the type.
@@ -21,13 +21,23 @@ def execute() -> None:
 
     frappe.db.set_value("Role", {"name": ("in", ROLES)}, "desk_access", 0, update_modified=False)
 
-    users = system_users_without_desk_access()
-    if not users:
-        return
+    for user in system_users_without_desk_access():
+        demote(user)
 
-    frappe.db.set_value("User", {"name": ("in", users)}, "user_type", "Website User", update_modified=False)
-    for user in users:
-        clear_sessions(user=user, force=True)
+
+def demote(user: str) -> None:
+    """Log the user out, then make them a Website User, in that order.
+
+    Frappe commits as it deletes each session, and a run that stops midway is finished by
+    the next one, which looks only at users still typed System User. Demoting first would
+    leave a user the run never reached demoted and still logged in, for no later run to find.
+
+    The type is committed at once, so that signing back in cannot start another Desk session.
+    """
+
+    clear_sessions(user=user, force=True)
+    frappe.db.set_value("User", user, "user_type", "Website User", update_modified=False)
+    frappe.db.commit()
 
 
 def system_users_without_desk_access() -> list[str]:
