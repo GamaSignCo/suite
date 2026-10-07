@@ -16,6 +16,10 @@
 			<DashboardCard :title="__('General Information')">
 				<div>
 					<InformationField :label="__('Description')" :value="member.data.description" />
+					<InformationField
+						:label="__('Receiving')"
+						:value="member.data.disable_receiving ? __('Disabled') : __('Enabled')"
+					/>
 					<InformationField :label="__('Created At')" :value="createdAt" />
 				</div>
 			</DashboardCard>
@@ -120,6 +124,7 @@
 		:current-ids="currentMemberIds"
 		@reload="member.reload()"
 	/>
+	<Dialog v-model:open="showToggleReceiving" v-bind="toggleReceivingDialogOptions" />
 	<Dialog v-model:open="showDelete" v-bind="deleteDialogOptions" />
 </template>
 <script setup lang="ts">
@@ -151,6 +156,7 @@ type GroupData = {
 	name: string
 	email: string
 	description?: string
+	disable_receiving: boolean
 	created_at?: string
 	email_addresses: { email: string; description?: string; is_primary: boolean; enabled: boolean }[]
 	members: { id: string; name?: string; email?: string }[]
@@ -167,6 +173,7 @@ const showEdit = ref(false)
 const showEditQuota = ref(false)
 const showAddEmail = ref(false)
 const showAddMembers = ref(false)
+const showToggleReceiving = ref(false)
 const showDelete = ref(false)
 const memberSearch = ref('')
 
@@ -239,6 +246,38 @@ const removeMember = (accountId: string) =>
 			raiseToast(error.messages?.[0] || __('Request failed.'), 'error'),
 	}).submit()
 
+const setReceiving = (enabled: boolean) =>
+	createResource({
+		url: 'suite.mail.api.admin.set_group_receiving_enabled',
+		makeParams: () => ({ group_id: groupId, enabled }),
+		onSuccess: () => {
+			showToggleReceiving.value = false
+			member.reload()
+			raiseToast(enabled ? __('Receiving enabled.') : __('Receiving disabled.'))
+		},
+		onError: (error: { messages?: string[] }) => {
+			showToggleReceiving.value = false
+			raiseToast(error.messages?.[0] || __('Request failed.'), 'error')
+		},
+	}).submit()
+
+const toggleReceivingDialogOptions = computed(() => {
+	const enabling = Boolean(data.value?.disable_receiving)
+	return {
+		title: enabling ? __('Enable Receiving') : __('Disable Receiving'),
+		message: enabling
+			? __(
+					'Are you sure you want to enable receiving for this group? Mail addressed to it will be delivered again.',
+				)
+			: __(
+					'Are you sure you want to disable receiving for this group? Mail addressed to it will bounce back to the sender.',
+				),
+		actions: [
+			{ label: __('Confirm'), variant: 'solid', onClick: () => setReceiving(enabling) },
+		],
+	}
+})
+
 const deleteGroup = createResource({
 	url: 'suite.mail.api.admin.delete_groups',
 	makeParams: () => ({ ids: [groupId] }),
@@ -260,7 +299,20 @@ const deleteDialogOptions = computed(() => ({
 const dropdownOptions = computed(() => [
 	{
 		group: '',
-		options: [{ label: __('Delete'), icon: 'lucide-trash-2', onClick: () => (showDelete.value = true) }],
+		options: [
+			data.value?.disable_receiving
+				? {
+						label: __('Enable Receiving'),
+						icon: 'lucide-mail-check',
+						onClick: () => (showToggleReceiving.value = true),
+					}
+				: {
+						label: __('Disable Receiving'),
+						icon: 'lucide-mail-x',
+						onClick: () => (showToggleReceiving.value = true),
+					},
+			{ label: __('Delete'), icon: 'lucide-trash-2', onClick: () => (showDelete.value = true) },
+		],
 	},
 ])
 </script>

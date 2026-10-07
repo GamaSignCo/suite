@@ -47,6 +47,14 @@
 						:placeholder="__('Search accounts')"
 					/>
 				</div>
+				<FormControl
+					v-model="disableReceiving"
+					type="checkbox"
+					:label="__('Disable Receiving')"
+					:description="
+						__('The group cannot receive emails. Mail addressed to it bounces back to the sender.')
+					"
+				/>
 				<ErrorMessage
 					:message="domainsError || (addGroup.error && (addGroup.error?.messages?.[0] || addGroup.error?.message || __('Request failed.')))"
 				/>
@@ -73,6 +81,7 @@ const domain = ref('')
 const description = ref('')
 const quotaGb = ref<string | number>('')
 const memberIds = ref<string[]>([])
+const disableReceiving = ref(false)
 
 const { domains, domainsError } = useEnabledDomains(show)
 const picker = useAccountPicker(memberIds)
@@ -86,6 +95,7 @@ watch(show, () => {
 		description.value = ''
 		quotaGb.value = ''
 		memberIds.value = []
+		disableReceiving.value = false
 		picker.reset()
 		addGroup.reset()
 	}
@@ -99,6 +109,7 @@ const addGroup = createResource({
 		description: description.value?.trim() || undefined,
 		members: memberIds.value,
 		quota_gb: quotaGb.value === '' ? null : Number(quotaGb.value),
+		disable_receiving: disableReceiving.value,
 	}),
 	onSuccess: (data: string) => {
 		if (!data) return
