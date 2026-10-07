@@ -169,6 +169,9 @@ watch(show, (open) => {
     pendingRole.value = '0'
     searchQuery.value = ''
     searchResults.value = []
+    // The dialog stays mounted for the whole visit; people may have joined
+    // the site since it was last open.
+    _siteUsers = null
     fetchShares()
     fetchOwnerInfo()
   }
@@ -204,9 +207,9 @@ function _flashError(err) {
 
 const currentUser = useCurrentUser()
 
-// The site's people, for the owner row and the invite autocomplete. They come
-// from Drive's sharing API: core's User doctype is readable only with Desk
-// access, which Suite users don't have.
+// The site's people, for the owner row and the invite autocomplete, fetched
+// once per opening of the dialog. They come from Drive's sharing API: core's
+// User doctype is readable only with Desk access, which Suite users don't have.
 let _siteUsers = null
 function fetchSiteUsers() {
   _siteUsers ??= call('suite.drive.api.product.get_users').catch(() => {
