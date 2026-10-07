@@ -20,6 +20,10 @@
 						:label="__('Role')"
 						:value="member.data.is_admin ? __('Admin') : __('User')"
 					/>
+					<InformationField
+						:label="__('Receiving')"
+						:value="member.data.disable_receiving ? __('Disabled') : __('Enabled')"
+					/>
 					<InformationField :label="__('Locale')" :value="localeLabel(member.data.locale)" />
 					<InformationField :label="__('Time Zone')" :value="member.data.time_zone" />
 					<InformationField :label="__('Last Active')" :value="lastActive" />
@@ -152,6 +156,7 @@
 	</DashboardLayout>
 	<Dialog v-model:open="showResetPassword" v-bind="RESET_PASSWORD_OPTIONS" />
 	<Dialog v-model:open="showToggleEnabled" v-bind="TOGGLE_ENABLED_OPTIONS" />
+	<Dialog v-model:open="showToggleReceiving" v-bind="TOGGLE_RECEIVING_OPTIONS" />
 	<Dialog v-model:open="showDeleteMember" v-bind="DELETE_MEMBER_OPTIONS" />
 	<ChangeAccountPasswordModal v-model="showChangePassword" :member-id="accountId" />
 	<EditAccountModal v-if="data" v-model="showEdit" :member="data" @reload="member.reload()" />
@@ -204,6 +209,7 @@ type MemberData = {
 	joined_on: string
 	enabled: boolean
 	is_admin: boolean
+	disable_receiving: boolean
 	email_addresses: { email: string; description?: string; is_primary: boolean; enabled: boolean }[]
 	groups: { id: string; name: string; email: string }[]
 	mailing_lists: { id: string; name: string; email: string }[]
@@ -221,6 +227,7 @@ const showDeleteMember = ref(false)
 const showResetPassword = ref(false)
 const showChangePassword = ref(false)
 const showToggleEnabled = ref(false)
+const showToggleReceiving = ref(false)
 const showEdit = ref(false)
 const showEditQuota = ref(false)
 const showAddEmail = ref(false)
@@ -341,6 +348,38 @@ const TOGGLE_ENABLED_OPTIONS = computed(() => {
 	}
 })
 
+const setReceiving = (enabled: boolean) =>
+	createResource({
+		url: 'suite.mail.api.admin.set_member_receiving_enabled',
+		makeParams: () => ({ member_id: accountId, enabled }),
+		onSuccess: () => {
+			showToggleReceiving.value = false
+			member.reload()
+			raiseToast(enabled ? __('Receiving enabled.') : __('Receiving disabled.'))
+		},
+		onError: (error: { messages?: string[] }) => {
+			showToggleReceiving.value = false
+			raiseToast(error.messages?.[0] || __('Request failed.'), 'error')
+		},
+	}).submit()
+
+const TOGGLE_RECEIVING_OPTIONS = computed(() => {
+	const enabling = Boolean(data.value?.disable_receiving)
+	return {
+		title: enabling ? __('Enable Receiving') : __('Disable Receiving'),
+		message: enabling
+			? __(
+					'Are you sure you want to enable receiving for this account? Mail addressed to it will be delivered again.',
+				)
+			: __(
+					'Are you sure you want to disable receiving for this account? It can still send emails, but mail addressed to it will bounce back to the sender.',
+				),
+		actions: [
+			{ label: __('Confirm'), variant: 'solid', onClick: () => setReceiving(enabling) },
+		],
+	}
+})
+
 const resetPassword = createResource({
 	url: 'suite.mail.api.account.send_reset_password_link',
 	makeParams: () => ({ user: accountId }),
@@ -410,6 +449,17 @@ const dropdownOptions = computed(() => [
 	{
 		group: '',
 		options: [
+			data.value?.disable_receiving
+				? {
+						label: __('Enable Receiving'),
+						icon: 'lucide-mail-check',
+						onClick: () => (showToggleReceiving.value = true),
+					}
+				: {
+						label: __('Disable Receiving'),
+						icon: 'lucide-mail-x',
+						onClick: () => (showToggleReceiving.value = true),
+					},
 			data.value?.enabled
 				? {
 						label: __('Disable'),
