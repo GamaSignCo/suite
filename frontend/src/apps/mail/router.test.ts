@@ -54,6 +54,12 @@ describe('who reaches the Admin Dashboard', () => {
 	it('an admin without a mailbox has nothing in Mail when it is not', async () => {
 		state.user = { is_jmap_configured: false, is_suite_admin: true, is_suite_cloud_configured: false }
 		expect(await mailGuard(dashboard)).toBe(false)
+		expect(replace).toHaveBeenCalledWith('/suite')
+	})
+
+	it('a System Manager with nothing in Mail is sent to Desk', async () => {
+		state.user = { is_jmap_configured: false, is_system_manager: true, is_suite_cloud_configured: false }
+		expect(await mailGuard(dashboard)).toBe(false)
 		expect(replace).toHaveBeenCalledWith('/desk')
 	})
 })
