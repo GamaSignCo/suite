@@ -170,7 +170,10 @@ watch(show, (open) => {
     searchQuery.value = ''
     searchResults.value = []
     // The dialog stays mounted for the whole visit; people may have joined
-    // the site since it was last open.
+    // the site since it was last open, and a search the last opening left
+    // behind is for a query this one never saw.
+    _opening++
+    clearTimeout(_searchTimer)
     _siteUsers = null
     fetchShares()
     fetchOwnerInfo()
@@ -211,6 +214,7 @@ const currentUser = useCurrentUser()
 // once per opening of the dialog. They come from Drive's sharing API: core's
 // User doctype is readable only with Desk access, which Suite users don't have.
 let _siteUsers = null
+let _opening   = 0    // which opening of the dialog this is
 function fetchSiteUsers() {
   _siteUsers ??= call('suite.drive.api.product.get_users').catch(() => {
     _siteUsers = null
@@ -394,7 +398,11 @@ function onSearchInput(val) {
 }
 
 async function searchUsers(q) {
+  const opening = _opening
   const users = await fetchSiteUsers()
+  // Closed and reopened while the people were loading: these matches would
+  // replace the ones for whatever is being searched now.
+  if (opening !== _opening) return
   const needle = q.toLowerCase()
   // Exclude the owner, existing members and users already staged as chips so
   // the same person can't be added twice.
