@@ -169,6 +169,12 @@ watch(show, (open) => {
     pendingRole.value = '0'
     searchQuery.value = ''
     searchResults.value = []
+    // The dialog stays mounted for the whole visit; people may have joined
+    // the site since it was last open, and a search the last opening left
+    // behind is for a query this one never saw.
+    _opening++
+    clearTimeout(_searchTimer)
+    _siteUsers = null
     fetchShares()
     fetchOwnerInfo()
   }
@@ -204,20 +210,30 @@ function _flashError(err) {
 
 const currentUser = useCurrentUser()
 
+// The site's people, for the owner row and the invite autocomplete, fetched
+// once per opening of the dialog. They come from Drive's sharing API: core's
+// User doctype is readable only with Desk access, which Suite users don't have.
+let _siteUsers = null
+let _opening   = 0    // which opening of the dialog this is
+function fetchSiteUsers() {
+  _siteUsers ??= call('suite.drive.api.product.get_users').catch(() => {
+    _siteUsers = null
+    return []
+  })
+  return _siteUsers
+}
+
 // A read-only member can open this dialog for a sheet they don't own (see the
 // error-banner note above), so the owner is often *not* the current user. When
-// it is, read the name/image from the shared session store; otherwise fetch the
-// owner's User record — the same way the invite autocomplete resolves people —
-// so the owner row shows a real name instead of the raw email.
+// it is, read the name/image from the shared session store; otherwise look the
+// owner up — the same way the invite autocomplete resolves people — so the
+// owner row shows a real name instead of the raw email.
 const ownerInfo = ref(null)   // { full_name, user_image } for a non-self owner
 async function fetchOwnerInfo() {
   ownerInfo.value = null
   if (!props.ownerId || props.ownerId === currentUser.user.value) return
-  try {
-    ownerInfo.value = await call('frappe.client.get_value', {
-      doctype: 'User', filters: props.ownerId, fieldname: ['full_name', 'user_image'],
-    })
-  } catch (_) { /* fall back to the id below */ }
+  const users = await fetchSiteUsers()
+  ownerInfo.value = users.find(u => u.name === props.ownerId) || null
 }
 
 const _ownerIsMe = computed(() => !!props.ownerId && props.ownerId === currentUser.user.value)
@@ -382,31 +398,26 @@ function onSearchInput(val) {
 }
 
 async function searchUsers(q) {
-  try {
-    const rows = await call('frappe.client.get_list', {
-      doctype: 'User',
-      filters: [
-        ['enabled', '=', 1],
-        ['user_type', '=', 'System User'],
-        ['name', '!=', props.ownerId],
-        ['full_name', 'like', `%${q}%`],
-      ],
-      fields: ['name', 'full_name', 'user_image'],
-      limit: 6,
-    })
-    // Exclude both existing members and users already staged as chips so
-    // the same person can't be added twice.
-    const existing = new Set([
-      ...shares.value.map(s => s.user),
-      ...staged.value.map(c => c.user),
-    ])
-    searchResults.value = rows
-      .filter(r => !existing.has(r.name))
-      .map(r => ({
-        ...r,
-        initials: r.full_name.split(' ').map(p => p[0]).join('').slice(0, 2).toUpperCase(),
-      }))
-  } catch (_) { searchResults.value = [] }
+  const opening = _opening
+  const users = await fetchSiteUsers()
+  // Closed and reopened while the people were loading: these matches would
+  // replace the ones for whatever is being searched now.
+  if (opening !== _opening) return
+  const needle = q.toLowerCase()
+  // Exclude the owner, existing members and users already staged as chips so
+  // the same person can't be added twice.
+  const taken = new Set([
+    props.ownerId,
+    ...shares.value.map(s => s.user),
+    ...staged.value.map(c => c.user),
+  ])
+  searchResults.value = users
+    .filter(u => !taken.has(u.name) && (u.full_name || '').toLowerCase().includes(needle))
+    .slice(0, 6)
+    .map(u => ({
+      ...u,
+      initials: u.full_name.split(' ').map(p => p[0]).join('').slice(0, 2).toUpperCase(),
+    }))
 }
 
 // ── chip staging ───────────────────────────────────────────────────────────

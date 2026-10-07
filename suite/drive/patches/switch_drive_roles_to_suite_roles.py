@@ -14,17 +14,20 @@ def execute() -> None:
     """Move existing Drive role assignments onto the shared Suite roles.
 
     Drive access moved from the app-specific "Drive User"/"Drive Admin" roles to
-    the suite-wide "Suite User"/"Suite Admin" roles. Both Drive roles carried desk
-    access, as do the Suite roles now, so holders stay System Users and their
-    ``user_type`` needs no recompute — the assignments are simply swapped. Users
-    currently holding a Drive role gain the matching Suite role (if they don't have
-    it already), then the stale Drive assignments are dropped. The Drive Role docs
-    themselves are left in place; deleting a role cascades through core.
+    the suite-wide "Suite User"/"Suite Admin" roles. Users currently holding a Drive
+    role gain the matching Suite role (if they don't have it already), then the
+    stale Drive assignments are dropped. The Drive Role docs themselves are left in
+    place; deleting a role cascades through core.
+
+    Both Drive roles carried desk access and the Suite roles do not, so a holder
+    with no other desk-access role stops being a System User. The assignments are
+    only swapped here; ``remove_desk_access_from_suite_roles`` recomputes
+    ``user_type`` later in the same migrate.
     """
 
     for suite_role in set(ROLE_MAP.values()):
         if not frappe.db.exists("Role", suite_role):
-            frappe.get_doc({"doctype": "Role", "role_name": suite_role, "desk_access": 1}).insert(
+            frappe.get_doc({"doctype": "Role", "role_name": suite_role, "desk_access": 0}).insert(
                 ignore_permissions=True
             )
 
@@ -48,10 +51,8 @@ def execute() -> None:
 def _grant_suite_roles(users_by_drive_role: dict[str, set[str]]) -> None:
     """Bulk-insert the matching Suite role for each Drive-role holder.
 
-    The Suite roles carry desk access, but every user being migrated already holds
-    a desk-access Drive role and is therefore already a System User, so inserting
-    the child rows directly (rather than via ``User.add_roles``, an N+1 on migrate)
-    does not leave ``user_type`` stale.
+    Inserting the child rows directly avoids the N+1 of ``User.add_roles`` on
+    migrate; it does not recompute ``user_type``, which ``execute`` explains.
 
     Each user's existing roles and max ``idx`` are read once, up front, and the
     per-user ``idx`` is then bumped locally as rows are appended. Doing it in a

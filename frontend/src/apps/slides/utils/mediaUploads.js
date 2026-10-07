@@ -9,6 +9,10 @@ import { SLIDES_MEDIA_PARAM, MEDIA_PROXY_PATH } from './slidesRequests'
 
 const fileUploadHandler = new FileUploadHandler()
 
+// Core's upload_file takes only a short list of file types from users without Desk
+// access, and WebP, SVG and WebM are not on it. Suite's own endpoint has no such list.
+export const MEDIA_UPLOAD_ENDPOINT = '/api/method/suite.mail.api.mail.upload_file'
+
 // these users read a file straight from /private/files; everyone else goes through the proxy
 export const isMediaOwner = (owner, user) => !!user && (owner === user || user === 'Administrator')
 
@@ -39,6 +43,7 @@ const uploadMedia = (file, fileType, target) => {
 				doctype: 'Presentation',
 				docname: presentationId.value,
 				private: true,
+				upload_endpoint: MEDIA_UPLOAD_ENDPOINT,
 			})
 			.then((fileDoc) => performPostUploadActions(fileDoc, fileType, target))
 			.then(resolve)

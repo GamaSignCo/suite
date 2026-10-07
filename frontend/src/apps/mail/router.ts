@@ -78,7 +78,8 @@ export const mailGuard = async (to: RouteLocationNormalized) => {
 	// No mailbox: the dashboard is all Mail has for them, if they may have it.
 	if (!user?.is_jmap_configured) {
 		if (!canAdminister) {
-			window.location.replace('/desk')
+			// Desk is for System Managers; everyone else has the launcher.
+			window.location.replace(user?.is_system_manager ? '/desk' : '/suite')
 			return false
 		}
 		if (to.meta.isDashboard) return
