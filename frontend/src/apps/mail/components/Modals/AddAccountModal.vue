@@ -101,6 +101,14 @@
 					<label class="text-ink-gray-5 block text-xs">{{ __('Mailing Lists') }}</label>
 					<MultiSelect v-model="mailingListIds" :options="mailingListOptions" />
 				</div>
+				<FormControl
+					v-model="accountRequest.disable_receiving"
+					type="checkbox"
+					:label="__('Disable Receiving')"
+					:description="
+						__('The account can send emails but cannot receive them. Mail addressed to it bounces back to the sender.')
+					"
+				/>
 				<hr />
 
 				<Switch
@@ -188,6 +196,7 @@ const defaultAccountRequest = {
 	backup_email: '',
 	// Blank hands the choice to the server, which falls back to the configured default.
 	quota_gb: '',
+	disable_receiving: false,
 	first_name: '',
 	last_name: '',
 	password: '',
