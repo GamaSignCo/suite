@@ -294,6 +294,75 @@ class TestGroupsAndLists(SuiteCloudTestCase):
         admin.delete_groups([group])
         self.assertEqual(admin.get_groups(), {"items": [], "total": 0})
 
+    def test_a_group_can_be_kept_from_receiving_and_let_receive_again(self) -> None:
+        quiet = admin.add_group("noreply", DOMAIN, disable_receiving=True)
+        self.assertTrue(self.fake.groups[quiet]["disable_receiving"])
+        self.assertTrue(admin.get_group(quiet)["disable_receiving"])
+        # Nobody's group stops receiving unasked.
+        sales = admin.add_group("sales", DOMAIN)
+        self.assertFalse(self.fake.groups[sales]["disable_receiving"])
+        self.assertFalse(admin.get_group(sales)["disable_receiving"])
+
+        admin.set_group_receiving_enabled(sales, False)
+        self.assertTrue(self.fake.groups[sales]["disable_receiving"])
+        self.assertTrue(admin.get_group(sales)["disable_receiving"])
+        admin.set_group_receiving_enabled(sales, True)
+        self.assertFalse(self.fake.groups[sales]["disable_receiving"])
+        self.assertFalse(admin.get_group(sales)["disable_receiving"])
+
+    def test_only_an_admin_changes_a_groups_receiving(self) -> None:
+        sales = admin.add_group("sales", DOMAIN)
+        email = "suite-user@backup.test"
+        frappe.delete_doc("User", email, force=True, ignore_permissions=True, ignore_missing=True)
+        self.addCleanup(
+            frappe.delete_doc, "User", email, force=True, ignore_permissions=True, ignore_missing=True
+        )
+        frappe.get_doc(
+            {
+                "doctype": "User",
+                "email": email,
+                "first_name": "Suite",
+                "send_welcome_email": 0,
+                "roles": [{"role": "Suite User"}],
+            }
+        ).insert(ignore_permissions=True)
+        frappe.set_user(email)
+        self.addCleanup(frappe.set_user, "Administrator")
+
+        self.assertRaises(frappe.PermissionError, admin.set_group_receiving_enabled, sales, False)
+        self.assertFalse(self.fake.groups[sales]["disable_receiving"])
+
+    def test_a_suite_cloud_that_ignores_the_option_leaves_no_receiving_group(self) -> None:
+        create_group, update_group = self.fake.groups__create_group, self.fake.groups__update_group
+
+        def create_as_before_the_option(email, disable_receiving=None, **params):
+            return create_group(email, **params)
+
+        def update_as_before_the_option(email, disable_receiving=None, **changes):
+            return update_group(email, **changes)
+
+        with patch.object(self.fake, "groups__create_group", create_as_before_the_option):
+            self.assertRaisesRegex(
+                frappe.ValidationError,
+                "Suite Cloud cannot create",
+                admin.add_group,
+                "noreply",
+                DOMAIN,
+                disable_receiving=True,
+            )
+        # The admin asked for an address that takes no mail; an ordinary group is not that.
+        self.assertNotIn(f"noreply@{DOMAIN}", self.fake.groups)
+
+        sales = admin.add_group("sales", DOMAIN)
+        with patch.object(self.fake, "groups__update_group", update_as_before_the_option):
+            self.assertRaisesRegex(
+                frappe.ValidationError,
+                "Suite Cloud cannot change",
+                admin.set_group_receiving_enabled,
+                sales,
+                False,
+            )
+
     def test_member_endpoints_refuse_targets_that_are_not_members(self) -> None:
         # Administrator is never a mail member; the alias and membership endpoints must say so
         # before doing anything, like the rest of the member API.
@@ -470,6 +539,113 @@ class TestMembers(SuiteCloudTestCase):
             )
         frappe.local.request_cache.clear()
         self.assertEqual(self.fake.accounts[f"dave@{DOMAIN}"]["disk_quota_gb"], 7)
+
+    def test_an_account_can_be_created_unable_to_receive(self) -> None:
+        for username, disable_receiving in (("noreply", True), ("heidi", False)):
+            admin.add_member(
+                username,
+                DOMAIN,
+                is_admin=False,
+                send_invite=False,
+                backup_email=f"{username}@backup.test",
+                first_name=username.title(),
+                password="a-strong-password-9",
+                disable_receiving=disable_receiving,
+            )
+        self.assertTrue(self.fake.accounts[f"noreply@{DOMAIN}"]["disable_receiving"])
+        # Nobody loses their incoming mail unasked.
+        self.assertFalse(self.fake.accounts[f"heidi@{DOMAIN}"]["disable_receiving"])
+
+    def test_an_invited_account_is_still_unable_to_receive_once_the_invite_is_accepted(self) -> None:
+        from suite.mail.api import account as account_api
+
+        email = f"ivan@{DOMAIN}"
+        with patch("frappe.sendmail"):
+            admin.add_member(
+                "ivan",
+                DOMAIN,
+                is_admin=False,
+                send_invite=True,
+                backup_email="ivan@backup.test",
+                disable_receiving=True,
+            )
+        self.assertNotIn(email, self.fake.accounts)  # nothing exists until the invite is accepted
+
+        request_key = frappe.db.get_value("Mail Account Request", {"account": email}, "request_key")
+        account_api.create_account(request_key, "Ivan", "Doe", "a-strong-password-9")
+        self.assertTrue(self.fake.accounts[email]["disable_receiving"])
+
+    def test_a_suite_cloud_that_ignores_the_option_does_not_leave_a_receiving_mailbox(self) -> None:
+        def create_as_before_the_option(email, password, disable_receiving=None, **kwargs):
+            return self.fake.accounts__create_account(email, password, **kwargs)
+
+        with patch(
+            "suite.mail.doctype.mail_account_request.mail_account_request.create_account",
+            side_effect=create_as_before_the_option,
+        ):
+            self.assertRaisesRegex(
+                frappe.ValidationError,
+                "Failed to create the mail account",
+                admin.add_member,
+                "judy",
+                DOMAIN,
+                is_admin=False,
+                send_invite=False,
+                backup_email="judy@backup.test",
+                first_name="Judy",
+                password="a-strong-password-9",
+                disable_receiving=True,
+            )
+        # The admin asked for an address that takes no mail; an ordinary mailbox is not that.
+        self.assertNotIn(f"judy@{DOMAIN}", self.fake.accounts)
+        self.assertFalse(frappe.db.exists("User", f"judy@{DOMAIN}"))
+
+    def _add_carol(self) -> None:
+        admin.add_member(
+            "carol",
+            DOMAIN,
+            is_admin=False,
+            send_invite=False,
+            backup_email="carol@backup.test",
+            first_name="Carol",
+            password="a-strong-password-9",
+        )
+
+    def test_an_admin_stops_and_restores_a_members_receiving(self) -> None:
+        self._add_carol()
+        self.assertFalse(admin.get_member(self.email)["disable_receiving"])
+
+        admin.set_member_receiving_enabled(self.email, False)
+        self.assertTrue(self.fake.accounts[self.email]["disable_receiving"])
+        self.assertTrue(admin.get_member(self.email)["disable_receiving"])
+
+        admin.set_member_receiving_enabled(self.email, True)
+        self.assertFalse(self.fake.accounts[self.email]["disable_receiving"])
+        self.assertFalse(admin.get_member(self.email)["disable_receiving"])
+
+    def test_a_member_cannot_change_their_own_receiving(self) -> None:
+        self._add_carol()
+        frappe.set_user(self.email)
+        self.addCleanup(frappe.set_user, "Administrator")
+
+        self.assertRaises(frappe.PermissionError, admin.set_member_receiving_enabled, self.email, False)
+        self.assertFalse(self.fake.accounts[self.email]["disable_receiving"])
+
+    def test_a_suite_cloud_that_ignores_the_option_is_not_reported_as_changed(self) -> None:
+        self._add_carol()
+        update_account = self.fake.accounts__update_account
+
+        def update_as_before_the_option(email, disable_receiving=None, **changes):
+            return update_account(email, **changes)
+
+        with patch.object(self.fake, "accounts__update_account", update_as_before_the_option):
+            self.assertRaisesRegex(
+                frappe.ValidationError,
+                "Suite Cloud cannot change",
+                admin.set_member_receiving_enabled,
+                self.email,
+                False,
+            )
 
     def test_member_lifecycle_through_suite_cloud(self) -> None:
         admin.add_member(

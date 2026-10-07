@@ -47,6 +47,16 @@
 						:placeholder="__('Search accounts')"
 					/>
 				</div>
+				<hr />
+
+				<Switch
+					v-model="disableReceiving"
+					:label="__('Disable Receiving')"
+					:description="
+						__('The group cannot receive emails. Mail addressed to it bounces back to the sender.')
+					"
+					class="hover:!bg-surface-base !cursor-default !p-0"
+				/>
 				<ErrorMessage
 					:message="domainsError || (addGroup.error && (addGroup.error?.messages?.[0] || addGroup.error?.message || __('Request failed.')))"
 				/>
@@ -58,7 +68,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { Dialog, ErrorMessage, FormControl, MultiSelect, createResource } from 'frappe-ui'
+import { Dialog, ErrorMessage, FormControl, MultiSelect, Switch, createResource } from 'frappe-ui'
 
 import { useEnabledDomains } from '@/apps/mail/composables/useEnabledDomains'
 import { raiseToast } from '@/apps/mail/utils'
@@ -73,6 +83,7 @@ const domain = ref('')
 const description = ref('')
 const quotaGb = ref<string | number>('')
 const memberIds = ref<string[]>([])
+const disableReceiving = ref(false)
 
 const { domains, domainsError } = useEnabledDomains(show)
 const picker = useAccountPicker(memberIds)
@@ -86,6 +97,7 @@ watch(show, () => {
 		description.value = ''
 		quotaGb.value = ''
 		memberIds.value = []
+		disableReceiving.value = false
 		picker.reset()
 		addGroup.reset()
 	}
@@ -99,6 +111,7 @@ const addGroup = createResource({
 		description: description.value?.trim() || undefined,
 		members: memberIds.value,
 		quota_gb: quotaGb.value === '' ? null : Number(quotaGb.value),
+		disable_receiving: disableReceiving.value,
 	}),
 	onSuccess: (data: string) => {
 		if (!data) return

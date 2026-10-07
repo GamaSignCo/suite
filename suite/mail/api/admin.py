@@ -606,6 +606,7 @@ def add_member(
     quota_gb: float | None = None,
     locale: str | None = None,
     time_zone: str | None = None,
+    disable_receiving: bool = False,
 ) -> None:
     """Creates a member, right away or by invitation.
 
@@ -613,6 +614,7 @@ def add_member(
     full email addresses attached to the same account. ``groups`` and ``mailing_lists`` are the
     addresses of groups and lists the account joins once it is created — right away when invites
     are off, on verification otherwise. ``quota_gb`` unset means Suite Cloud's default for the site.
+    ``disable_receiving`` makes the account send-only: mail addressed to it bounces back.
 
     ``locale`` and ``time_zone``, like the name and password, only apply when the account is created
     right away; an invited member picks their own on the setup form.
@@ -627,6 +629,7 @@ def add_member(
     if quota_gb is not None and flt(quota_gb) > 0:
         account_request.quota_gb = flt(quota_gb)
     account_request.is_admin = cint(is_admin)
+    account_request.disable_receiving = cint(disable_receiving)
     account_request.invited_by = frappe.session.user
     account_request.backup_email = backup_email
     account_request.send_invite = cint(send_invite)
@@ -817,6 +820,7 @@ def get_member(member_id: str) -> dict:
         "quota": _build_quota_usage(0, 0),
         "locale": None,
         "time_zone": None,
+        "disable_receiving": False,
     }
 
     email = get_account_email(member_id)
@@ -828,6 +832,7 @@ def get_member(member_id: str) -> dict:
         account = get_client().call("mail.accounts.get_account", email=email)
         result["locale"] = account.get("locale")
         result["time_zone"] = account.get("time_zone")
+        result["disable_receiving"] = bool(account.get("disable_receiving"))
         result["email_addresses"] = _email_addresses(
             account["email"], account.get("display_name"), account.get("aliases") or []
         )
@@ -997,6 +1002,32 @@ def update_member(
         get_client().call("mail.accounts.update_account", email=email, **changes)
 
 
+# --- receiving (accounts and groups alike) ----------------------------------------------------------
+
+_RECEIVING_CALLS = {"accounts": "update_account", "groups": "update_group"}
+
+
+def _set_receiving_enabled(kind: str, email_id: str, enabled: bool) -> None:
+    updated = get_client().call(
+        f"mail.{kind}.{_RECEIVING_CALLS[kind]}", email=email_id, disable_receiving=not enabled
+    )
+    if bool(updated.get("disable_receiving")) == enabled:
+        # A Suite Cloud older than the option drops it unseen and answers as if all went well.
+        frappe.throw(_("Suite Cloud cannot change whether an address receives mail yet."))
+
+
+@frappe.whitelist(methods=["POST"])
+def set_member_receiving_enabled(member_id: str, enabled: bool) -> None:
+    """Lets the member's mailbox receive mail again, or makes it send-only: mail addressed to it
+    then bounces back to the sender, while the member still logs in and sends."""
+
+    enabled = bool(enabled)
+    check_admin_permission(
+        "enable receiving for members" if enabled else "disable receiving for members", member_id
+    )
+    _set_receiving_enabled("accounts", _require_member_account(member_id), enabled)
+
+
 # --- aliases (accounts, groups and lists alike) ------------------------------------------------------
 
 
@@ -1150,6 +1181,7 @@ def _group_row(group: dict) -> dict:
         "name": group["email"].split("@", 1)[0],
         "email": group["email"],
         "description": group.get("description"),
+        "disable_receiving": bool(group.get("disable_receiving")),
         "quota_gb": flt(group.get("disk_quota_gb")),
         "used_bytes": _bytes_or_none(group.get("used_disk_bytes")),
         "created_at": to_utc_z(group.get("created_at")),
@@ -1186,7 +1218,11 @@ def add_group(
     description: str | None = None,
     members: list | None = None,
     quota_gb: float | None = None,
+    disable_receiving: bool = False,
 ) -> str:
+    """``disable_receiving`` makes a group whose address takes no mail: what is sent to it bounces
+    back to the sender, while its members' own mail is not affected."""
+
     email = f"{name}@{domain}"
     check_admin_permission("add groups", email)
     group = get_client().call(
@@ -1197,7 +1233,13 @@ def add_group(
         # Unset means the Mail Settings default, as for accounts; Suite Cloud's own default is the
         # last resort when that is blank too.
         disk_quota_gb=flt(quota_gb) or flt(get_config("default_disk_quota_gb")) or None,
+        disable_receiving=bool(disable_receiving) or None,
     )
+    if disable_receiving and not group.get("disable_receiving"):
+        # A Suite Cloud older than the option drops it unseen and hands back an ordinary group,
+        # which would take the very mail this one was asked not to receive.
+        get_client().call("mail.groups.delete_group", email=group["email"])
+        frappe.throw(_("Suite Cloud cannot create groups with receiving disabled yet."))
     return group["email"]
 
 
@@ -1211,6 +1253,18 @@ def update_group(group_id: str, description: str | None = None, quota_gb: float 
         changes["disk_quota_gb"] = flt(quota_gb)
     if changes:
         get_client().call("mail.groups.update_group", email=group_id, **changes)
+
+
+@frappe.whitelist(methods=["POST"])
+def set_group_receiving_enabled(group_id: str, enabled: bool) -> None:
+    """Lets the group's address receive mail again, or stops it: mail addressed to it then bounces
+    back to the sender."""
+
+    enabled = bool(enabled)
+    check_admin_permission(
+        "enable receiving for groups" if enabled else "disable receiving for groups", group_id
+    )
+    _set_receiving_enabled("groups", group_id, enabled)
 
 
 @frappe.whitelist(methods=["POST"])
