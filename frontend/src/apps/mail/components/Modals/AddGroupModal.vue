@@ -47,13 +47,15 @@
 						:placeholder="__('Search accounts')"
 					/>
 				</div>
-				<FormControl
+				<hr />
+
+				<Switch
 					v-model="disableReceiving"
-					type="checkbox"
 					:label="__('Disable Receiving')"
 					:description="
 						__('The group cannot receive emails. Mail addressed to it bounces back to the sender.')
 					"
+					class="hover:!bg-surface-base !cursor-default !p-0"
 				/>
 				<ErrorMessage
 					:message="domainsError || (addGroup.error && (addGroup.error?.messages?.[0] || addGroup.error?.message || __('Request failed.')))"
@@ -66,7 +68,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { Dialog, ErrorMessage, FormControl, MultiSelect, createResource } from 'frappe-ui'
+import { Dialog, ErrorMessage, FormControl, MultiSelect, Switch, createResource } from 'frappe-ui'
 
 import { useEnabledDomains } from '@/apps/mail/composables/useEnabledDomains'
 import { raiseToast } from '@/apps/mail/utils'

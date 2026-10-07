@@ -101,16 +101,16 @@
 					<label class="text-ink-gray-5 block text-xs">{{ __('Mailing Lists') }}</label>
 					<MultiSelect v-model="mailingListIds" :options="mailingListOptions" />
 				</div>
-				<FormControl
+				<hr />
+
+				<Switch
 					v-model="accountRequest.disable_receiving"
-					type="checkbox"
 					:label="__('Disable Receiving')"
 					:description="
 						__('The account can send emails but cannot receive them. Mail addressed to it bounces back to the sender.')
 					"
+					class="hover:!bg-surface-base !cursor-default !p-0"
 				/>
-				<hr />
-
 				<Switch
 					v-model="accountRequest.send_invite"
 					:label="__('Send Invite')"
