@@ -19,7 +19,7 @@
         "src/apps/mail/sw.ts",
         "src/apps/sheets/engine/difftest/compare-engines.js",
         "src/apps/sheets/engine/difftest/run.js",
-        "scripts/generate-pwa-splash.mjs"
+        "scripts/generate-pwa-assets.mjs"
       ],
       "project": ["src/**/*.{js,ts,tsx,vue}", "recorder/**/*.{js,ts,tsx,vue}", "scripts/**/*.{js,mjs,cjs,ts}", "*.{js,mjs,cjs,ts}"],
       "ignoreDependencies": ["@workadventure/noise-suppression", "@noble/hashes", "hyperformula"],
@@ -42,7 +42,8 @@
     },
     "suite/meet/sfu-server": {
       "entry": ["src/server/RecordingGrantPersistenceFile.ts"],
-      "project": ["src/**/*.ts", "scripts/**/*.js"]
+      "project": ["src/**/*.ts", "scripts/**/*.js"],
+      "ignoreBinaries": ["ffmpeg"]
     },
     "suite/meet/recorder-server": {
       "entry": ["src/integration/*.integration.ts"],

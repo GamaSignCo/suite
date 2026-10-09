@@ -68,8 +68,15 @@
 				/>
 				<hr />
 
-				<!-- Send Invite, the aliases and the memberships are fixed when the request is created
-				(set_only_once on the doctype), so they are all shown read-only. -->
+				<!-- Disable Receiving, Send Invite, the aliases and the memberships are fixed when the
+				request is created (set_only_once on the doctype), so they are all shown read-only. -->
+				<Switch
+					:model-value="Boolean(accountRequest.doc.disable_receiving)"
+					:label="__('Disable Receiving')"
+					:description="__('The account can send emails but cannot receive them.')"
+					disabled
+					class="hover:!bg-surface-base !cursor-default !p-0"
+				/>
 				<Switch
 					:model-value="Boolean(accountRequest.doc.send_invite)"
 					:label="__('Send Invite')"
@@ -78,7 +85,7 @@
 				/>
 				<template v-if="groupIds.length || mailingListIds.length">
 					<hr />
-					<p class="text-ink-gray-5 text-xs font-medium">{{ __('Membership Details') }}</p>
+					<p class="text-ink-gray-5 text-xs font-medium">{{ __('Account Details') }}</p>
 					<FormControl
 						v-if="groupIds.length"
 						:label="__('Groups')"
@@ -120,6 +127,7 @@ type InviteDoc = {
 	expires_at?: string
 	quota_gb?: number | null
 	send_invite: boolean | 0 | 1
+	disable_receiving?: boolean | 0 | 1
 	is_verified: boolean | 0 | 1
 	groups?: string
 	mailing_lists?: string
@@ -188,8 +196,8 @@ const canSendInvite = computed(
 )
 
 // The account request stores the ids it was created with; the labels come from the live directory.
-const groups = createResource({ url: 'suite.mail.api.admin.get_groups' })
-const mailingLists = createResource({ url: 'suite.mail.api.admin.get_mailing_lists' })
+const groups = createResource({ url: 'suite.mail.api.admin.get_groups', params: { page_length: 500 } })
+const mailingLists = createResource({ url: 'suite.mail.api.admin.get_mailing_lists', params: { page_length: 500 } })
 
 const lines = (value?: string) =>
 	(value || '')
@@ -204,8 +212,8 @@ const labelsFor = (rows: Directory[], ids: string[]) => {
 
 const groupIds = computed(() => lines(accountRequest.value?.doc?.groups))
 const mailingListIds = computed(() => lines(accountRequest.value?.doc?.mailing_lists))
-const groupLabels = computed(() => labelsFor(groups.data || [], groupIds.value))
-const mailingListLabels = computed(() => labelsFor(mailingLists.data || [], mailingListIds.value))
+const groupLabels = computed(() => labelsFor(groups.data?.items || [], groupIds.value))
+const mailingListLabels = computed(() => labelsFor(mailingLists.data?.items || [], mailingListIds.value))
 
 const saveInvite = () => {
 	if (!isEditableInvite.value) return

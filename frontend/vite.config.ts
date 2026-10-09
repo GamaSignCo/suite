@@ -6,7 +6,7 @@ import frappeui from 'frappe-ui/vite'
 import { defineConfig } from 'vite'
 import { VitePWA } from 'vite-plugin-pwa'
 
-// Local frappe-ui work: when the submodule is checked out, bare `frappe-ui`
+// Local frappe-ui work: when the submodule is checked out, public component
 // imports resolve to its source instead of the pinned package, so edits show up
 // without a publish/reinstall. Same wiring as the mail app.
 //
@@ -19,6 +19,7 @@ import { VitePWA } from 'vite-plugin-pwa'
 // pin, components come from the checkout while tokens come from the package. Run
 // `yarn dev:frappe-ui` to point node at the checkout too and keep them in step.
 const frappeUIPath = path.resolve(__dirname, '../frappe-ui/src/index.ts')
+const frappeUIExperimentalPath = path.resolve(__dirname, '../frappe-ui/experimental.ts')
 
 const emitSlidesServiceWorker = () => ({
   name: 'slides-service-worker',
@@ -110,9 +111,10 @@ export default defineConfig(({ mode }) => ({
     // (injectRegister: null).
     // `manifest: false`: the webmanifest is NOT generated here. All seven apps
     // share one HTML shell, so a <link rel="manifest"> injected into <head> at
-    // build time would make drive/calendar/... install as Frappe Mail too. It
-    // lives at public/pwa/mail/ instead and is linked at runtime only
-    // while the route is inside /mail (see router/index.ts setPwaTags).
+    // build time would offer the install from every app, phone layout or not.
+    // It lives at public/pwa/suite/ instead and is linked at runtime only
+    // while the route is inside an installable app (see router/index.ts
+    // setPwaTags).
     VitePWA({
       strategies: 'injectManifest',
       srcDir: 'src/apps/mail',
@@ -139,7 +141,10 @@ export default defineConfig(({ mode }) => ({
         replacement: path.resolve(__dirname, 'tailwind.config.js'),
       },
       ...(fs.existsSync(frappeUIPath)
-        ? [{ find: /^frappe-ui$/, replacement: frappeUIPath }]
+        ? [
+            { find: /^frappe-ui$/, replacement: frappeUIPath },
+            { find: /^frappe-ui\/experimental$/, replacement: frappeUIExperimentalPath },
+          ]
         : []),
     ],
     // Keep single ProseMirror / Yjs / reka-ui / vue singletons across the 7
@@ -186,6 +191,13 @@ export default defineConfig(({ mode }) => ({
   optimizeDeps: {
     include: [
       'debug',
+      // Imported from @iframe-resizer/vue's raw .vue source, which is never pre-bundled, so
+      // left alone Vite resolves it through its `browser` field to a UMD build that has no
+      // default export, and the page fails to load.
+      '@iframe-resizer/core',
+      // Legacy frappe-ui FeatherIcon imports the CommonJS package as a default;
+      // pre-bundle it so Vite provides the interop instead of serving raw CJS as ESM.
+      'feather-icons',
       'frappe-ui > lowlight',
       'yjs',
       'tailwind.config.js',

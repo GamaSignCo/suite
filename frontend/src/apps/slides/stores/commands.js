@@ -139,7 +139,8 @@ const addSlideCommand = ({ slide, index, slideIndex }) => ({
 
 const removeSlideCommand = ({ slide, index, slideIndex }) => ({
 	key: 'removeSlide',
-	jumpToSlideIndex: index - 1,
+	// the jump runs before the removal, so the new last index is one short of the current count
+	jumpToSlideIndex: Math.min(index, slidesLength.value - 2),
 	fromSlideIndex: slideIndex,
 	debug: `Remove slide at index ${index}`,
 	execute(state) {
@@ -209,14 +210,6 @@ const batchCommand = ({
 	focusElementId: focusElementId,
 	skipJumpOnExecute,
 	debug: 'Batch edit',
-	// history pops a burst that folds back to where it started, so the batch
-	// reports the leading command's values as its own
-	get oldValue() {
-		return commands[0]?.oldValue
-	},
-	get newValue() {
-		return commands[0]?.newValue
-	},
 	coalesceWith(incoming) {
 		commands.forEach((c, i) => c.coalesceWith(incoming.commands[i]))
 	},

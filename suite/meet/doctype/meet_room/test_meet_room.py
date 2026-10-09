@@ -1,6 +1,8 @@
 # Copyright (c) 2025, Frappe and Contributors
 # See license.txt
 
+from unittest.mock import patch
+
 import frappe
 from frappe.exceptions import ValidationError
 from frappe.tests import IntegrationTestCase
@@ -117,6 +119,18 @@ class IntegrationTestMeetRoom(IntegrationTestCase):
 
 class TestMeetRoomAPI(FrappeAPITestCase):
     version = "v2"
+
+    @classmethod
+    def setUpClass(cls):
+        get_site_config = frappe.get_site_config
+
+        def request_config(*args, **kwargs):
+            config = frappe._dict(get_site_config(*args, **kwargs))
+            config.maintenance_mode = 0
+            return config
+
+        cls.enterClassContext(patch.object(frappe, "get_site_config", side_effect=request_config))
+        super().setUpClass()
 
     def test_document_method_route(self):
         room = frappe.get_doc({"doctype": "Meet Room", "meeting_type": "open"}).insert()

@@ -8,6 +8,7 @@ import { matchesScreenedValue, raiseOptimisticToast, raiseToast } from '@/apps/m
 import router from '@/apps/mail/router'
 import { userStore } from '@/apps/mail/stores/user'
 import { createSwipeGesture } from '@/apps/mail/utils/swipeGesture'
+import { useRootStore } from '@/stores/root'
 
 import type { ComposeMailData, Identity, ScreenedAddress } from '@/apps/mail/types'
 
@@ -28,7 +29,7 @@ export const useReadingPane = () => {
 }
 
 /**
- * Flipping Split View from the list toolbar. Appearance settings writes the same field behind a
+ * Flipping Split View from the list toolbar. Mail layout settings writes the same field behind a
  * Save button; this one is a layout switch, so it applies on click — the local value flips first
  * and the whole split re-lays out from it, then rolls back if the write doesn't land.
  */
@@ -154,6 +155,40 @@ export const useFolderSheet = () => {
 	return { isFolderSheetOpen, openFolderSheet, closeFolderSheet }
 }
 
+// The search page's address — the one place that knows it is the mailbox route with the virtual
+// 'search' mailbox — for whoever sends someone there: the palette, the results header, the phone.
+export const mailSearchRoute = (accountId: string, query: Record<string, string> = {}) => ({
+	name: 'mail-mailbox',
+	params: { accountId, mailbox: 'search' },
+	query,
+})
+
+export const useMobileSearch = () => {
+	const route = useRoute()
+	const router = useRouter()
+	const store = userStore()
+	const root = useRootStore()
+
+	const isSearchRoute = computed(
+		() => route.name === 'mail-mailbox' && route.params.mailbox === 'search',
+	)
+
+	// Keep the search route behind the palette so browser Back dismisses search and the
+	// route watcher in the tab bar closes the palette.
+	const openSearch = async () => {
+		if (!isSearchRoute.value) await router.push(mailSearchRoute(store.accountId))
+		root.paletteOpen = true
+	}
+
+	// `all_accounts` is the search's scope, not a condition: a route carrying only that has no
+	// search on it.
+	const hasSearchQuery = computed(() =>
+		Object.keys(route.query).some((key) => key !== 'all_accounts'),
+	)
+
+	return { hasSearchQuery, isSearchRoute, openSearch }
+}
+
 // Mobile selection mode — MailboxView owns the selection; the tab bar and FAB
 // (mounted in DefaultLayout) hide behind the contextual action bar while it's on.
 const isMobileSelectionActive = ref(false)
@@ -193,58 +228,6 @@ export const useTextEditorButtons = (dropAlignment: () => boolean = () => false)
 	])
 
 	return { buttons }
-}
-
-/**
- * How much of the on-screen keyboard is covering the layout viewport, as insets for holding a
- * full-screen pane clear of it.
- *
- * iOS leaves the layout viewport full-height when the keyboard opens and slides the visible part
- * around underneath it, so `position: fixed; inset: 0` runs on behind the keyboard and has to be
- * held off it by hand:
- *
- * - `bottom` is the strip the keyboard covers, so a pane ends where the keyboard starts.
- * - `top` is how far iOS has panned to reveal a focused field, so the pane rides that pan instead of
- *   being dragged off the top of the screen.
- *
- * `interactive-widget=resizes-content` (index.html) is supposed to make both of these unnecessary by
- * shrinking the layout viewport itself. It did not, on the iOS this was built against: dropping the
- * `bottom` inset put the toolbar straight back behind the keyboard. Treat these as load-bearing.
- */
-export const useKeyboardInsets = () => {
-	const top = ref(0)
-	const bottom = ref(0)
-	/** The visible height — what's left of the screen once the keyboard has taken its share. */
-	const height = ref(window.innerHeight)
-
-	const update = () => {
-		const viewport = window.visualViewport
-		if (!viewport) return
-
-		height.value = viewport.height
-		top.value = viewport.offsetTop
-		// Against the layout viewport, not innerHeight: innerHeight tracks the visual viewport on iOS,
-		// which would make this always 0 and the fallback a no-op on the browsers that need it.
-		const covered = document.documentElement.clientHeight - viewport.height - viewport.offsetTop
-		bottom.value = Math.max(0, Math.round(covered))
-	}
-
-	onMounted(() => {
-		update()
-		// `resize` is the keyboard opening and closing; `scroll` is iOS panning what's left of the
-		// viewport. Missing the second is what lets a pane drift off the top of the screen.
-		window.visualViewport?.addEventListener('resize', update)
-		window.visualViewport?.addEventListener('scroll', update)
-		window.addEventListener('resize', update)
-	})
-
-	onUnmounted(() => {
-		window.visualViewport?.removeEventListener('resize', update)
-		window.visualViewport?.removeEventListener('scroll', update)
-		window.removeEventListener('resize', update)
-	})
-
-	return { top, bottom, height }
 }
 
 const keyboardOpen = ref(false)
@@ -591,5 +574,12 @@ export const useSettings = () => {
 
 	return { showSettings, settingsTab, openSettings }
 }
+
+const showShortcuts = ref(false)
+
+export const useShortcuts = () => ({
+	showShortcuts,
+	openShortcuts: () => (showShortcuts.value = true),
+})
 
 export const useTheme = () => useSuiteTheme()

@@ -4,11 +4,13 @@ import {
   type NavigationGuardReturn,
   type RouteLocationNormalized,
   type RouteLocationNormalizedLoaded,
+  type RouteRecordNormalized,
   type RouteRecordRaw,
 } from 'vue-router'
 import { createResource } from 'frappe-ui'
 
-import { SUITE_APPS, SUITE_LOGO } from '@/apps/registry'
+import { SUITE_APPS, SUITE_LOGO, isInstallableApp } from '@/apps/registry'
+import { lastAppPrefix, rememberLastApp } from '@/utils/lastApp'
 import { routes as calendarRoutes } from '@/apps/calendar/routes'
 import { routes as driveRoutes } from '@/apps/drive/routes'
 import { routes as mailRoutes } from '@/apps/mail/routes'
@@ -118,6 +120,14 @@ const routes: RouteRecordRaw[] = [
     meta: { isShell: true, title: 'Frappe Suite', favicon: SUITE_FAVICON },
   },
   {
+    // The installed suite's start URL (see public/pwa/suite/manifest.webmanifest):
+    // a launch opens the app the phone was last in, so this is a redirect the
+    // manifest can point at while the target moves. Nothing else links here.
+    path: '/suite/start',
+    name: 'suite-start',
+    redirect: () => lastAppPrefix(),
+  },
+  {
     path: '/suite/setup',
     name: 'suite-setup',
     component: () => import('@/shell/SetupView.vue'),
@@ -218,17 +228,32 @@ router.afterEach((to, from, failure) => {
   setDocumentTitle(to, from)
   setFavicon(to)
   setPwaTags(to)
+  rememberLastApp(to.meta.appId)
   const appId = to.meta.appId
   if (appId) loadedAppRuntimes.get(appId)?.afterEach?.(to)
 })
+
+/**
+ * The view a matched record renders, for asking whether two routes draw the
+ * same one. The resolved component rather than the record: the calendar's
+ * month, week, day and agenda are four records rendering one CalendarView, and
+ * switching between them leaves that component mounted. Records with no
+ * component of their own stand for themselves.
+ */
+function viewOf(record?: RouteRecordNormalized) {
+  return record?.components?.default ?? record
+}
 
 export function setDocumentTitle(
   to: RouteLocationNormalizedLoaded,
   from: RouteLocationNormalizedLoaded,
 ) {
-  // a same-view replace leaves the view mounted, so its usePageMeta title stands
+  // A navigation that leaves the same view mounted leaves its usePageMeta title
+  // standing: the view is not re-created, so nothing would write the real title
+  // back after this reset — the calendar spent the rest of the session called
+  // "Frappe Calendar" after one switch from Month to Week.
   const view = to.matched.at(-1)
-  if (view && view === from.matched.at(-1)) return
+  if (view && viewOf(view) === viewOf(from.matched.at(-1))) return
 
   if (to.meta.title) {
     document.title = to.meta.title
@@ -259,15 +284,26 @@ function getFaviconElement() {
 }
 
 /**
- * Mail is the only installable app in the suite. Since every app is served from
- * the same HTML shell, the manifest and the iOS standalone metas cannot live in
- * index.html — Add to Home Screen from /drive would then install Frappe Mail.
- * They are attached on entering /mail and removed on leaving; both Chrome
+ * The suite installs as one app, Frappe Suite, with a scope of `/` since the
+ * apps sit at `/mail`, `/calendar` and so on with no prefix in common. The
+ * offer is made only inside the apps that have a phone layout (`pwa` in the
+ * registry). Since every app is served from the same HTML shell, the manifest
+ * and the iOS standalone metas cannot live in index.html — Add to Home Screen
+ * from /drive would then install an app that opens to a desktop page. They are
+ * attached on entering an installable app and removed on leaving; both Chrome
  * (beforeinstallprompt) and iOS (which reads <head> at the moment the user taps
- * Add to Home Screen) evaluate them live, so this is enough to scope install to
- * mail. Outside mail the browser falls back to a plain bookmark/shortcut.
+ * Add to Home Screen) evaluate them live, so this is enough to scope the offer.
+ * Elsewhere the browser falls back to a plain bookmark/shortcut.
+ *
+ * The manifest starts at /suite/start, which redirects to the app the phone
+ * was last in (see utils/lastApp.ts), mail until there is one.
+ *
+ * The manifest's id stays `/mail`, the id the mail-only PWA installed under:
+ * Chrome keys an install on it and refreshes the name and icon from the
+ * manifest on launch, so existing installs become Frappe Suite in place rather
+ * than sitting beside a second app.
  */
-const MAIL_PWA_METAS: Array<[name: string, content: string]> = [
+const PWA_METAS: Array<[name: string, content: string]> = [
   ['mobile-web-app-capable', 'yes'],
   ['apple-mobile-web-app-capable', 'yes'],
   // Transparent status bar in iOS standalone: iOS only samples theme-color at
@@ -281,23 +317,23 @@ const MAIL_PWA_METAS: Array<[name: string, content: string]> = [
 let pwaTagsAttached = false
 
 function setPwaTags(to: RouteLocationNormalizedLoaded) {
-  const installable = to.meta.appId === 'mail'
+  const installable = isInstallableApp(to.meta.appId)
   if (installable === pwaTagsAttached) return
   pwaTagsAttached = installable
 
   if (!installable) {
-    document.head.querySelectorAll('[data-pwa-scope="mail"]').forEach((el) => el.remove())
+    document.head.querySelectorAll('[data-pwa-scope="suite"]').forEach((el) => el.remove())
     return
   }
 
   // BASE_URL keeps these resolvable in dev ('/') and prod
   // ('/assets/suite/frontend/') alike; the manifest's own icon srcs are
   // relative to it for the same reason.
-  const assets = `${import.meta.env.BASE_URL}pwa/mail/`
+  const assets = `${import.meta.env.BASE_URL}pwa/suite/`
   appendPwaTag('link', { rel: 'manifest', href: `${assets}manifest.webmanifest` })
   // Without this iOS shows a gray monogram on the home screen.
   appendPwaTag('link', { rel: 'apple-touch-icon', href: `${assets}apple-icon-180.png` })
-  for (const [name, content] of MAIL_PWA_METAS) appendPwaTag('meta', { name, content })
+  for (const [name, content] of PWA_METAS) appendPwaTag('meta', { name, content })
 
   // iOS ignores the manifest when drawing the launch screen — unlike Chrome it
   // composites nothing from name/icon/background_color. It blits an
@@ -305,7 +341,7 @@ function setPwaTags(to: RouteLocationNormalizedLoaded) {
   // a blank screen when none does, so coverage is strictly per device size.
   // pwa-splash-devices.json holds the sizes in CSS px + DPR; the artwork is
   // named in physical px (css x DPR) and is generated from that same file by
-  // scripts/generate-pwa-splash.mjs, so filenames here cannot drift from disk.
+  // scripts/generate-pwa-assets.mjs, so filenames here cannot drift from disk.
   for (const { width: cssWidth, height: cssHeight, dpr } of APPLE_SPLASH_DEVICES) {
     // device-width/height stay in the device's portrait orientation on iOS —
     // they do not swap when it rotates, so both entries share one query and
@@ -330,7 +366,7 @@ function setPwaTags(to: RouteLocationNormalizedLoaded) {
 function appendPwaTag(tag: 'link' | 'meta', attrs: Record<string, string>) {
   const el = document.createElement(tag)
   for (const [key, value] of Object.entries(attrs)) el.setAttribute(key, value)
-  el.dataset.pwaScope = 'mail'
+  el.dataset.pwaScope = 'suite'
   document.head.appendChild(el)
 }
 

@@ -420,8 +420,8 @@ class FileManager:
                 self.conn.delete_object(Bucket=bucket, Key=storage_key(entity.file_url))
             else:
                 full_trash_path = self.site_folder / trash_path
-                if full_trash_path.exists() and full_trash_path.is_dir():
-                    shutil.rmtree(full_trash_path)
+                if full_trash_path.exists():
+                    raise FileExistsError(f"A previous trash copy already exists: {entity.name}")
 
                 full_trash_path.parent.mkdir(exist_ok=True)
                 cur_path = self.get_local_path(entity.file_url)

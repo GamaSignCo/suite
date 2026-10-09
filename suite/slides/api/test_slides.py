@@ -1,6 +1,6 @@
 import frappe
-from frappe.utils import cstr
 from frappe.tests import IntegrationTestCase
+from frappe.utils import cstr
 
 from suite.slides.api.slides import save_slides
 from suite.slides.tests.utils import make_presentation
@@ -76,15 +76,42 @@ class TestSaveSlides(IntegrationTestCase):
 
         self.assertEqual(row_names(self.presentation), before)
 
+    def test_thumbnail_is_not_client_writable(self):
+        self.save([slide("a")])
+        (name,) = row_names(self.presentation)
+        frappe.db.set_value("Slide", name, "thumbnail", "server-owned")
+
+        with self.assertRaises(frappe.ValidationError):
+            self.save([{**slide("a"), "thumbnail": "forged"}])
+
+        self.assertEqual(frappe.db.get_value("Slide", name, "thumbnail"), "server-owned")
+
+    def test_advance_after_round_trips(self):
+        self.save([{**slide("a"), "advance_after": 5}])
+        (name,) = row_names(self.presentation)
+
+        self.assertEqual(frappe.db.get_value("Slide", name, "advance_after"), "5")
+
+        self.save([{**slide("a"), "advance_after": None}])
+        self.assertIsNone(frappe.db.get_value("Slide", name, "advance_after"))
+
+    def test_advance_after_out_of_range_is_refused(self):
+        for value in ("soon", 0, 3601, "1,000", "١٢"):
+            with self.assertRaises(frappe.ValidationError):
+                self.save([{**slide("a"), "advance_after": value}])
+
     def test_returns_the_new_version(self):
         result = self.save([slide("a")])
         self.assertEqual(cstr(result["modified"]), self.modified())
 
-    def test_framework_fields_are_not_editable(self):
+    def test_unknown_fields_are_refused(self):
         self.save([slide("a")])
         (name,) = row_names(self.presentation)
 
-        self.save([{**slide("a"), "name": "forged", "parent": "other", "owner": OTHER_USER}])
+        with self.assertRaises(frappe.ValidationError):
+            self.save([{**slide("a"), "name": "forged", "parent": "other", "owner": OTHER_USER}])
+        with self.assertRaises(frappe.ValidationError):
+            self.save([{**slide("a"), "notes": "harmless"}])
 
         self.assertEqual(row_names(self.presentation), [name])
         self.assertEqual(frappe.db.get_value("Slide", name, "owner"), OWNER)

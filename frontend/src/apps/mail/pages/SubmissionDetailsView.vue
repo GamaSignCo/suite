@@ -232,7 +232,6 @@ const actions = computed(() => {
 		reschedule: () => (showReschedule.value = true),
 		cancelDelivery: () => (showCancel.value = true),
 		sendAgain: () => (showRetry.value = true),
-		tryAgainNow: () => retryNow.submit(),
 		remove: () => dismissMail.submit(),
 	})
 })
@@ -339,16 +338,6 @@ const retryMail = createResource({
 	onError: onActionError,
 })
 
-const retryNow = createResource({
-	url: 'suite.mail.api.scheduled.retry_delivery_now',
-	makeParams: () => ({ account: accountId, id: submissionId }),
-	onSuccess: () => {
-		raiseToast(__('Delivery attempt scheduled.'))
-		submission.reload()
-	},
-	onError: onActionError,
-})
-
 const dismissMail = createResource({
 	url: 'suite.mail.api.scheduled.dismiss_failed_mail',
 	makeParams: () => ({ account: accountId, id: submissionId }),
@@ -396,7 +385,7 @@ const cancelOptions = computed(() => ({
 	message: data.value?.email_deleted
 		? __('Cancel the scheduled delivery?')
 		: __('Cancel the scheduled delivery and move the message back to Drafts?'),
-	icon: { name: 'lucide-alert-triangle', theme: 'amber' },
+	icon: 'lucide-alert-triangle', theme: 'amber',
 	actions: [
 		{
 			label: __('Confirm'),

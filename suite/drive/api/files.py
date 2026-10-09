@@ -701,6 +701,8 @@ def toggle_entity_status(doc, manager: FileManager, locked_owners: set):
     frappe.db.get_value("File", doc.name, "name", for_update=True)
     if not user_has_permission(doc, "write"):
         raise frappe.PermissionError("You do not have permission to remove this file")
+    # A failed document save cannot roll back an earlier disk move.
+    doc.check_permission("write")
     quota_owner = personal_storage_owner(doc.folder)
     if quota_owner and quota_owner not in locked_owners:
         acquire_owner_storage_lock(quota_owner)
@@ -850,11 +852,35 @@ SEARCH_PAGE_LENGTH = 50
 SEARCH_SCAN_WINDOW = 100
 MAX_SEARCH_SCAN_WINDOWS = 10
 
+
+def _add_presentation_thumbnails(rows):
+    names = {
+        row.get("content_docname")
+        for row in rows
+        if row.get("content_doctype") == "Presentation" and row.get("content_docname")
+    }
+    if not names:
+        return rows
+    thumbnails = {
+        row.name: row.thumbnail
+        for row in frappe.get_all(
+            "Presentation",
+            filters={"name": ["in", names]},
+            fields=["name", "thumbnail"],
+        )
+    }
+    for row in rows:
+        if row.get("content_doctype") == "Presentation":
+            row["thumbnail"] = thumbnails.get(row.get("content_docname"))
+    return rows
+
+
 SEARCH_QUERY = """
         SELECT  `tabFile`.name,
                 `tabFile`.file_name,
                 `tabFile`.file_type,
                 `tabFile`.is_folder,
+                `tabFile`.modified,
                 `tabFile`.owner,
                 `tabFile`.attached_to_doctype,
                 `tabFile`.attached_to_name,
@@ -916,10 +942,10 @@ def search(query: str):
                     continue
                 rows.append(row)
                 if len(rows) == SEARCH_PAGE_LENGTH:
-                    return rows
+                    return _add_presentation_thumbnails(rows)
             if len(batch) < SEARCH_SCAN_WINDOW:
                 break
-        return rows
+        return _add_presentation_thumbnails(rows)
     except Exception as e:
         frappe.log_error(frappe.get_traceback(), "Frappe Drive Search Error")
         return {"error": str(e)}

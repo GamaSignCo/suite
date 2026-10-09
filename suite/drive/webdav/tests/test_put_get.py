@@ -429,7 +429,8 @@ class TestWebDAVPut(IntegrationTestCase):
     def test_put_overwrite_promotion_failure_reverts_metadata(self):
         # if the commit-time promotion itself fails, the transaction is
         # already committed — compensation must step the metadata and rollup
-        # back to match the unchanged bytes, and the failure must surface
+        # back to match the unchanged bytes. The failed promotion propagates
+        # after compensation so the caller cannot mistake it for success.
         from unittest.mock import patch
 
         with self.set_user(OWNER):
@@ -553,7 +554,7 @@ class TestWebDAVPut(IntegrationTestCase):
             self.assertRaises(OSError),
         ):
             frappe.db.commit()
-        frappe.db.rollback()  # what dispatch does before answering the 500
+        frappe.db.rollback()  # a later rollback must not erase the durable repair record
 
         record = frappe.db.get_value(
             "Error Log", {"method": self.DRIFT_LOG, "reference_name": target.name}, "error"
@@ -603,7 +604,7 @@ class TestWebDAVPut(IntegrationTestCase):
             self.assertRaises(OSError),
         ):
             frappe.db.commit()
-        frappe.db.rollback()  # what dispatch does before answering the 500
+        frappe.db.rollback()  # a later rollback must not erase the durable repair record
 
         self.assertTrue(
             frappe.db.exists("Error Log", {"method": self.DRIFT_LOG, "reference_name": target.name})
@@ -1658,12 +1659,17 @@ class TestWebDAVPut(IntegrationTestCase):
                 raise RuntimeError
             return real_logger(name, *args, **kwargs)
 
+        def broken_suite_log_error(message, *args, **kwargs):
+            if message == "Failed to run after transaction callback":
+                return
+            raise RuntimeError
+
         err = io.StringIO()
         with (
             patch("os.replace", side_effect=OSError),
             patch.object(put_module, "apply_file_size_delta", side_effect=frappe.QueryTimeoutError),
             patch("frappe.logger", side_effect=broken_drive_logger),
-            patch("frappe.log_error", side_effect=RuntimeError),
+            patch("frappe.log_error", side_effect=broken_suite_log_error),
             patch("frappe.enqueue", side_effect=RuntimeError),
             contextlib.redirect_stderr(err),
             self.assertRaises(OSError),
@@ -1718,9 +1724,9 @@ class TestWebDAVPut(IntegrationTestCase):
         )
 
     def test_put_compensation_double_failure_leaves_durable_trace(self):
-        # when the compensation fails twice, the drift record must survive the
-        # rollback the dispatcher issues after the 500 — an uncommitted Error
-        # Log row would vanish with it, leaving the inconsistency invisible
+        # when the compensation fails twice, the drift record must survive a
+        # later rollback — an uncommitted Error Log row would vanish with it,
+        # leaving the inconsistency invisible
         from unittest.mock import patch
 
         from suite.drive.webdav import put as put_module
@@ -1742,7 +1748,7 @@ class TestWebDAVPut(IntegrationTestCase):
             self.assertRaises(OSError),
         ):
             frappe.db.commit()
-        frappe.db.rollback()  # what dispatch does before answering the 500
+        frappe.db.rollback()  # a later rollback must not erase the durable repair record
 
         self.assertTrue(
             frappe.db.exists("Error Log", {"method": self.DRIFT_LOG, "reference_name": target.name})
@@ -2094,8 +2100,8 @@ class TestWebDAVPutS3(IntegrationTestCase):
         # the rollback reaper must be armed the moment the object exists: a
         # failure between the upload and the commit (here the thumbnail
         # source rename) otherwise strands an unreferenced object forever
-        from unittest.mock import patch
         import os
+        from unittest.mock import patch
 
         rename = os.rename
 

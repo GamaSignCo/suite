@@ -35,7 +35,8 @@
         <div class="sn-identity">
           <Dropdown :options="brandMenuOptions" :offset="16">
             <template #default="{ open }">
-              <div class="sn-app-menu-trigger" aria-label="Open Sheets menu" title="Open Sheets menu">
+			  <Tooltip text="Open Sheets menu">
+              <div class="sn-app-menu-trigger" aria-label="Open Sheets menu">
                 <svg class="sn-app-icon" width="28" height="28" viewBox="0 0 118 118" fill="none" aria-hidden="true">
                   <path d="M93.9278 0H23.1013C10.3428 0 0 10.3428 0 23.1013V93.9278C0 106.686 10.3428 117.029 23.1013 117.029H93.9278C106.686 117.029 117.029 106.686 117.029 93.9278V23.1013C117.029 10.3428 106.686 0 93.9278 0Z" fill="#278F5E"/>
                   <path d="M77.757 25.9364H23.5215V36.437H77.757C80.6447 36.437 83.0073 38.7996 83.0073 41.6873V75.3942C83.0073 78.2818 80.6447 80.6445 77.757 80.6445H39.2724C36.3847 80.6445 34.0221 78.2818 34.0221 75.3942V50.6653H23.5215V75.3942C23.5215 84.0572 30.6094 91.1451 39.2724 91.1451H77.757C86.42 91.1451 93.5079 84.0572 93.5079 75.3942V41.6873C93.5079 33.0243 86.42 25.9364 77.757 25.9364Z" fill="white"/>
@@ -44,6 +45,7 @@
                 </svg>
                 <FeatherIcon :name="open ? 'chevron-up' : 'chevron-down'" class="size-4 text-ink-gray-7" />
               </div>
+			  </Tooltip>
             </template>
           </Dropdown>
           <Breadcrumbs v-if="!isTitleEditing" :items="sheetBreadcrumbs" />
@@ -313,7 +315,9 @@
 
     <!-- Bar 3 · Formula bar -->
     <div class="sn-formula-bar">
-      <span class="sn-cell-ref" :title="`Active cell ${activeCell}`">{{ activeCell }}</span>
+      <Tooltip :text="`Active cell ${activeCell}`">
+        <span class="sn-cell-ref">{{ activeCell }}</span>
+      </Tooltip>
       <span class="sn-fx-label" aria-hidden="true">fx</span>
       <div class="sn-formula-wrap">
         <input
@@ -888,20 +892,6 @@
       @navigate-to="onNavigateTo"
     />
 
-    <!-- Cmd+K command palette -->
-    <CommandPalette v-model:open="showCmdPalette" v-model:query="cmdQuery" @select="onCmdSelect">
-      <CommandPaletteInput placeholder="Search commands" />
-      <CommandPaletteList>
-        <CommandPaletteGroup v-for="group in cmdGroups" :key="group.title" :label="group.title">
-          <CommandPaletteItem v-for="item in group.items" :key="item.name" :value="item">
-            {{ item.title }}
-            <template v-if="item.description" #suffix>{{ item.description }}</template>
-          </CommandPaletteItem>
-        </CommandPaletteGroup>
-      </CommandPaletteList>
-      <CommandPaletteEmpty />
-    </CommandPalette>
-
     <!-- Hyperlink dialog (Ctrl+L) — stores fmt.hyperlink on the active cell -->
     <Dialog v-model:open="showHyperlinkDialog" title="Insert hyperlink" size="sm">
       <template #default>
@@ -1265,7 +1255,8 @@
 </template>
 
 <script setup>
-import { h, ref, reactive, computed, customRef, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { h, ref, reactive, computed, customRef, watch, nextTick, onMounted, onBeforeUnmount, onScopeDispose } from 'vue'
+import { useMediaQuery } from '@vueuse/core'
 import { createGrid }          from '../../canvas/index.js'
 import { COL_HEADER_H, ROW_HEADER_W } from '../../canvas/constants.js'
 import { colLabel, parseCellId, cellId } from '../../utils/cells.js'
@@ -1273,6 +1264,10 @@ import { call } from '../../utils/api.js'
 import { useCurrentUser, useSessionStore } from '@/boot/session'
 import { useAppSwitcher } from '@/composables/useAppSwitcher'
 import { useThemeMenuOption } from '@/composables/useThemeMenuOption'
+import { useRootStore } from '@/stores/root'
+import { confirmLeave } from '@/utils/confirmLeave'
+import { onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
+import { useSettingsMenuOption } from '@/composables/useSettingsMenuOption'
 import { appPageMeta } from '@/utils/documentTitle'
 import { userInitials } from '../../utils/session.js'
 import { parseNumberFmt, buildNumberFmt, applyNumberFmt } from '../../utils/format-number.js'
@@ -1312,7 +1307,6 @@ import { useCollaboration }    from './useCollaboration.js'
 import { useExportImport }     from './useExportImport.js'
 import { useVersionHistory }   from './useVersionHistory.js'
 import { useSplitText }        from './useSplitText.js'
-import { buildCommandGroups }  from './commandPalette.config.js'
 import FindReplace             from './FindReplace.vue'
 import VersionHistory          from './VersionHistory.vue'
 import VersionPreviewBanner    from './VersionPreviewBanner.vue'
@@ -1338,12 +1332,6 @@ import { cellHistory as fetchCellHistory } from '../../services/versions.js'
 import {
    Avatar, Badge, Breadcrumbs, Button, Checkbox, Dialog, Dropdown, FormControl, KeyboardShortcut, KeyboardShortcutsDialog, Spinner, TextInput, Tooltip, usePageMeta } from 'frappe-ui'
 import {
-  CommandPalette,
-  CommandPaletteEmpty,
-  CommandPaletteGroup,
-  CommandPaletteInput,
-  CommandPaletteItem,
-  CommandPaletteList,
   Icon as FeatherIcon,
 } from 'frappe-ui/experimental'
 
@@ -1355,9 +1343,10 @@ const appsMenuOption = useAppSwitcher('sheets', async () => {
   return !saveError.value
 })
 const themeMenuOption = useThemeMenuOption()
+const settingsMenuOption = useSettingsMenuOption()
 const isTitleEditing = ref(false)
 const sheetHomeBreadcrumbs = computed(() => [
-  { label: 'Sheets', href: '/sheets', onClick: flushAndClose },
+  { label: 'Sheets', route: { name: 'sheets-home' } },
 ])
 const sheetBreadcrumbs = computed(() => [
   ...sheetHomeBreadcrumbs.value,
@@ -1371,6 +1360,7 @@ const brandMenuOptions = computed(() => [
   {
     group: '',
     options: [
+      settingsMenuOption,
       themeMenuOption,
       ...(sessionStore.isLoggedIn
         ? [{ label: 'Log out', icon: 'lucide-log-out', onClick: () => sessionStore.logout.submit() }]
@@ -2081,6 +2071,20 @@ const userInitial = computed(() => userInitials(userFullName.value, userEmail.va
 const shareOpen   = ref(false)
 const shareCount  = ref(0)   // explicit share count (excluding owner); updated by ShareDialog
 const aiSettingsOpen = ref(false)
+const unregisterPaletteGroups = useRootStore().registerPaletteGroups('sheets-editor-settings', () => {
+  if (!window.frappe?.boot?.ai_assist_can_configure) return []
+
+  return [{
+    commands: [{
+      id: 'sheets-settings',
+      label: 'AI settings',
+      icon: 'lucide-cpu',
+      keywords: ['AI', 'assist', 'configure'],
+      run: () => (aiSettingsOpen.value = true),
+    }],
+  }]
+})
+onScopeDispose(unregisterPaletteGroups)
 const { exportCSV, exportXLSX, exportPDF, importCSV, importXLSX } = useExportImport({
   getSheet:        () => sheet,
   getCurrentTitle: () => currentTitle.value,
@@ -2555,12 +2559,17 @@ const {
   getGrid: () => grid,
 })
 
-const moreToolbarOptions = buildMoreToolbarOptions({
+// Mirrors the `.sn-tool-extra` media query in this file's <style> block: below
+// this width the inline tool groups are hidden and the "…" menu carries them.
+const toolbarCollapsed = useMediaQuery('(max-width: 1280px)')
+
+const moreToolbarOptions = computed(() => buildMoreToolbarOptions({
   toggleFmt, toggleWrap, toggleFormatPainter, clearFormatting,
   adjustDecimals, openCfDialog, openHyperlinkDialog, toggleMerge,
   toggleSortFilter, applyBorder, zoomBy, resetZoom, openPivotDialog,
   openChartDialog, openNamedRangesDialog, runSmartFill,
-})
+  collapsed: toolbarCollapsed.value,
+}))
 
 // Collaboration — placed here because currentSheet comes from useSheetTabs above.
 const { presentUsers, remoteCursors, broadcastCellChange, broadcastBatchChange, broadcastCursor, drainLocalTouches } =
@@ -3406,7 +3415,6 @@ function _setupEventListeners() {
   // dragging the canvas off-position. Pin it back the instant that happens.
   gridWrapRef.value.addEventListener('scroll', _pinGridWrapScroll, { passive: true })
   window.addEventListener('keydown',      onGlobalKey)
-  window.addEventListener('beforeunload', onBeforeUnloadGuard)
   document.addEventListener('paste',     onDocPaste)
   document.addEventListener('copy',      onDocCopy)
   document.addEventListener('cut',       onDocCut)
@@ -3493,7 +3501,6 @@ onBeforeUnmount(() => {
   if (isDirty.value && !readOnly.value && props.id && props.id !== 'new') {
     saveExisting(props.id, currentTitle.value, { keepalive: true })
   }
-  window.removeEventListener('beforeunload', onBeforeUnloadGuard)
   gridWrapRef.value?.removeEventListener('scroll', _pinGridWrapScroll)
   ro?.disconnect()
   grid?.destroy()
@@ -3508,17 +3515,23 @@ onBeforeUnmount(() => {
 
 // ── Save ──────────────────────────────────────────────────────────────────────
 
-// Browser-level guard (tab close / refresh / cross-app nav). The native
-// "Leave site?" prompt is the only thing that can preempt a unload reliably.
-function onBeforeUnloadGuard(e) {
-  if (!isDirty.value) return
-  e.preventDefault()
-  e.returnValue = ''   // Chrome requires returnValue to show the prompt
-}
-
 let _autoSaveTimer = null
 let _savePromise = null
 let _pendingSaveBatch = null
+
+function hasUnsavedChanges() {
+  return isDirty.value || isSaving.value
+}
+
+const confirmUnsavedNavigation = () => {
+  if (!hasUnsavedChanges() || readOnly.value) return true
+  return confirmLeave()
+}
+onBeforeRouteLeave(confirmUnsavedNavigation)
+onBeforeRouteUpdate((to, from) => {
+  if (to.params.id === from.params.id) return true
+  return confirmUnsavedNavigation()
+})
 
 // Operation queue — populated by _queueOp() at write sites (paste, fill,
 // import, cell edit, etc.).  Flushed after each successful save so each
@@ -3870,11 +3883,6 @@ watch(saveError, (msg) => {
   }, 30_000)
 })
 
-async function flushAndClose() {
-  await flushSave()
-  emit('close')
-}
-
 // Watch for any dirty change → schedule auto-save
 watch(isDirty, (dirty) => { if (dirty) _triggerAutoSave() })
 
@@ -3884,9 +3892,8 @@ watch(showSortFilter, () => { grid?.render?.() })
 
 // Title focus/blur — mark `isDirty` when the value changed during the focus
 // session so `_doAutoSave` doesn't bail on its `!isDirty` guard. Without
-// this, a rename-then-leave flow (no cell edit in between) silently dropped
-// the new title: the 2 s autosave ran but exited early, and `flushAndClose`
-// → `flushSave` did the same. Snapshotting on focus avoids spurious saves
+// this, a rename-then-save flow (no cell edit in between) silently dropped
+// the new title because `flushSave` exited early. Snapshotting on focus avoids spurious saves
 // when the user just clicks into and out of the field without typing.
 let _titleAtFocus = ''
 function startTitleEditing() {
@@ -5875,27 +5882,6 @@ function doUnhideAllCols() {
 }
 
 
-// ── Cmd+K command palette ─────────────────────────────────────────────────────
-// CommandPalette ships its own Cmd+K listener that flips `showCmdPalette`.
-const showCmdPalette = ref(false)
-const cmdQuery       = ref('')
-
-const cmdGroups = computed(() => buildCommandGroups({
-  toggleFmt, setAlign, setValign, adjustDecimals, toggleWrap, clearFormatting,
-  undo, redo, repeatLast, showFindReplace, openFindReplace, showFormulas, repopulateGrid: _repopulateGrid, showShortcutsHelp,
-  contextMenu, getGrid: () => grid,
-  doInsertRow, doDeleteRow, doInsertCol, doDeleteCol,
-  doMoveColLeft, doMoveColRight,
-  doHideRows, doHideCols, doUnhideAllRows, doUnhideAllCols,
-  doAutoFitCol, doAutoFitRow, toggleMerge, addRowsCount, doAddMoreRows,
-  doFreezeRow, doFreezeCol, doUnfreezeRows, doUnfreezeCols, showSortFilter,
-  openPivotDialog,
-  addSheet, currentSheet, openRenameDialog, doDuplicateSheet, doDeleteSheet,
-  onSave, exportCSV, exportXLSX, exportPDF, csvInputRef, xlsxInputRef,
-}))
-
-function onCmdSelect(item) { item?.fn?.() }
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 // Returns { before, after, refs } for cells whose value actually changed.
@@ -6266,15 +6252,20 @@ function toggleShowFormulas() {
   background: #D8F1F6 !important;
 }
 
-/* Toolbar overflow — `.sn-tool-extra` groups stay inline at wide widths;
+/* Toolbar overflow — `.sn-tool-extra` groups stay inline at wide widths and
    collapse below 1280px into the `.sn-tool-more` "…" dropdown. Using
    `display:contents` on the wrappers means the buttons participate in the
-   parent flex layout when shown, with zero visual nesting. */
+   parent flex layout when shown, with zero visual nesting.
+
+   The "…" button itself is shown at every width: it is the only mouse path to
+   the actions that have no toolbar button of their own (pivot table, named
+   ranges, zoom, Smart Fill). `buildMoreToolbarOptions` drops the options that
+   are already inline, so the menu never repeats a visible button — keep its
+   `collapsed` argument in sync with the breakpoint below. */
 .sn-tool-extra { display: contents; }
-.sn-tool-more  { display: none; margin-left: auto; }
+.sn-tool-more  { display: inline-flex; margin-left: auto; }
 @media (max-width: 1280px) {
   .sn-tool-extra { display: none; }
-  .sn-tool-more  { display: inline-flex; }
 }
 
 /* Color-picker trigger buttons (FeatherIcon glyph above a colored underline).

@@ -17,7 +17,7 @@ const socketUrl = () => {
 	const siteName = window.site_name || __SITE_NAME__
 	const socketio_port = window.socketio_port || __SOCKETIO_PORT__
 	const port = window.location.port ? `:${socketio_port}` : ''
-	const protocol = port ? 'http' : 'https'
+	const protocol = window.location.protocol.slice(0, -1)
 	return `${protocol}://${host}${port}/${siteName}`
 }
 
