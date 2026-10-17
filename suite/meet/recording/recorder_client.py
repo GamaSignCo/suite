@@ -20,6 +20,8 @@ COMMAND_TYPE = "meet-recorder-command+jwt"
 PROTOCOL_VERSION = 1
 MAX_RESPONSE_BYTES = 16 * 1024
 TIMEOUT = (2, 5)
+# Chromium startup and capture shutdown can outlast a simple control query.
+COMMAND_TIMEOUTS = {"reserve": (2, 20), "stop": (2, 30)}
 REJECTION_REASONS = {
     "capacity",
     "storage",
@@ -337,7 +339,7 @@ class RecorderClient:
                 self.base_url + path,
                 json=body if method == "POST" else None,
                 headers={"Authorization": f"Bearer {token}"},
-                timeout=TIMEOUT,
+                timeout=COMMAND_TIMEOUTS.get(operation, TIMEOUT),
                 allow_redirects=False,
                 stream=True,
             )

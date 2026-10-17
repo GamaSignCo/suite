@@ -97,8 +97,22 @@ class TestRecorderClient(unittest.TestCase):
         self.assertEqual(claims["policy"], {"recording_allowed": True})
         self.assertEqual(call.kwargs["json"], {"protocol_version": 1, "job": "job"})
         self.assertEqual(claims["operation"], "reserve")
-        self.assertEqual(call.kwargs["timeout"], (2, 5))
+        self.assertEqual(call.kwargs["timeout"], (2, 20))
         self.assertFalse(call.kwargs["allow_redirects"])
+
+    def test_query_keeps_short_timeout(self):
+        self.session.request.return_value = response(500)
+
+        self.client.query(**self.arguments)
+
+        self.assertEqual(self.session.request.call_args.kwargs["timeout"], (2, 5))
+
+    def test_stop_allows_bounded_capture_shutdown(self):
+        self.session.request.return_value = response(500)
+
+        self.client.stop(**self.arguments, operation_id="test-stop")
+
+        self.assertEqual(self.session.request.call_args.kwargs["timeout"], (2, 30))
 
     def test_explicit_rejection_is_bounded(self):
         self.session.request.return_value = response(

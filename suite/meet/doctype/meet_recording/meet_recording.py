@@ -12,7 +12,7 @@ from frappe.utils import cint, get_datetime, get_system_timezone
 ACTIVE_RECORDING_STATUSES = ("Starting", "Recording", "Interrupted", "Stopping")
 TERMINAL_STATUSES = ("Ready", "Partial", "Failed", "Cancelled")
 IMMUTABLE_FIELDS = ("meet_room", "room_owner", "initiated_by", "recorder_job_id", "request_id")
-IMMUTABLE_CONFIGURATION_FIELDS = ("drive_home_folder",)
+IMMUTABLE_CONFIGURATION_FIELDS = ("drive_home_folder", "pending_deadline")
 WRITE_ONCE_FIELDS = (
     "recorder_key_thumbprint",
     "grant_jti",

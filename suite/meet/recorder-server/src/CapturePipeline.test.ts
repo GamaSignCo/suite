@@ -457,6 +457,63 @@ describe('capture pipeline', () => {
 		expect(captured.get().gaps[0]?.reason).toContain('invalid_final_segment');
 	});
 
+	it.each(['invalid video invariant', 'invalid audio invariant'])(
+		'normalizes short timestamp jitter (%s) and validates the result again',
+		async (error) => {
+			const captured = await watcherStore();
+			await writeFile(
+				join(captured.directory, 'epoch-000-segment-000000.ts'),
+				'segment',
+			);
+			let normalized = false;
+			const validate = vi.fn(async (path: string) => {
+				if (path.endsWith('.ts') || normalized) return probe;
+				throw new Error(error);
+			});
+			const normalize = vi.fn(async (_list: string, output: string) => {
+				normalized = true;
+				await writeFile(output, 'normalized');
+			});
+			const tools = {
+				validate,
+				normalize,
+				concat: async (_list: string, output: string) =>
+					writeFile(output, 'copy'),
+			};
+			await new SegmentWatcher(captured, tools, 0).stopAndAdoptFinal();
+
+			expect(await new Finalizer(captured, tools).finalize()).toBe('complete');
+			expect(normalize).toHaveBeenCalledOnce();
+			expect(validate).toHaveBeenCalledTimes(3);
+			expect(
+				await readFile(join(captured.directory, 'recording.mp4'), 'utf8'),
+			).toBe('normalized');
+		},
+	);
+
+	it('still rejects invalid media after normalization', async () => {
+		const captured = await watcherStore();
+		await writeFile(
+			join(captured.directory, 'epoch-000-segment-000000.ts'),
+			'segment',
+		);
+		const normalize = vi.fn(async () => undefined);
+		const tools = {
+			validate: async (path: string) => {
+				if (path.endsWith('.ts')) return probe;
+				throw new Error('invalid video invariant');
+			},
+			normalize,
+			concat: async (_list: string, output: string) =>
+				writeFile(output, 'copy'),
+		};
+		await new SegmentWatcher(captured, tools, 0).stopAndAdoptFinal();
+
+		expect(await new Finalizer(captured, tools).finalize()).toBe('failed');
+		expect(normalize).toHaveBeenCalledOnce();
+		expect(captured.get().artifact).toBeUndefined();
+	});
+
 	it('streams hashing for a large artifact and removes finalization temp files', async () => {
 		const captured = await watcherStore();
 		await writeFile(

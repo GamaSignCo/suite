@@ -5,6 +5,7 @@ import { open, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { CaptureState, MediaProbe, MediaTools } from './captureTypes.js';
+import { logger } from './logger.js';
 import type { ManifestStore } from './ManifestStore.js';
 
 const MIN_ARTIFACT_COMMAND_TIMEOUT_MS = 60_000;
@@ -153,6 +154,17 @@ function validateFfprobeOutput(value: unknown): MediaProbe {
 		!Number.isFinite(videoStart) ||
 		videoStart < 0
 	) {
+		logger.error({
+			event: 'service_error',
+			status: 'invalid_video_profile',
+			reason: JSON.stringify({
+				frameRate,
+				videoStart,
+				width: video.width,
+				height: video.height,
+				profile: video.profile,
+			}),
+		});
 		throw new Error('invalid video invariant');
 	}
 	const audioStart =
@@ -170,6 +182,17 @@ function validateFfprobeOutput(value: unknown): MediaProbe {
 		audioStart < 0 ||
 		Math.abs(videoStart - audioStart) > 0.1
 	) {
+		logger.error({
+			event: 'service_error',
+			status: 'invalid_audio_profile',
+			reason: JSON.stringify({
+				videoStart,
+				audioStart,
+				sampleRate: audio.sample_rate,
+				channels: audio.channels,
+				profile: audio.profile,
+			}),
+		});
 		throw new Error('invalid audio invariant');
 	}
 	const duration =
@@ -259,6 +282,51 @@ export class FfmpegMediaTools implements MediaTools {
 			this.spawner,
 		);
 	}
+	async normalize(
+		list: string,
+		output: string,
+		timeoutMs: number,
+	): Promise<void> {
+		await command(
+			this.ffmpeg,
+			[
+				'-v',
+				'error',
+				'-y',
+				'-protocol_whitelist',
+				'file,concatf',
+				'-i',
+				`concatf:${list}`,
+				'-map',
+				'0:v:0',
+				'-map',
+				'0:a:0',
+				'-vf',
+				'fps=30',
+				'-c:v',
+				'libx264',
+				'-profile:v',
+				'high',
+				'-preset',
+				'veryfast',
+				'-pix_fmt',
+				'yuv420p',
+				'-c:a',
+				'aac',
+				'-af',
+				'aresample=async=1000:first_pts=0',
+				'-ar',
+				'48000',
+				'-ac',
+				'2',
+				'-movflags',
+				'+faststart',
+				output,
+			],
+			timeoutMs,
+			this.spawner,
+		);
+	}
 }
 
 export class Finalizer {
@@ -266,6 +334,11 @@ export class Finalizer {
 		private readonly store: ManifestStore,
 		private readonly tools: MediaTools & {
 			concat(list: string, output: string, timeoutMs?: number): Promise<void>;
+			normalize?(
+				list: string,
+				output: string,
+				timeoutMs: number,
+			): Promise<void>;
 		},
 	) {}
 	async finalize(forcePartial = false, reason?: string): Promise<CaptureState> {
@@ -313,12 +386,30 @@ export class Finalizer {
 				{ mode: 0o600 },
 			);
 			await this.tools.concat(list, temp, concatTimeoutMs);
-			const probe = await this.tools.validate(temp, validationTimeoutMs);
+			let probe: MediaProbe;
+			try {
+				probe = await this.tools.validate(temp, validationTimeoutMs);
+			} catch (error) {
+				// Short X11 captures can retain startup timestamp jitter after stream copy.
+				if (
+					expectedDuration > 60_000 ||
+					!(error instanceof Error) ||
+					!['invalid video invariant', 'invalid audio invariant'].includes(
+						error.message,
+					) ||
+					!this.tools.normalize
+				)
+					throw error;
+				await this.tools.normalize(list, temp, validationTimeoutMs);
+				probe = await this.tools.validate(temp, validationTimeoutMs);
+			}
 			if (
 				Math.abs(probe.duration_ms - expectedDuration) >
 				Math.max(1_000, expectedDuration * 0.05)
 			)
-				throw new Error('artifact duration does not match manifest');
+				throw new Error(
+					`artifact duration does not match manifest (${probe.duration_ms} != ${expectedDuration})`,
+				);
 			const digest = await fileDigest(temp);
 			const handle = await open(temp, 'r');
 			try {
@@ -346,6 +437,15 @@ export class Finalizer {
 			});
 			return state;
 		} catch (error) {
+			logger.error({
+				event: 'service_error',
+				status: 'capture_finalization_failed',
+				job: manifest.job,
+				reason:
+					error instanceof Error
+						? error.message.slice(0, 256)
+						: 'finalization_failed',
+			});
 			await this.store.update((m) => {
 				m.state = 'failed';
 				m.reason =

@@ -292,6 +292,8 @@ export class CaptureWorker {
 					'2',
 					'-i',
 					'recorder.monitor',
+					'-vf',
+					'fps=30,setpts=N/(30*TB)',
 					'-c:v',
 					'libx264',
 					'-preset',

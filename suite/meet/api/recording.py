@@ -278,9 +278,15 @@ def _client() -> RecorderClient:
 
 
 def _limits(recording) -> dict:
+    # The recorder binds commands to the reservation, not the later capture deadline.
+    maximum = (
+        add_to_date(recording.pending_deadline, seconds=MAX_SECONDS)
+        if recording.pending_deadline
+        else recording.max_ends_at
+    )
     return {
         "budget_bytes": recording.budget_bytes,
-        "max_ends_at": _system_datetime_as_utc(recording.max_ends_at)
+        "max_ends_at": _system_datetime_as_utc(maximum)
         .isoformat(timespec="milliseconds")
         .replace("+00:00", "Z"),
         "output": {"width": 1920, "height": 1080, "fps": 30, "video": "h264", "audio": "aac"},

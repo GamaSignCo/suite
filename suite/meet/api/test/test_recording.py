@@ -71,6 +71,7 @@ class IntegrationTestRecordingApi(IntegrationTestCase):
     def test_recorder_limits_use_javascript_compatible_utc_timestamp(self):
         recording = Mock(
             budget_bytes=1,
+            pending_deadline=None,
             max_ends_at=datetime(2026, 8, 1, 12, 30, 45, 123456),
         )
 

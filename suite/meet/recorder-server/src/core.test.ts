@@ -1595,6 +1595,30 @@ describe('JobStore and JobManager', () => {
 		expect(bridge.hasWorker('job')).toBe(false);
 	});
 
+	it('publishes failure after the worker has already cleaned itself up', async () => {
+		const store = new JobStore(path);
+		await store.initialize();
+		const bridge = new FakeRendererBridge();
+		const terminal = vi.fn(async () => undefined);
+		const manager = new JobManager(store, bridge, 1, terminal);
+		await manager.reserve(baseClaims);
+		await bridge.stop('job', 0);
+		const stop = vi
+			.spyOn(bridge, 'stop')
+			.mockImplementation(() => new Promise<void>(() => undefined));
+
+		await bridge.emit({ job: 'job', type: 'failed', reason: 'invalid_media' });
+
+		expect(stop).not.toHaveBeenCalled();
+		await vi.waitFor(() => expect(terminal).toHaveBeenCalledOnce());
+		expect(terminal).toHaveBeenCalledWith(
+			expect.objectContaining({
+				state: 'failed',
+				health_reason: 'invalid_media',
+			}),
+		);
+	});
+
 	it('releases failed capacity for a new reservation', async () => {
 		const store = new JobStore(path);
 		await store.initialize();

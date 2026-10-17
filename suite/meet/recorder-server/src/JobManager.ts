@@ -669,7 +669,9 @@ export class JobManager {
 				healthDelivery = this.scheduleHealth({ ...updated }, this.onStartup);
 		});
 		await healthDelivery;
-		if (cleanup) await this.bridge.stop(job, generation);
+		// A capture worker removes itself before reporting failure from its stop queue.
+		if (cleanup && this.bridge.hasWorker(job))
+			await this.bridge.stop(job, generation);
 		const terminal = this.store.get(job);
 		if (
 			terminal &&

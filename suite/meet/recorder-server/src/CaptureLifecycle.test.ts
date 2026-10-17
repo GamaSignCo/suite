@@ -1123,6 +1123,7 @@ describe('capture lifecycle', () => {
 			args.filter((arg) => arg === '-use_wallclock_as_timestamps'),
 		).toHaveLength(2);
 		expect(args).toContain('aresample=async=1000:first_pts=0');
+		expect(args).toContain('fps=30,setpts=N/(30*TB)');
 		await worker.stop();
 	});
 
