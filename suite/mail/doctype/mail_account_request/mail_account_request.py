@@ -22,7 +22,7 @@ from frappe.utils import (
 
 from suite.mail.directory import account_exists, create_account, delete_account_by_email, get_domains
 from suite.mail.suite_cloud import SuiteCloudUnavailableError
-from suite.mail.utils import get_config, is_jmap_server_configured, log_mail_error
+from suite.mail.utils import is_jmap_server_configured, log_mail_error
 from suite.mail.utils.logger import log_admin_action
 from suite.mail.utils.validation import is_subaddressed_email
 from suite.suite_core.utils import is_suite_cloud_configured
@@ -109,12 +109,9 @@ class MailAccountRequest(Document):
 
     @property
     def _quota_gb(self) -> float | None:
-        """The quota to create the account with: the request's, else Mail Settings' default.
+        """The quota to create the account with; None leaves the mailbox unlimited."""
 
-        Unset in both places, Suite Cloud applies the site's own default.
-        """
-
-        return flt(self.quota_gb) or flt(get_config("default_disk_quota_gb")) or None
+        return flt(self.quota_gb) or None
 
     def before_insert(self) -> None:
         is_suite_cloud_configured(raise_exception=True)

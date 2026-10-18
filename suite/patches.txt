@@ -108,4 +108,5 @@ suite.suite_core.patches.move_blob_store_out_of_private
 suite.suite_core.patches.align_owner_with_user
 suite.suite_core.patches.preserve_existing_erp_desk_access
 suite.suite_core.patches.remove_desk_access_from_suite_roles
+suite.suite_core.patches.rename_suite_cloud_credentials
 suite.drive.patches.webdav_property_index
