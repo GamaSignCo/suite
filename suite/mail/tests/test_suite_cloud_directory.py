@@ -12,7 +12,7 @@ from frappe.tests import IntegrationTestCase
 
 from suite.mail import directory
 from suite.mail.api import admin
-from suite.mail.suite_cloud import SuiteCloudClient, SuiteCloudUnavailableError, is_suite_cloud_configured
+from suite.mail.suite_cloud import SuiteCloudUnavailableError, is_suite_cloud_configured
 from suite.mail.tests.fake_suite_cloud import FakeSuiteCloud, fake_suite_cloud
 
 DOMAIN = "acme.test"

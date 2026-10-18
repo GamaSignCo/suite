@@ -9,7 +9,6 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils import (
     add_to_date,
-    cint,
     flt,
     get_datetime,
     get_url,
